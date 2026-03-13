@@ -36,6 +36,7 @@ class DatasetKind(str, Enum):
     SOLUTION_NMR_WEIGHTS = "solution_nmr_weights"
     SOLUTION_NMR_MONOMER_SECONDARY = "solution_nmr_monomer_secondary"
     SOLUTION_NMR_MONOMER_PRECISION = "solution_nmr_monomer_precision"
+    SOLUTION_NMR_MONOMER_QUALITY = "solution_nmr_monomer_quality"
 
 
 @dataclass(frozen=True)
@@ -95,6 +96,15 @@ class SolutionNMRMonomerPrecisionRecord:
     n_models: int
     n_ca_core: int
     mean_rmsd_angstrom: float
+
+
+@dataclass(frozen=True)
+class SolutionNMRMonomerQualityRecord:
+    entry_id: str
+    year: int
+    clashscore: float
+    ramachandran_outliers_percent: float
+    sidechain_outliers_percent: float
 
 
 def chunked(items: list[str], size: int) -> Iterator[list[str]]:
@@ -477,6 +487,87 @@ class RCSBClient:
             )
         return records
 
+    def fetch_solution_nmr_monomer_quality_records_for_ids(
+        self, entry_ids: list[str]
+    ) -> list[SolutionNMRMonomerQualityRecord]:
+        query = """
+        query($ids:[String!]!) {
+          entries(entry_ids:$ids) {
+            rcsb_id
+            rcsb_entry_info {
+              deposited_model_count
+            }
+            rcsb_accession_info {
+              deposit_date
+            }
+            pdbx_vrpt_summary_geometry {
+              clashscore
+              percent_ramachandran_outliers
+              percent_rotamer_outliers
+            }
+            polymer_entities {
+              entity_poly {
+                type
+                rcsb_entity_polymer_type
+                pdbx_strand_id
+              }
+            }
+          }
+        }
+        """
+        payload = {"query": query, "variables": {"ids": entry_ids}}
+        data = self._post_json(self.config.graphql_url, payload)
+        entries = data.get("data", {}).get("entries", [])
+        records: list[SolutionNMRMonomerQualityRecord] = []
+
+        for entry in entries:
+            if not entry:
+                continue
+            entry_id = entry.get("rcsb_id")
+            if not entry_id:
+                continue
+
+            model_count = entry.get("rcsb_entry_info", {}).get("deposited_model_count")
+            if model_count is None or int(model_count) <= 1:
+                continue
+
+            year = extract_year(entry.get("rcsb_accession_info", {}).get("deposit_date"))
+            if year is None:
+                continue
+
+            polymer_entities = entry.get("polymer_entities") or []
+            if len(polymer_entities) != 1:
+                continue
+            entity_poly = (polymer_entities[0] or {}).get("entity_poly") or {}
+            if entity_poly.get("type") not in {"polypeptide(L)", "polypeptide(D)"}:
+                continue
+            if entity_poly.get("rcsb_entity_polymer_type") != "Protein":
+                continue
+            strand_id = str(entity_poly.get("pdbx_strand_id") or "").strip()
+            if not strand_id or "," in strand_id:
+                continue
+
+            quality_items = entry.get("pdbx_vrpt_summary_geometry") or []
+            if not quality_items:
+                continue
+            quality = quality_items[0] or {}
+            clashscore = quality.get("clashscore")
+            rama = quality.get("percent_ramachandran_outliers")
+            rotamer = quality.get("percent_rotamer_outliers")
+            if clashscore is None or rama is None or rotamer is None:
+                continue
+
+            records.append(
+                SolutionNMRMonomerQualityRecord(
+                    entry_id=entry_id,
+                    year=year,
+                    clashscore=float(clashscore),
+                    ramachandran_outliers_percent=float(rama),
+                    sidechain_outliers_percent=float(rotamer),
+                )
+            )
+        return records
+
 
 class PDBMethodYearlyCollector:
     def __init__(self, client: RCSBClient, config: CollectorConfig) -> None:
@@ -829,6 +920,41 @@ class SolutionNMRMonomerPrecisionCollector:
         return sorted(precision_records, key=lambda r: (r.year, r.entry_id))
 
 
+class SolutionNMRMonomerQualityCollector:
+    def __init__(self, client: RCSBClient, config: CollectorConfig) -> None:
+        self.client = client
+        self.config = config
+
+    def collect(self) -> list[SolutionNMRMonomerQualityRecord]:
+        entry_ids = sorted(
+            set(
+                self.client.fetch_entry_ids_for_method(
+                    method_label="SOLUTION NMR", query_value="SOLUTION NMR"
+                )
+            )
+        )
+        LOGGER.info("SOLUTION NMR quality: total unique IDs collected: %d", len(entry_ids))
+        batches = list(chunked(entry_ids, self.config.graphql_batch_size))
+        records: list[SolutionNMRMonomerQualityRecord] = []
+
+        with ThreadPoolExecutor(max_workers=self.config.max_workers) as executor:
+            future_map = {
+                executor.submit(
+                    self.client.fetch_solution_nmr_monomer_quality_records_for_ids, batch
+                ): idx
+                for idx, batch in enumerate(batches, start=1)
+            }
+            for future in as_completed(future_map):
+                records.extend(future.result())
+                batch_idx = future_map[future]
+                LOGGER.info(
+                    "SOLUTION NMR quality: processed batch %d/%d",
+                    batch_idx,
+                    len(batches),
+                )
+        return sorted(records, key=lambda r: (r.year, r.entry_id))
+
+
 def write_method_counts_csv(
     records: list[YearlyCountRecord], output_path: Path
 ) -> None:
@@ -941,6 +1067,33 @@ def write_solution_nmr_monomer_precision_csv(
         )
 
 
+def write_solution_nmr_monomer_quality_csv(
+    records: list[SolutionNMRMonomerQualityRecord], output_path: Path
+) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w", newline="", encoding="utf-8") as csvfile:
+        writer = csv.writer(csvfile)
+        writer.writerow(
+            [
+                "entry_id",
+                "year",
+                "clashscore",
+                "ramachandran_outliers_percent",
+                "sidechain_outliers_percent",
+            ]
+        )
+        writer.writerows(
+            (
+                r.entry_id,
+                r.year,
+                f"{r.clashscore:.4f}",
+                f"{r.ramachandran_outliers_percent:.4f}",
+                f"{r.sidechain_outliers_percent:.4f}",
+            )
+            for r in records
+        )
+
+
 def parse_dataset_kinds(raw_value: str) -> list[DatasetKind]:
     if raw_value.strip().lower() == "all":
         return [
@@ -948,6 +1101,7 @@ def parse_dataset_kinds(raw_value: str) -> list[DatasetKind]:
             DatasetKind.SOLUTION_NMR_WEIGHTS,
             DatasetKind.SOLUTION_NMR_MONOMER_SECONDARY,
             DatasetKind.SOLUTION_NMR_MONOMER_PRECISION,
+            DatasetKind.SOLUTION_NMR_MONOMER_QUALITY,
         ]
     raw_items = [item.strip() for item in raw_value.split(",") if item.strip()]
     selected: list[DatasetKind] = []
@@ -1002,6 +1156,12 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("data/solution_nmr_monomer_precision.csv"),
         help="Output CSV path for solution_nmr_monomer_precision dataset.",
+    )
+    parser.add_argument(
+        "--solution-nmr-monomer-quality-output",
+        type=Path,
+        default=Path("data/solution_nmr_monomer_quality_metrics.csv"),
+        help="Output CSV path for solution_nmr_monomer_quality dataset.",
     )
     parser.add_argument(
         "--precision-cache-dir",
@@ -1129,6 +1289,20 @@ def main() -> None:
             len(combined_records),
             args.solution_nmr_monomer_precision_output,
             len(new_records),
+        )
+
+    if DatasetKind.SOLUTION_NMR_MONOMER_QUALITY in args.datasets:
+        quality_collector = SolutionNMRMonomerQualityCollector(
+            client=client, config=config
+        )
+        quality_records = quality_collector.collect()
+        write_solution_nmr_monomer_quality_csv(
+            records=quality_records, output_path=args.solution_nmr_monomer_quality_output
+        )
+        LOGGER.info(
+            "Saved %d records to %s",
+            len(quality_records),
+            args.solution_nmr_monomer_quality_output,
         )
 
 

@@ -21,6 +21,7 @@ class PlotKind(str, Enum):
     )
     SOLUTION_NMR_MONOMER_SECONDARY = "solution_nmr_monomer_secondary"
     SOLUTION_NMR_MONOMER_PRECISION = "solution_nmr_monomer_precision"
+    SOLUTION_NMR_MONOMER_QUALITY = "solution_nmr_monomer_quality"
 
 
 @dataclass(frozen=True)
@@ -56,6 +57,18 @@ class PlotConfig:
         "SOLUTION NMR Monomeric Proteins: Mean Ensemble RMSD by Year"
     )
     nmr_monomer_precision_y_label: str = "Mean RMSD to average structure (Å)"
+    nmr_monomer_quality_clash_title: str = (
+        "SOLUTION NMR Monomeric Proteins: Mean Clashscore by Year"
+    )
+    nmr_monomer_quality_clash_y_label: str = "Mean clashscore"
+    nmr_monomer_quality_rama_title: str = (
+        "SOLUTION NMR Monomeric Proteins: Mean Ramachandran Outliers by Year"
+    )
+    nmr_monomer_quality_rama_y_label: str = "Mean Ramachandran outliers (%)"
+    nmr_monomer_quality_side_title: str = (
+        "SOLUTION NMR Monomeric Proteins: Mean Sidechain Outliers by Year"
+    )
+    nmr_monomer_quality_side_y_label: str = "Mean sidechain outliers (%)"
     xray_color: str = "#1f77b4"
     cryoem_color: str = "#d62728"
     nmr_color: str = "#2ca02c"
@@ -79,6 +92,7 @@ def parse_plot_kinds(raw_value: str) -> list[PlotKind]:
             PlotKind.SOLUTION_NMR_PERIOD_AREA_CUMULATIVE_SHARE,
             PlotKind.SOLUTION_NMR_MONOMER_SECONDARY,
             PlotKind.SOLUTION_NMR_MONOMER_PRECISION,
+            PlotKind.SOLUTION_NMR_MONOMER_QUALITY,
         ]
     raw_items = [item.strip() for item in raw_value.split(",") if item.strip()]
     selected: list[PlotKind] = []
@@ -571,6 +585,82 @@ class PDBScientificPlotter:
         fig.savefig(output_svg)
         plt.close(fig)
 
+    @staticmethod
+    def _prepare_monomer_quality_table(df: pd.DataFrame) -> pd.DataFrame:
+        required_columns = {
+            "entry_id",
+            "year",
+            "clashscore",
+            "ramachandran_outliers_percent",
+            "sidechain_outliers_percent",
+        }
+        missing = required_columns - set(df.columns)
+        if missing:
+            raise ValueError(
+                f"Monomer quality CSV is missing required columns: {', '.join(sorted(missing))}"
+            )
+        prepared = df.copy()
+        prepared["year"] = prepared["year"].astype(int)
+        prepared["clashscore"] = prepared["clashscore"].astype(float)
+        prepared["ramachandran_outliers_percent"] = prepared[
+            "ramachandran_outliers_percent"
+        ].astype(float)
+        prepared["sidechain_outliers_percent"] = prepared[
+            "sidechain_outliers_percent"
+        ].astype(float)
+        return prepared
+
+    def plot_solution_nmr_monomer_quality(
+        self,
+        data_path: Path,
+        clash_output_png: Path,
+        clash_output_svg: Path,
+        rama_output_png: Path,
+        rama_output_svg: Path,
+        side_output_png: Path,
+        side_output_svg: Path,
+    ) -> None:
+        table = self._prepare_monomer_quality_table(pd.read_csv(data_path))
+        self._scientific_style()
+        yearly = table.groupby("year", as_index=True).mean(numeric_only=True).sort_index()
+
+        self._render_figure(
+            clash_output_png,
+            clash_output_svg,
+            self.config.nmr_monomer_quality_clash_title,
+            self.config.nmr_monomer_quality_clash_y_label,
+            lambda ax: ax.plot(
+                yearly.index,
+                yearly["clashscore"],
+                linewidth=2.2,
+                color="#8c564b",
+            ),
+        )
+        self._render_figure(
+            rama_output_png,
+            rama_output_svg,
+            self.config.nmr_monomer_quality_rama_title,
+            self.config.nmr_monomer_quality_rama_y_label,
+            lambda ax: ax.plot(
+                yearly.index,
+                yearly["ramachandran_outliers_percent"],
+                linewidth=2.2,
+                color="#1f77b4",
+            ),
+        )
+        self._render_figure(
+            side_output_png,
+            side_output_svg,
+            self.config.nmr_monomer_quality_side_title,
+            self.config.nmr_monomer_quality_side_y_label,
+            lambda ax: ax.plot(
+                yearly.index,
+                yearly["sidechain_outliers_percent"],
+                linewidth=2.2,
+                color="#ff7f0e",
+            ),
+        )
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -588,8 +678,9 @@ def parse_args() -> argparse.Namespace:
             PlotKind.SOLUTION_NMR_PERIOD_AREA_CUMULATIVE_SHARE,
             PlotKind.SOLUTION_NMR_MONOMER_SECONDARY,
             PlotKind.SOLUTION_NMR_MONOMER_PRECISION,
+            PlotKind.SOLUTION_NMR_MONOMER_QUALITY,
         ],
-        help="Comma-separated plot kinds or 'all'. Available: method_counts, solution_nmr_weight_stats, solution_nmr_period_boxplot, solution_nmr_period_area, solution_nmr_period_area_share, solution_nmr_period_area_cumulative_share, solution_nmr_monomer_secondary, solution_nmr_monomer_precision (default: all).",
+        help="Comma-separated plot kinds or 'all'. Available: method_counts, solution_nmr_weight_stats, solution_nmr_period_boxplot, solution_nmr_period_area, solution_nmr_period_area_share, solution_nmr_period_area_cumulative_share, solution_nmr_monomer_secondary, solution_nmr_monomer_precision, solution_nmr_monomer_quality (default: all).",
     )
     parser.add_argument(
         "--counts-input",
@@ -614,6 +705,12 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("data/solution_nmr_monomer_precision.csv"),
         help="Input CSV for SOLUTION NMR monomer precision (RMSD) plot.",
+    )
+    parser.add_argument(
+        "--nmr-monomer-quality-input",
+        type=Path,
+        default=Path("data/solution_nmr_monomer_quality_metrics.csv"),
+        help="Input CSV for SOLUTION NMR monomer quality-metrics plots.",
     )
 
     parser.add_argument(
@@ -754,6 +851,46 @@ def parse_args() -> argparse.Namespace:
         default=Path("figures/solution_nmr_monomer_precision_rmsd_by_year.svg"),
         help="Output SVG for SOLUTION NMR monomer precision (RMSD) plot.",
     )
+    parser.add_argument(
+        "--nmr-monomer-quality-clash-output-png",
+        type=Path,
+        default=Path("figures/solution_nmr_monomer_quality_clashscore_by_year.png"),
+        help="Output PNG for monomer quality clashscore plot.",
+    )
+    parser.add_argument(
+        "--nmr-monomer-quality-clash-output-svg",
+        type=Path,
+        default=Path("figures/solution_nmr_monomer_quality_clashscore_by_year.svg"),
+        help="Output SVG for monomer quality clashscore plot.",
+    )
+    parser.add_argument(
+        "--nmr-monomer-quality-rama-output-png",
+        type=Path,
+        default=Path(
+            "figures/solution_nmr_monomer_quality_ramachandran_outliers_by_year.png"
+        ),
+        help="Output PNG for monomer quality Ramachandran-outliers plot.",
+    )
+    parser.add_argument(
+        "--nmr-monomer-quality-rama-output-svg",
+        type=Path,
+        default=Path(
+            "figures/solution_nmr_monomer_quality_ramachandran_outliers_by_year.svg"
+        ),
+        help="Output SVG for monomer quality Ramachandran-outliers plot.",
+    )
+    parser.add_argument(
+        "--nmr-monomer-quality-side-output-png",
+        type=Path,
+        default=Path("figures/solution_nmr_monomer_quality_sidechain_outliers_by_year.png"),
+        help="Output PNG for monomer quality sidechain-outliers plot.",
+    )
+    parser.add_argument(
+        "--nmr-monomer-quality-side-output-svg",
+        type=Path,
+        default=Path("figures/solution_nmr_monomer_quality_sidechain_outliers_by_year.svg"),
+        help="Output SVG for monomer quality sidechain-outliers plot.",
+    )
 
     return parser.parse_args()
 
@@ -822,6 +959,17 @@ def main() -> None:
             data_path=args.nmr_monomer_precision_input,
             output_png=args.nmr_monomer_precision_output_png,
             output_svg=args.nmr_monomer_precision_output_svg,
+        )
+
+    if PlotKind.SOLUTION_NMR_MONOMER_QUALITY in args.plots:
+        plotter.plot_solution_nmr_monomer_quality(
+            data_path=args.nmr_monomer_quality_input,
+            clash_output_png=args.nmr_monomer_quality_clash_output_png,
+            clash_output_svg=args.nmr_monomer_quality_clash_output_svg,
+            rama_output_png=args.nmr_monomer_quality_rama_output_png,
+            rama_output_svg=args.nmr_monomer_quality_rama_output_svg,
+            side_output_png=args.nmr_monomer_quality_side_output_png,
+            side_output_svg=args.nmr_monomer_quality_side_output_svg,
         )
 
 
