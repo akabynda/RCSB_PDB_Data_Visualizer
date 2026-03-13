@@ -34,6 +34,7 @@ class ExperimentalMethod(Enum):
 
 class DatasetKind(str, Enum):
     METHOD_COUNTS = "method_counts"
+    MEMBRANE_PROTEIN_COUNTS = "membrane_protein_counts"
     SOLUTION_NMR_WEIGHTS = "solution_nmr_weights"
     SOLUTION_NMR_MONOMER_SECONDARY = "solution_nmr_monomer_secondary"
     SOLUTION_NMR_MONOMER_PRECISION = "solution_nmr_monomer_precision"
@@ -58,6 +59,12 @@ class CollectorConfig:
 class YearlyCountRecord:
     year: int
     method: str
+    count: int
+
+
+@dataclass(frozen=True)
+class MembraneYearlyCountRecord:
+    year: int
     count: int
 
 
@@ -243,6 +250,9 @@ def kabsch_rmsd(reference: np.ndarray, mobile: np.ndarray) -> float:
     return float(np.sqrt((diff * diff).sum() / reference.shape[0]))
 
 
+MEMBRANE_ANNOTATION_TYPES: tuple[str, ...] = ("OPM", "PDBTM", "MemProtMD", "mpstruc")
+
+
 class RCSBClient:
     def __init__(self, config: CollectorConfig) -> None:
         self.config = config
@@ -308,6 +318,45 @@ class RCSBClient:
                 "%s (%s): fetched %d/%d entry IDs",
                 method_label,
                 query_value,
+                len(all_ids),
+                total_count,
+            )
+        return all_ids
+
+    def fetch_entry_ids_for_membrane_annotations(
+        self, annotation_types: tuple[str, ...]
+    ) -> list[str]:
+        all_ids: list[str] = []
+        start = 0
+        total_count: int | None = None
+
+        while total_count is None or start < total_count:
+            payload = {
+                "query": {
+                    "type": "terminal",
+                    "service": "text",
+                    "parameters": {
+                        "attribute": "rcsb_polymer_entity_annotation.type",
+                        "operator": "in",
+                        "value": list(annotation_types),
+                    },
+                },
+                "return_type": "entry",
+                "request_options": {
+                    "paginate": {"start": start, "rows": self.config.page_size}
+                },
+            }
+            data = self._post_json(self.config.search_url, payload)
+            total_count = data.get("total_count", 0)
+            result_set = data.get("result_set", [])
+            ids = [item["identifier"] for item in result_set if "identifier" in item]
+            all_ids.extend(ids)
+            start += len(ids)
+            if not ids:
+                break
+            LOGGER.info(
+                "Membrane proteins (%s): fetched %d/%d entry IDs",
+                ",".join(annotation_types),
                 len(all_ids),
                 total_count,
             )
@@ -1121,6 +1170,47 @@ class PDBMethodYearlyCollector:
         return sorted(records, key=lambda record: (record.year, record.method))
 
 
+class MembraneProteinYearlyCollector:
+    def __init__(self, client: RCSBClient, config: CollectorConfig) -> None:
+        self.client = client
+        self.config = config
+
+    def collect(self) -> list[MembraneYearlyCountRecord]:
+        entry_ids = sorted(
+            set(
+                self.client.fetch_entry_ids_for_membrane_annotations(
+                    MEMBRANE_ANNOTATION_TYPES
+                )
+            )
+        )
+        LOGGER.info("Membrane proteins: total unique IDs collected: %d", len(entry_ids))
+        year_counter: Counter[int] = Counter()
+
+        batches = list(chunked(entry_ids, self.config.graphql_batch_size))
+        with ThreadPoolExecutor(max_workers=self.config.max_workers) as executor:
+            future_map = {
+                executor.submit(self.client.fetch_deposit_dates_for_ids, batch): idx
+                for idx, batch in enumerate(batches, start=1)
+            }
+            for future in as_completed(future_map):
+                batch_dates = future.result()
+                years = filter(
+                    None, (extract_year(date_value) for date_value in batch_dates)
+                )
+                year_counter.update(years)
+                batch_idx = future_map[future]
+                LOGGER.info(
+                    "Membrane proteins: processed batch %d/%d",
+                    batch_idx,
+                    len(batches),
+                )
+
+        return [
+            MembraneYearlyCountRecord(year=year, count=count)
+            for year, count in sorted(year_counter.items())
+        ]
+
+
 class SolutionNMRWeightCollector:
     def __init__(self, client: RCSBClient, config: CollectorConfig) -> None:
         self.client = client
@@ -1829,6 +1919,16 @@ def write_method_counts_csv(
         writer.writerows((r.year, r.method, r.count) for r in records)
 
 
+def write_membrane_counts_csv(
+    records: list[MembraneYearlyCountRecord], output_path: Path
+) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w", newline="", encoding="utf-8") as csvfile:
+        writer = csv.writer(csvfile)
+        writer.writerow(["year", "count"])
+        writer.writerows((r.year, r.count) for r in records)
+
+
 def write_solution_nmr_weights_csv(
     records: list[SolutionNMRWeightRecord], output_path: Path
 ) -> None:
@@ -2051,6 +2151,7 @@ def parse_dataset_kinds(raw_value: str) -> list[DatasetKind]:
     if raw_value.strip().lower() == "all":
         return [
             DatasetKind.METHOD_COUNTS,
+            DatasetKind.MEMBRANE_PROTEIN_COUNTS,
             DatasetKind.SOLUTION_NMR_WEIGHTS,
             DatasetKind.SOLUTION_NMR_MONOMER_SECONDARY,
             DatasetKind.SOLUTION_NMR_MONOMER_PRECISION,
@@ -2086,13 +2187,19 @@ def parse_args() -> argparse.Namespace:
             DatasetKind.SOLUTION_NMR_MONOMER_SECONDARY,
         ],
         help="Comma-separated dataset kinds or 'all'. "
-        "Available: method_counts, solution_nmr_weights, solution_nmr_monomer_secondary, solution_nmr_monomer_precision, solution_nmr_monomer_quality, solution_nmr_monomer_xray_homologs, solution_nmr_monomer_xray_rmsd (default: the first three).",
+        "Available: method_counts, membrane_protein_counts, solution_nmr_weights, solution_nmr_monomer_secondary, solution_nmr_monomer_precision, solution_nmr_monomer_quality, solution_nmr_monomer_xray_homologs, solution_nmr_monomer_xray_rmsd (default: the first three).",
     )
     parser.add_argument(
         "--counts-output",
         type=Path,
         default=Path("data/pdb_method_counts_by_year.csv"),
         help="Output CSV path for method_counts dataset.",
+    )
+    parser.add_argument(
+        "--membrane-counts-output",
+        type=Path,
+        default=Path("data/membrane_protein_counts_by_year.csv"),
+        help="Output CSV path for membrane_protein_counts dataset.",
     )
     parser.add_argument(
         "--solution-nmr-output",
@@ -2228,6 +2335,18 @@ def main() -> None:
         )
         write_method_counts_csv(records=method_records, output_path=args.counts_output)
         LOGGER.info("Saved %d records to %s", len(method_records), args.counts_output)
+
+    if DatasetKind.MEMBRANE_PROTEIN_COUNTS in args.datasets:
+        membrane_collector = MembraneProteinYearlyCollector(client=client, config=config)
+        membrane_records = membrane_collector.collect()
+        write_membrane_counts_csv(
+            records=membrane_records, output_path=args.membrane_counts_output
+        )
+        LOGGER.info(
+            "Saved %d records to %s",
+            len(membrane_records),
+            args.membrane_counts_output,
+        )
 
     if DatasetKind.SOLUTION_NMR_WEIGHTS in args.datasets:
         nmr_weight_collector = SolutionNMRWeightCollector(client=client, config=config)

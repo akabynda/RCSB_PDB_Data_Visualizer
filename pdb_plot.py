@@ -12,6 +12,7 @@ import pandas as pd
 
 class PlotKind(str, Enum):
     METHOD_COUNTS = "method_counts"
+    MEMBRANE_PROTEIN_COUNTS = "membrane_protein_counts"
     SOLUTION_NMR_WEIGHT_STATS = "solution_nmr_weight_stats"
     SOLUTION_NMR_PERIOD_BOXPLOT = "solution_nmr_period_boxplot"
     SOLUTION_NMR_PERIOD_AREA = "solution_nmr_period_area"
@@ -34,6 +35,14 @@ class PlotConfig:
     x_label: str = "Deposition year"
     annual_title: str = "Annual Number of PDB Structures by Experimental Method"
     annual_y_label: str = "Number of deposited structures"
+    membrane_annual_title: str = "Annual Number of Membrane Protein Structures in PDB"
+    membrane_annual_y_label: str = "Number of deposited membrane protein structures"
+    membrane_cumulative_title: str = (
+        "Cumulative Number of Membrane Protein Structures in PDB"
+    )
+    membrane_cumulative_y_label: str = (
+        "Cumulative number of deposited membrane protein structures"
+    )
     cumulative_title: str = "Cumulative Number of PDB Structures by Experimental Method"
     cumulative_y_label: str = "Cumulative number of deposited structures"
     nmr_avg_title: str = "SOLUTION NMR: Mean Structure Molecular Weight by Year"
@@ -104,6 +113,7 @@ def parse_plot_kinds(raw_value: str) -> list[PlotKind]:
     if raw_value.strip().lower() == "all":
         return [
             PlotKind.METHOD_COUNTS,
+            PlotKind.MEMBRANE_PROTEIN_COUNTS,
             PlotKind.SOLUTION_NMR_WEIGHT_STATS,
             PlotKind.SOLUTION_NMR_PERIOD_BOXPLOT,
             PlotKind.SOLUTION_NMR_PERIOD_AREA,
@@ -189,6 +199,19 @@ class PDBScientificPlotter:
             .sort_index()
             .astype(int)
         )
+
+    @staticmethod
+    def _prepare_membrane_count_table(df: pd.DataFrame) -> pd.DataFrame:
+        required_columns = {"year", "count"}
+        missing = required_columns - set(df.columns)
+        if missing:
+            raise ValueError(
+                f"Membrane count CSV is missing required columns: {', '.join(sorted(missing))}"
+            )
+        prepared = df.copy()
+        prepared["year"] = prepared["year"].astype(int)
+        prepared["count"] = prepared["count"].astype(int)
+        return prepared.sort_values("year")
 
     @staticmethod
     def _prepare_nmr_weight_table(df: pd.DataFrame) -> pd.DataFrame:
@@ -320,6 +343,43 @@ class PDBScientificPlotter:
             self.config.nmr_max_y_label,
             lambda ax: ax.plot(
                 stats.index, stats["max"], color=self.config.max_color, linewidth=2.0
+            ),
+        )
+
+    def plot_membrane_protein_counts(
+        self,
+        data_path: Path,
+        annual_output_png: Path,
+        annual_output_svg: Path,
+        cumulative_output_png: Path,
+        cumulative_output_svg: Path,
+    ) -> None:
+        table = self._prepare_membrane_count_table(pd.read_csv(data_path))
+        cumulative = table.copy()
+        cumulative["count"] = cumulative["count"].cumsum()
+        self._scientific_style()
+        self._render_figure(
+            annual_output_png,
+            annual_output_svg,
+            self.config.membrane_annual_title,
+            self.config.membrane_annual_y_label,
+            lambda ax: ax.plot(
+                table["year"],
+                table["count"],
+                linewidth=2.2,
+                color="#17becf",
+            ),
+        )
+        self._render_figure(
+            cumulative_output_png,
+            cumulative_output_svg,
+            self.config.membrane_cumulative_title,
+            self.config.membrane_cumulative_y_label,
+            lambda ax: ax.plot(
+                cumulative["year"],
+                cumulative["count"],
+                linewidth=2.2,
+                color="#17becf",
             ),
         )
 
@@ -847,6 +907,7 @@ def parse_args() -> argparse.Namespace:
         type=parse_plot_kinds,
         default=[
             PlotKind.METHOD_COUNTS,
+            PlotKind.MEMBRANE_PROTEIN_COUNTS,
             PlotKind.SOLUTION_NMR_WEIGHT_STATS,
             PlotKind.SOLUTION_NMR_PERIOD_BOXPLOT,
             PlotKind.SOLUTION_NMR_PERIOD_AREA,
@@ -858,13 +919,19 @@ def parse_args() -> argparse.Namespace:
             PlotKind.SOLUTION_NMR_MONOMER_XRAY_HOMOLOGS,
             PlotKind.SOLUTION_NMR_MONOMER_XRAY_RMSD,
         ],
-        help="Comma-separated plot kinds or 'all'. Available: method_counts, solution_nmr_weight_stats, solution_nmr_period_boxplot, solution_nmr_period_area, solution_nmr_period_area_share, solution_nmr_period_area_cumulative_share, solution_nmr_monomer_secondary, solution_nmr_monomer_precision, solution_nmr_monomer_quality, solution_nmr_monomer_xray_homologs, solution_nmr_monomer_xray_rmsd (default: all).",
+        help="Comma-separated plot kinds or 'all'. Available: method_counts, membrane_protein_counts, solution_nmr_weight_stats, solution_nmr_period_boxplot, solution_nmr_period_area, solution_nmr_period_area_share, solution_nmr_period_area_cumulative_share, solution_nmr_monomer_secondary, solution_nmr_monomer_precision, solution_nmr_monomer_quality, solution_nmr_monomer_xray_homologs, solution_nmr_monomer_xray_rmsd (default: all).",
     )
     parser.add_argument(
         "--counts-input",
         type=Path,
         default=Path("data/pdb_method_counts_by_year.csv"),
         help="Input CSV for method_counts plot.",
+    )
+    parser.add_argument(
+        "--membrane-counts-input",
+        type=Path,
+        default=Path("data/membrane_protein_counts_by_year.csv"),
+        help="Input CSV for membrane_protein_counts plot.",
     )
     parser.add_argument(
         "--nmr-weights-input",
@@ -932,6 +999,30 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("figures/pdb_method_trends_cumulative.svg"),
         help="Output SVG for cumulative method-count figure.",
+    )
+    parser.add_argument(
+        "--membrane-annual-output-png",
+        type=Path,
+        default=Path("figures/membrane_protein_counts_by_year.png"),
+        help="Output PNG for annual membrane-protein count figure.",
+    )
+    parser.add_argument(
+        "--membrane-annual-output-svg",
+        type=Path,
+        default=Path("figures/membrane_protein_counts_by_year.svg"),
+        help="Output SVG for annual membrane-protein count figure.",
+    )
+    parser.add_argument(
+        "--membrane-cumulative-output-png",
+        type=Path,
+        default=Path("figures/membrane_protein_counts_cumulative_by_year.png"),
+        help="Output PNG for cumulative membrane-protein count figure.",
+    )
+    parser.add_argument(
+        "--membrane-cumulative-output-svg",
+        type=Path,
+        default=Path("figures/membrane_protein_counts_cumulative_by_year.svg"),
+        help="Output SVG for cumulative membrane-protein count figure.",
     )
 
     parser.add_argument(
@@ -1174,6 +1265,15 @@ def main() -> None:
             annual_output_svg=args.annual_output_svg,
             cumulative_output_png=args.cumulative_output_png,
             cumulative_output_svg=args.cumulative_output_svg,
+        )
+
+    if PlotKind.MEMBRANE_PROTEIN_COUNTS in args.plots:
+        plotter.plot_membrane_protein_counts(
+            data_path=args.membrane_counts_input,
+            annual_output_png=args.membrane_annual_output_png,
+            annual_output_svg=args.membrane_annual_output_svg,
+            cumulative_output_png=args.membrane_cumulative_output_png,
+            cumulative_output_svg=args.membrane_cumulative_output_svg,
         )
 
     if PlotKind.SOLUTION_NMR_WEIGHT_STATS in args.plots:
