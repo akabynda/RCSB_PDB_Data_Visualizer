@@ -19,6 +19,7 @@ class PlotKind(str, Enum):
     SOLUTION_NMR_PERIOD_AREA_CUMULATIVE_SHARE = (
         "solution_nmr_period_area_cumulative_share"
     )
+    SOLUTION_NMR_MONOMER_SECONDARY = "solution_nmr_monomer_secondary"
 
 
 @dataclass(frozen=True)
@@ -46,6 +47,10 @@ class PlotConfig:
         "SOLUTION NMR: Category Share by Cumulative Sum"
     )
     nmr_area_cumulative_share_y_label: str = "Share of cumulative structures (%)"
+    nmr_monomer_secondary_title: str = (
+        "SOLUTION NMR Monomeric Proteins: Secondary Structure Content by Year"
+    )
+    nmr_monomer_secondary_y_label: str = "Secondary structure content (%)"
     xray_color: str = "#1f77b4"
     cryoem_color: str = "#d62728"
     nmr_color: str = "#2ca02c"
@@ -67,6 +72,7 @@ def parse_plot_kinds(raw_value: str) -> list[PlotKind]:
             PlotKind.SOLUTION_NMR_PERIOD_AREA,
             PlotKind.SOLUTION_NMR_PERIOD_AREA_SHARE,
             PlotKind.SOLUTION_NMR_PERIOD_AREA_CUMULATIVE_SHARE,
+            PlotKind.SOLUTION_NMR_MONOMER_SECONDARY,
         ]
     raw_items = [item.strip() for item in raw_value.split(",") if item.strip()]
     selected: list[PlotKind] = []
@@ -456,6 +462,63 @@ class PDBScientificPlotter:
         fig.savefig(output_svg)
         plt.close(fig)
 
+    @staticmethod
+    def _prepare_monomer_secondary_table(df: pd.DataFrame) -> pd.DataFrame:
+        required_columns = {"entry_id", "year", "secondary_structure_percent"}
+        missing = required_columns - set(df.columns)
+        if missing:
+            raise ValueError(
+                f"Monomer secondary CSV is missing required columns: {', '.join(sorted(missing))}"
+            )
+        prepared = df.copy()
+        prepared["year"] = prepared["year"].astype(int)
+        prepared["secondary_structure_percent"] = prepared[
+            "secondary_structure_percent"
+        ].astype(float)
+        return prepared
+
+    def plot_solution_nmr_monomer_secondary(
+        self, data_path: Path, output_png: Path, output_svg: Path
+    ) -> None:
+        table = self._prepare_monomer_secondary_table(pd.read_csv(data_path))
+        self._scientific_style()
+        yearly_mean = (
+            table.groupby("year", as_index=True)["secondary_structure_percent"]
+            .mean()
+            .sort_index()
+        )
+
+        fig, ax = plt.subplots(
+            figsize=(self.config.width_inches, self.config.height_inches)
+        )
+        ax.scatter(
+            table["year"],
+            table["secondary_structure_percent"],
+            s=10,
+            alpha=0.2,
+            color="#7f7f7f",
+            label="Individual structures",
+        )
+        ax.plot(
+            yearly_mean.index,
+            yearly_mean.values,
+            linewidth=2.2,
+            color=self.config.nmr_color,
+            label="Yearly mean",
+        )
+        ax.set_title(self.config.nmr_monomer_secondary_title, pad=10)
+        ax.set_xlabel(self.config.x_label)
+        ax.set_ylabel(self.config.nmr_monomer_secondary_y_label)
+        ax.set_ylim(0, 100)
+        ax.legend(loc="upper left", frameon=False)
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        fig.tight_layout()
+        output_png.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(output_png, dpi=self.config.dpi)
+        fig.savefig(output_svg)
+        plt.close(fig)
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -471,8 +534,9 @@ def parse_args() -> argparse.Namespace:
             PlotKind.SOLUTION_NMR_PERIOD_AREA,
             PlotKind.SOLUTION_NMR_PERIOD_AREA_SHARE,
             PlotKind.SOLUTION_NMR_PERIOD_AREA_CUMULATIVE_SHARE,
+            PlotKind.SOLUTION_NMR_MONOMER_SECONDARY,
         ],
-        help="Comma-separated plot kinds or 'all'. Available: method_counts, solution_nmr_weight_stats, solution_nmr_period_boxplot, solution_nmr_period_area, solution_nmr_period_area_share, solution_nmr_period_area_cumulative_share (default: all).",
+        help="Comma-separated plot kinds or 'all'. Available: method_counts, solution_nmr_weight_stats, solution_nmr_period_boxplot, solution_nmr_period_area, solution_nmr_period_area_share, solution_nmr_period_area_cumulative_share, solution_nmr_monomer_secondary (default: all).",
     )
     parser.add_argument(
         "--counts-input",
@@ -485,6 +549,12 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("data/solution_nmr_structure_weights.csv"),
         help="Input CSV for SOLUTION NMR weight-based plots.",
+    )
+    parser.add_argument(
+        "--nmr-monomer-secondary-input",
+        type=Path,
+        default=Path("data/solution_nmr_monomer_secondary_structure.csv"),
+        help="Input CSV for SOLUTION NMR monomer secondary-structure plot.",
     )
 
     parser.add_argument(
@@ -601,6 +671,18 @@ def parse_args() -> argparse.Namespace:
         ),
         help="Output SVG for SOLUTION NMR cumulative-share area chart.",
     )
+    parser.add_argument(
+        "--nmr-monomer-secondary-output-png",
+        type=Path,
+        default=Path("figures/solution_nmr_monomer_secondary_by_year.png"),
+        help="Output PNG for SOLUTION NMR monomer secondary-structure plot.",
+    )
+    parser.add_argument(
+        "--nmr-monomer-secondary-output-svg",
+        type=Path,
+        default=Path("figures/solution_nmr_monomer_secondary_by_year.svg"),
+        help="Output SVG for SOLUTION NMR monomer secondary-structure plot.",
+    )
 
     return parser.parse_args()
 
@@ -655,6 +737,13 @@ def main() -> None:
             data_path=args.nmr_weights_input,
             output_png=args.nmr_area_cumulative_share_output_png,
             output_svg=args.nmr_area_cumulative_share_output_svg,
+        )
+
+    if PlotKind.SOLUTION_NMR_MONOMER_SECONDARY in args.plots:
+        plotter.plot_solution_nmr_monomer_secondary(
+            data_path=args.nmr_monomer_secondary_input,
+            output_png=args.nmr_monomer_secondary_output_png,
+            output_svg=args.nmr_monomer_secondary_output_svg,
         )
 
 

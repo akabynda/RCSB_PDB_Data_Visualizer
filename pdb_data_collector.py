@@ -34,6 +34,7 @@ class ExperimentalMethod(Enum):
 class DatasetKind(str, Enum):
     METHOD_COUNTS = "method_counts"
     SOLUTION_NMR_WEIGHTS = "solution_nmr_weights"
+    SOLUTION_NMR_MONOMER_SECONDARY = "solution_nmr_monomer_secondary"
 
 
 @dataclass(frozen=True)
@@ -60,6 +61,17 @@ class SolutionNMRWeightRecord:
     entry_id: str
     year: int
     molecular_weight_kda: float
+
+
+@dataclass(frozen=True)
+class SolutionNMRMonomerSecondaryRecord:
+    entry_id: str
+    year: int
+    sequence_length: int
+    secondary_structure_percent: float
+    helix_fraction: float
+    sheet_fraction: float
+    deposited_model_count: int
 
 
 def chunked(items: list[str], size: int) -> Iterator[list[str]]:
@@ -226,6 +238,112 @@ class RCSBClient:
             )
         return records
 
+    def fetch_solution_nmr_monomer_secondary_records_for_ids(
+        self, entry_ids: list[str]
+    ) -> list[SolutionNMRMonomerSecondaryRecord]:
+        query = """
+        query($ids:[String!]!) {
+          entries(entry_ids:$ids) {
+            rcsb_id
+            rcsb_entry_info {
+              deposited_model_count
+            }
+            rcsb_accession_info {
+              deposit_date
+            }
+            polymer_entities {
+              entity_poly {
+                type
+                rcsb_entity_polymer_type
+                pdbx_strand_id
+                rcsb_sample_sequence_length
+              }
+              polymer_entity_instances {
+                rcsb_id
+                rcsb_polymer_instance_feature_summary {
+                  type
+                  coverage
+                }
+              }
+            }
+          }
+        }
+        """
+        payload = {"query": query, "variables": {"ids": entry_ids}}
+        data = self._post_json(self.config.graphql_url, payload)
+        entries = data.get("data", {}).get("entries", [])
+        records: list[SolutionNMRMonomerSecondaryRecord] = []
+
+        for entry in entries:
+            if not entry:
+                continue
+            entry_id = entry.get("rcsb_id")
+            if not entry_id:
+                continue
+
+            model_count = entry.get("rcsb_entry_info", {}).get("deposited_model_count")
+            if model_count is None or int(model_count) <= 1:
+                continue
+
+            year = extract_year(
+                entry.get("rcsb_accession_info", {}).get("deposit_date")
+            )
+            if year is None:
+                continue
+
+            polymer_entities = entry.get("polymer_entities") or []
+            if len(polymer_entities) != 1:
+                continue
+            polymer_entity = polymer_entities[0] or {}
+
+            entity_poly = polymer_entity.get("entity_poly") or {}
+            if entity_poly.get("type") not in {"polypeptide(L)", "polypeptide(D)"}:
+                continue
+
+            if entity_poly.get("rcsb_entity_polymer_type") != "Protein":
+                continue
+
+            strand_id = str(entity_poly.get("pdbx_strand_id") or "").strip()
+            if not strand_id or "," in strand_id:
+                continue
+
+            sequence_length = entity_poly.get("rcsb_sample_sequence_length")
+            if sequence_length is None or int(sequence_length) <= 0:
+                continue
+            sequence_length = int(sequence_length)
+
+            instances = polymer_entity.get("polymer_entity_instances") or []
+            if len(instances) != 1:
+                continue
+            feature_summary = (
+                instances[0].get("rcsb_polymer_instance_feature_summary") or []
+            )
+            coverage_by_type: dict[str, float] = {}
+            for item in feature_summary:
+                if not item:
+                    continue
+                feature_type = item.get("type")
+                coverage = item.get("coverage")
+                if feature_type and coverage is not None:
+                    coverage_by_type[str(feature_type)] = float(coverage)
+
+            helix_fraction = coverage_by_type.get("HELIX_P", 0.0)
+            sheet_fraction = coverage_by_type.get("SHEET", 0.0)
+            secondary_fraction = min(1.0, max(0.0, helix_fraction + sheet_fraction))
+
+            records.append(
+                SolutionNMRMonomerSecondaryRecord(
+                    entry_id=entry_id,
+                    year=year,
+                    sequence_length=sequence_length,
+                    secondary_structure_percent=secondary_fraction * 100.0,
+                    helix_fraction=helix_fraction,
+                    sheet_fraction=sheet_fraction,
+                    deposited_model_count=int(model_count),
+                )
+            )
+        return records
+
 
 class PDBMethodYearlyCollector:
     def __init__(self, client: RCSBClient, config: CollectorConfig) -> None:
@@ -313,6 +431,46 @@ class SolutionNMRWeightCollector:
         return sorted(records, key=lambda record: (record.year, record.entry_id))
 
 
+class SolutionNMRMonomerSecondaryCollector:
+    def __init__(self, client: RCSBClient, config: CollectorConfig) -> None:
+        self.client = client
+        self.config = config
+
+    def collect(self) -> list[SolutionNMRMonomerSecondaryRecord]:
+        entry_ids = sorted(
+            set(
+                self.client.fetch_entry_ids_for_method(
+                    method_label="SOLUTION NMR", query_value="SOLUTION NMR"
+                )
+            )
+        )
+        LOGGER.info(
+            "SOLUTION NMR monomer-secondary: total unique IDs collected: %d",
+            len(entry_ids),
+        )
+        batches = list(chunked(entry_ids, self.config.graphql_batch_size))
+        records: list[SolutionNMRMonomerSecondaryRecord] = []
+
+        with ThreadPoolExecutor(max_workers=self.config.max_workers) as executor:
+            future_map = {
+                executor.submit(
+                    self.client.fetch_solution_nmr_monomer_secondary_records_for_ids,
+                    batch,
+                ): idx
+                for idx, batch in enumerate(batches, start=1)
+            }
+            for future in as_completed(future_map):
+                batch_records = future.result()
+                records.extend(batch_records)
+                batch_idx = future_map[future]
+                LOGGER.info(
+                    "SOLUTION NMR monomer-secondary: processed batch %d/%d",
+                    batch_idx,
+                    len(batches),
+                )
+        return sorted(records, key=lambda record: (record.year, record.entry_id))
+
+
 def write_method_counts_csv(
     records: list[YearlyCountRecord], output_path: Path
 ) -> None:
@@ -335,9 +493,44 @@ def write_solution_nmr_weights_csv(
         )
 
 
+def write_solution_nmr_monomer_secondary_csv(
+    records: list[SolutionNMRMonomerSecondaryRecord], output_path: Path
+) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w", newline="", encoding="utf-8") as csvfile:
+        writer = csv.writer(csvfile)
+        writer.writerow(
+            [
+                "entry_id",
+                "year",
+                "sequence_length",
+                "secondary_structure_percent",
+                "helix_fraction",
+                "sheet_fraction",
+                "deposited_model_count",
+            ]
+        )
+        writer.writerows(
+            (
+                r.entry_id,
+                r.year,
+                r.sequence_length,
+                f"{r.secondary_structure_percent:.3f}",
+                f"{r.helix_fraction:.6f}",
+                f"{r.sheet_fraction:.6f}",
+                r.deposited_model_count,
+            )
+            for r in records
+        )
+
+
 def parse_dataset_kinds(raw_value: str) -> list[DatasetKind]:
     if raw_value.strip().lower() == "all":
-        return [DatasetKind.METHOD_COUNTS, DatasetKind.SOLUTION_NMR_WEIGHTS]
+        return [
+            DatasetKind.METHOD_COUNTS,
+            DatasetKind.SOLUTION_NMR_WEIGHTS,
+            DatasetKind.SOLUTION_NMR_MONOMER_SECONDARY,
+        ]
     raw_items = [item.strip() for item in raw_value.split(",") if item.strip()]
     selected: list[DatasetKind] = []
     for item in raw_items:
@@ -360,9 +553,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--datasets",
         type=parse_dataset_kinds,
-        default=[DatasetKind.METHOD_COUNTS, DatasetKind.SOLUTION_NMR_WEIGHTS],
+        default=[
+            DatasetKind.METHOD_COUNTS,
+            DatasetKind.SOLUTION_NMR_WEIGHTS,
+            DatasetKind.SOLUTION_NMR_MONOMER_SECONDARY,
+        ],
         help="Comma-separated dataset kinds or 'all'. "
-        "Available: method_counts, solution_nmr_weights (default: all).",
+        "Available: method_counts, solution_nmr_weights, solution_nmr_monomer_secondary (default: all).",
     )
     parser.add_argument(
         "--counts-output",
@@ -375,6 +572,12 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("data/solution_nmr_structure_weights.csv"),
         help="Output CSV path for solution_nmr_weights dataset.",
+    )
+    parser.add_argument(
+        "--solution-nmr-monomer-secondary-output",
+        type=Path,
+        default=Path("data/solution_nmr_monomer_secondary_structure.csv"),
+        help="Output CSV path for solution_nmr_monomer_secondary dataset.",
     )
     parser.add_argument(
         "--page-size", type=int, default=10000, help="Search API page size."
@@ -426,6 +629,20 @@ def main() -> None:
             "Saved %d records to %s",
             len(nmr_weight_records),
             args.solution_nmr_output,
+        )
+
+    if DatasetKind.SOLUTION_NMR_MONOMER_SECONDARY in args.datasets:
+        sec_collector = SolutionNMRMonomerSecondaryCollector(
+            client=client, config=config
+        )
+        sec_records = sec_collector.collect()
+        write_solution_nmr_monomer_secondary_csv(
+            records=sec_records, output_path=args.solution_nmr_monomer_secondary_output
+        )
+        LOGGER.info(
+            "Saved %d records to %s",
+            len(sec_records),
+            args.solution_nmr_monomer_secondary_output,
         )
 
 
