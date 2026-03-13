@@ -35,6 +35,7 @@ class DatasetKind(str, Enum):
     METHOD_COUNTS = "method_counts"
     SOLUTION_NMR_WEIGHTS = "solution_nmr_weights"
     SOLUTION_NMR_MONOMER_SECONDARY = "solution_nmr_monomer_secondary"
+    SOLUTION_NMR_MONOMER_PRECISION = "solution_nmr_monomer_precision"
 
 
 @dataclass(frozen=True)
@@ -72,6 +73,28 @@ class SolutionNMRMonomerSecondaryRecord:
     helix_fraction: float
     sheet_fraction: float
     deposited_model_count: int
+
+
+@dataclass(frozen=True)
+class SolutionNMRMonomerCoreRegionRecord:
+    entry_id: str
+    year: int
+    chain_id: str
+    core_start_seq_id: int
+    core_end_seq_id: int
+    deposited_model_count: int
+
+
+@dataclass(frozen=True)
+class SolutionNMRMonomerPrecisionRecord:
+    entry_id: str
+    year: int
+    chain_id: str
+    core_start_seq_id: int
+    core_end_seq_id: int
+    n_models: int
+    n_ca_core: int
+    mean_rmsd_angstrom: float
 
 
 def chunked(items: list[str], size: int) -> Iterator[list[str]]:
@@ -344,6 +367,116 @@ class RCSBClient:
             )
         return records
 
+    def fetch_solution_nmr_monomer_core_region_records_for_ids(
+        self, entry_ids: list[str]
+    ) -> list[SolutionNMRMonomerCoreRegionRecord]:
+        query = """
+        query($ids:[String!]!) {
+          entries(entry_ids:$ids) {
+            rcsb_id
+            rcsb_entry_info {
+              deposited_model_count
+            }
+            rcsb_accession_info {
+              deposit_date
+            }
+            polymer_entities {
+              entity_poly {
+                type
+                rcsb_entity_polymer_type
+                pdbx_strand_id
+              }
+              polymer_entity_instances {
+                rcsb_polymer_instance_feature {
+                  type
+                  feature_positions {
+                    beg_seq_id
+                    end_seq_id
+                  }
+                }
+              }
+            }
+          }
+        }
+        """
+        payload = {"query": query, "variables": {"ids": entry_ids}}
+        data = self._post_json(self.config.graphql_url, payload)
+        entries = data.get("data", {}).get("entries", [])
+        records: list[SolutionNMRMonomerCoreRegionRecord] = []
+
+        for entry in entries:
+            if not entry:
+                continue
+            entry_id = entry.get("rcsb_id")
+            if not entry_id:
+                continue
+
+            model_count = entry.get("rcsb_entry_info", {}).get("deposited_model_count")
+            if model_count is None or int(model_count) <= 1:
+                continue
+
+            year = extract_year(entry.get("rcsb_accession_info", {}).get("deposit_date"))
+            if year is None:
+                continue
+
+            polymer_entities = entry.get("polymer_entities") or []
+            if len(polymer_entities) != 1:
+                continue
+            polymer_entity = polymer_entities[0] or {}
+            entity_poly = polymer_entity.get("entity_poly") or {}
+
+            if entity_poly.get("type") not in {"polypeptide(L)", "polypeptide(D)"}:
+                continue
+            if entity_poly.get("rcsb_entity_polymer_type") != "Protein":
+                continue
+
+            chain_id = str(entity_poly.get("pdbx_strand_id") or "").strip()
+            if not chain_id or "," in chain_id:
+                continue
+
+            instances = polymer_entity.get("polymer_entity_instances") or []
+            if len(instances) != 1:
+                continue
+
+            features = instances[0].get("rcsb_polymer_instance_feature") or []
+            sec_ranges: list[tuple[int, int]] = []
+            for feature in features:
+                if not feature:
+                    continue
+                feature_type = feature.get("type")
+                if feature_type not in {"HELIX_P", "SHEET"}:
+                    continue
+                for pos in feature.get("feature_positions") or []:
+                    if not pos:
+                        continue
+                    beg = pos.get("beg_seq_id")
+                    end = pos.get("end_seq_id")
+                    if beg is None:
+                        continue
+                    beg_i = int(beg)
+                    end_i = int(end) if end is not None else beg_i
+                    sec_ranges.append((beg_i, end_i))
+
+            if not sec_ranges:
+                continue
+
+            core_start = min(beg for beg, _ in sec_ranges)
+            core_end = max(end for _, end in sec_ranges)
+            if core_end < core_start:
+                continue
+
+            records.append(
+                SolutionNMRMonomerCoreRegionRecord(
+                    entry_id=entry_id,
+                    year=year,
+                    chain_id=chain_id,
+                    core_start_seq_id=core_start,
+                    core_end_seq_id=core_end,
+                    deposited_model_count=int(model_count),
+                )
+            )
+        return records
+
 
 class PDBMethodYearlyCollector:
     def __init__(self, client: RCSBClient, config: CollectorConfig) -> None:
@@ -471,6 +604,231 @@ class SolutionNMRMonomerSecondaryCollector:
         return sorted(records, key=lambda record: (record.year, record.entry_id))
 
 
+class SolutionNMRMonomerPrecisionCollector:
+    def __init__(
+        self,
+        client: RCSBClient,
+        config: CollectorConfig,
+        cache_dir: Path,
+        precision_workers: int,
+    ) -> None:
+        self.client = client
+        self.config = config
+        self.cache_dir = cache_dir
+        self.precision_workers = max(1, precision_workers)
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+
+    def _download_pdb_if_needed(self, entry_id: str) -> Path:
+        path = self.cache_dir / f"{entry_id}.pdb"
+        if path.exists() and path.stat().st_size > 0:
+            return path
+
+        url = f"https://files.rcsb.org/download/{entry_id}.pdb"
+        last_error: Exception | None = None
+        for attempt in range(1, self.config.retries + 1):
+            try:
+                response = self.client.session.get(
+                    url, timeout=self.config.timeout_seconds
+                )
+                response.raise_for_status()
+                path.write_text(response.text, encoding="utf-8")
+                return path
+            except (requests.RequestException, OSError) as exc:
+                last_error = exc
+                wait_seconds = self.config.backoff_seconds * attempt
+                if attempt < self.config.retries:
+                    time.sleep(wait_seconds)
+        raise RuntimeError(f"Failed to download {entry_id}: {last_error}")
+
+    @staticmethod
+    def _compute_mean_rmsd_to_average(
+        pdb_path: Path, chain_id: str, start_seq_id: int, end_seq_id: int
+    ) -> tuple[int, int, float] | None:
+        import numpy as np
+
+        def parse_models_ca_coords() -> list[dict[int, np.ndarray]]:
+            models: list[dict[int, np.ndarray]] = []
+            current_model: dict[int, np.ndarray] = {}
+            has_model_records = False
+            in_model = False
+
+            with pdb_path.open("r", encoding="utf-8", errors="ignore") as handle:
+                for line in handle:
+                    record = line[:6]
+                    if record.startswith("MODEL"):
+                        if in_model:
+                            models.append(current_model)
+                            current_model = {}
+                        has_model_records = True
+                        in_model = True
+                        continue
+                    if record.startswith("ENDMDL"):
+                        if in_model:
+                            models.append(current_model)
+                            current_model = {}
+                            in_model = False
+                        continue
+                    if not record.startswith("ATOM"):
+                        continue
+
+                    atom_name = line[12:16].strip()
+                    if atom_name != "CA":
+                        continue
+                    alt_loc = line[16].strip()
+                    if alt_loc not in {"", "A", "1"}:
+                        continue
+                    atom_chain = line[21].strip()
+                    if atom_chain != chain_id:
+                        continue
+                    resid_text = line[22:26].strip()
+                    try:
+                        resid = int(resid_text)
+                    except ValueError:
+                        continue
+                    if resid < start_seq_id or resid > end_seq_id:
+                        continue
+                    if resid in current_model:
+                        continue
+                    try:
+                        x = float(line[30:38].strip())
+                        y = float(line[38:46].strip())
+                        z = float(line[46:54].strip())
+                    except ValueError:
+                        continue
+                    current_model[resid] = np.array([x, y, z], dtype=float)
+
+            if has_model_records:
+                if in_model or current_model:
+                    models.append(current_model)
+            elif current_model:
+                models.append(current_model)
+            return models
+
+        def kabsch_rmsd(reference: np.ndarray, mobile: np.ndarray) -> float:
+            ref_centered = reference - reference.mean(axis=0)
+            mob_centered = mobile - mobile.mean(axis=0)
+            covariance = mob_centered.T @ ref_centered
+            v_mat, _, w_t = np.linalg.svd(covariance)
+            det_sign = np.sign(np.linalg.det(v_mat @ w_t))
+            correction = np.diag([1.0, 1.0, det_sign])
+            rotation = v_mat @ correction @ w_t
+            aligned = mob_centered @ rotation
+            diff = aligned - ref_centered
+            return float(np.sqrt((diff * diff).sum() / reference.shape[0]))
+
+        model_maps = parse_models_ca_coords()
+        if len(model_maps) < 2:
+            return None
+
+        common_resids = set(model_maps[0].keys())
+        for model_map in model_maps[1:]:
+            common_resids &= set(model_map.keys())
+        if len(common_resids) < 3:
+            return None
+        sorted_resids = sorted(common_resids)
+
+        coords = np.asarray(
+            [[model_map[resid] for resid in sorted_resids] for model_map in model_maps],
+            dtype=float,
+        )
+        mean_coords = coords.mean(axis=0)
+        per_model_rmsd = [kabsch_rmsd(mean_coords, model_coord) for model_coord in coords]
+        return len(model_maps), len(sorted_resids), float(np.mean(per_model_rmsd))
+
+    def _compute_record(
+        self, core: SolutionNMRMonomerCoreRegionRecord
+    ) -> SolutionNMRMonomerPrecisionRecord | None:
+        try:
+            pdb_path = self._download_pdb_if_needed(core.entry_id)
+            result = self._compute_mean_rmsd_to_average(
+                pdb_path=pdb_path,
+                chain_id=core.chain_id,
+                start_seq_id=core.core_start_seq_id,
+                end_seq_id=core.core_end_seq_id,
+            )
+            if result is None:
+                return None
+            n_models, n_ca_core, mean_rmsd = result
+            return SolutionNMRMonomerPrecisionRecord(
+                entry_id=core.entry_id,
+                year=core.year,
+                chain_id=core.chain_id,
+                core_start_seq_id=core.core_start_seq_id,
+                core_end_seq_id=core.core_end_seq_id,
+                n_models=n_models,
+                n_ca_core=n_ca_core,
+                mean_rmsd_angstrom=mean_rmsd,
+            )
+        except Exception as exc:
+            LOGGER.warning("Precision calculation failed for %s: %s", core.entry_id, exc)
+            return None
+
+    def collect(
+        self,
+        max_entries: int | None = None,
+        skip_entry_ids: set[str] | None = None,
+    ) -> list[SolutionNMRMonomerPrecisionRecord]:
+        skip_entry_ids = skip_entry_ids or set()
+        entry_ids = sorted(
+            set(
+                self.client.fetch_entry_ids_for_method(
+                    method_label="SOLUTION NMR", query_value="SOLUTION NMR"
+                )
+            )
+        )
+        LOGGER.info("SOLUTION NMR precision: total unique IDs collected: %d", len(entry_ids))
+
+        batches = list(chunked(entry_ids, self.config.graphql_batch_size))
+        core_records: list[SolutionNMRMonomerCoreRegionRecord] = []
+        with ThreadPoolExecutor(max_workers=self.config.max_workers) as executor:
+            future_map = {
+                executor.submit(
+                    self.client.fetch_solution_nmr_monomer_core_region_records_for_ids,
+                    batch,
+                ): idx
+                for idx, batch in enumerate(batches, start=1)
+            }
+            for future in as_completed(future_map):
+                batch_core = future.result()
+                core_records.extend(batch_core)
+                batch_idx = future_map[future]
+                LOGGER.info(
+                    "SOLUTION NMR precision core ranges: processed batch %d/%d",
+                    batch_idx,
+                    len(batches),
+                )
+
+        filtered_core = [record for record in core_records if record.entry_id not in skip_entry_ids]
+        filtered_core = sorted(filtered_core, key=lambda r: (r.year, r.entry_id))
+        if max_entries is not None:
+            filtered_core = filtered_core[: max(0, max_entries)]
+        LOGGER.info(
+            "SOLUTION NMR precision: entries to process after filters: %d",
+            len(filtered_core),
+        )
+
+        precision_records: list[SolutionNMRMonomerPrecisionRecord] = []
+        with ThreadPoolExecutor(max_workers=self.precision_workers) as executor:
+            future_map = {
+                executor.submit(self._compute_record, core): idx
+                for idx, core in enumerate(filtered_core, start=1)
+            }
+            total = len(future_map)
+            for future in as_completed(future_map):
+                record = future.result()
+                if record is not None:
+                    precision_records.append(record)
+                idx = future_map[future]
+                if total > 0 and (idx % 50 == 0 or idx == total):
+                    LOGGER.info(
+                        "SOLUTION NMR precision RMSD: processed %d/%d entries",
+                        idx,
+                        total,
+                    )
+
+        return sorted(precision_records, key=lambda r: (r.year, r.entry_id))
+
+
 def write_method_counts_csv(
     records: list[YearlyCountRecord], output_path: Path
 ) -> None:
@@ -524,12 +882,72 @@ def write_solution_nmr_monomer_secondary_csv(
         )
 
 
+def read_solution_nmr_monomer_precision_csv(
+    input_path: Path,
+) -> list[SolutionNMRMonomerPrecisionRecord]:
+    if not input_path.exists():
+        return []
+    records: list[SolutionNMRMonomerPrecisionRecord] = []
+    with input_path.open("r", newline="", encoding="utf-8") as csvfile:
+        reader = csv.DictReader(csvfile)
+        for row in reader:
+            if not row:
+                continue
+            records.append(
+                SolutionNMRMonomerPrecisionRecord(
+                    entry_id=str(row["entry_id"]),
+                    year=int(row["year"]),
+                    chain_id=str(row["chain_id"]),
+                    core_start_seq_id=int(row["core_start_seq_id"]),
+                    core_end_seq_id=int(row["core_end_seq_id"]),
+                    n_models=int(row["n_models"]),
+                    n_ca_core=int(row["n_ca_core"]),
+                    mean_rmsd_angstrom=float(row["mean_rmsd_angstrom"]),
+                )
+            )
+    return records
+
+
+def write_solution_nmr_monomer_precision_csv(
+    records: list[SolutionNMRMonomerPrecisionRecord], output_path: Path
+) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w", newline="", encoding="utf-8") as csvfile:
+        writer = csv.writer(csvfile)
+        writer.writerow(
+            [
+                "entry_id",
+                "year",
+                "chain_id",
+                "core_start_seq_id",
+                "core_end_seq_id",
+                "n_models",
+                "n_ca_core",
+                "mean_rmsd_angstrom",
+            ]
+        )
+        writer.writerows(
+            (
+                r.entry_id,
+                r.year,
+                r.chain_id,
+                r.core_start_seq_id,
+                r.core_end_seq_id,
+                r.n_models,
+                r.n_ca_core,
+                f"{r.mean_rmsd_angstrom:.4f}",
+            )
+            for r in records
+        )
+
+
 def parse_dataset_kinds(raw_value: str) -> list[DatasetKind]:
     if raw_value.strip().lower() == "all":
         return [
             DatasetKind.METHOD_COUNTS,
             DatasetKind.SOLUTION_NMR_WEIGHTS,
             DatasetKind.SOLUTION_NMR_MONOMER_SECONDARY,
+            DatasetKind.SOLUTION_NMR_MONOMER_PRECISION,
         ]
     raw_items = [item.strip() for item in raw_value.split(",") if item.strip()]
     selected: list[DatasetKind] = []
@@ -559,7 +977,7 @@ def parse_args() -> argparse.Namespace:
             DatasetKind.SOLUTION_NMR_MONOMER_SECONDARY,
         ],
         help="Comma-separated dataset kinds or 'all'. "
-        "Available: method_counts, solution_nmr_weights, solution_nmr_monomer_secondary (default: all).",
+        "Available: method_counts, solution_nmr_weights, solution_nmr_monomer_secondary, solution_nmr_monomer_precision (default: the first three).",
     )
     parser.add_argument(
         "--counts-output",
@@ -578,6 +996,35 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("data/solution_nmr_monomer_secondary_structure.csv"),
         help="Output CSV path for solution_nmr_monomer_secondary dataset.",
+    )
+    parser.add_argument(
+        "--solution-nmr-monomer-precision-output",
+        type=Path,
+        default=Path("data/solution_nmr_monomer_precision.csv"),
+        help="Output CSV path for solution_nmr_monomer_precision dataset.",
+    )
+    parser.add_argument(
+        "--precision-cache-dir",
+        type=Path,
+        default=Path("data/pdb_cache"),
+        help="Directory to cache downloaded PDB files for precision calculation.",
+    )
+    parser.add_argument(
+        "--precision-max-entries",
+        type=int,
+        default=None,
+        help="Optional limit of entries to process for precision dataset.",
+    )
+    parser.add_argument(
+        "--precision-workers",
+        type=int,
+        default=4,
+        help="Parallel workers for RMSD precision computation.",
+    )
+    parser.add_argument(
+        "--precision-overwrite",
+        action="store_true",
+        help="Recompute precision CSV from scratch (ignore existing rows).",
     )
     parser.add_argument(
         "--page-size", type=int, default=10000, help="Search API page size."
@@ -643,6 +1090,45 @@ def main() -> None:
             "Saved %d records to %s",
             len(sec_records),
             args.solution_nmr_monomer_secondary_output,
+        )
+
+    if DatasetKind.SOLUTION_NMR_MONOMER_PRECISION in args.datasets:
+        existing_records: list[SolutionNMRMonomerPrecisionRecord] = []
+        skip_entry_ids: set[str] = set()
+        if (
+            not args.precision_overwrite
+            and Path(args.solution_nmr_monomer_precision_output).exists()
+        ):
+            existing_records = read_solution_nmr_monomer_precision_csv(
+                Path(args.solution_nmr_monomer_precision_output)
+            )
+            skip_entry_ids = {record.entry_id for record in existing_records}
+            LOGGER.info(
+                "SOLUTION NMR precision: loaded %d existing records for resume",
+                len(existing_records),
+            )
+
+        precision_collector = SolutionNMRMonomerPrecisionCollector(
+            client=client,
+            config=config,
+            cache_dir=Path(args.precision_cache_dir),
+            precision_workers=args.precision_workers,
+        )
+        new_records = precision_collector.collect(
+            max_entries=args.precision_max_entries,
+            skip_entry_ids=skip_entry_ids,
+        )
+        combined_records = sorted(
+            existing_records + new_records, key=lambda record: (record.year, record.entry_id)
+        )
+        write_solution_nmr_monomer_precision_csv(
+            records=combined_records, output_path=args.solution_nmr_monomer_precision_output
+        )
+        LOGGER.info(
+            "Saved %d records to %s (new: %d)",
+            len(combined_records),
+            args.solution_nmr_monomer_precision_output,
+            len(new_records),
         )
 
 

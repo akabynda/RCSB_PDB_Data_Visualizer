@@ -20,6 +20,7 @@ class PlotKind(str, Enum):
         "solution_nmr_period_area_cumulative_share"
     )
     SOLUTION_NMR_MONOMER_SECONDARY = "solution_nmr_monomer_secondary"
+    SOLUTION_NMR_MONOMER_PRECISION = "solution_nmr_monomer_precision"
 
 
 @dataclass(frozen=True)
@@ -51,6 +52,10 @@ class PlotConfig:
         "SOLUTION NMR Monomeric Proteins: Secondary Structure Content by Year"
     )
     nmr_monomer_secondary_y_label: str = "Secondary structure content (%)"
+    nmr_monomer_precision_title: str = (
+        "SOLUTION NMR Monomeric Proteins: Mean Ensemble RMSD by Year"
+    )
+    nmr_monomer_precision_y_label: str = "Mean RMSD to average structure (Å)"
     xray_color: str = "#1f77b4"
     cryoem_color: str = "#d62728"
     nmr_color: str = "#2ca02c"
@@ -73,6 +78,7 @@ def parse_plot_kinds(raw_value: str) -> list[PlotKind]:
             PlotKind.SOLUTION_NMR_PERIOD_AREA_SHARE,
             PlotKind.SOLUTION_NMR_PERIOD_AREA_CUMULATIVE_SHARE,
             PlotKind.SOLUTION_NMR_MONOMER_SECONDARY,
+            PlotKind.SOLUTION_NMR_MONOMER_PRECISION,
         ]
     raw_items = [item.strip() for item in raw_value.split(",") if item.strip()]
     selected: list[PlotKind] = []
@@ -519,6 +525,52 @@ class PDBScientificPlotter:
         fig.savefig(output_svg)
         plt.close(fig)
 
+    @staticmethod
+    def _prepare_monomer_precision_table(df: pd.DataFrame) -> pd.DataFrame:
+        required_columns = {"entry_id", "year", "mean_rmsd_angstrom"}
+        missing = required_columns - set(df.columns)
+        if missing:
+            raise ValueError(
+                f"Monomer precision CSV is missing required columns: {', '.join(sorted(missing))}"
+            )
+        prepared = df.copy()
+        prepared["year"] = prepared["year"].astype(int)
+        prepared["mean_rmsd_angstrom"] = prepared["mean_rmsd_angstrom"].astype(float)
+        return prepared
+
+    def plot_solution_nmr_monomer_precision(
+        self, data_path: Path, output_png: Path, output_svg: Path
+    ) -> None:
+        table = self._prepare_monomer_precision_table(pd.read_csv(data_path))
+        self._scientific_style()
+        yearly_mean_rmsd = (
+            table.groupby("year", as_index=True)["mean_rmsd_angstrom"]
+            .mean()
+            .sort_index()
+        )
+
+        fig, ax = plt.subplots(
+            figsize=(self.config.width_inches, self.config.height_inches)
+        )
+        ax.plot(
+            yearly_mean_rmsd.index,
+            yearly_mean_rmsd.values,
+            linewidth=2.2,
+            color="#8c564b",
+            label="Yearly mean RMSD",
+        )
+        ax.set_title(self.config.nmr_monomer_precision_title, pad=10)
+        ax.set_xlabel(self.config.x_label)
+        ax.set_ylabel(self.config.nmr_monomer_precision_y_label)
+        ax.legend(loc="upper left", frameon=False)
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        fig.tight_layout()
+        output_png.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(output_png, dpi=self.config.dpi)
+        fig.savefig(output_svg)
+        plt.close(fig)
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -535,8 +587,9 @@ def parse_args() -> argparse.Namespace:
             PlotKind.SOLUTION_NMR_PERIOD_AREA_SHARE,
             PlotKind.SOLUTION_NMR_PERIOD_AREA_CUMULATIVE_SHARE,
             PlotKind.SOLUTION_NMR_MONOMER_SECONDARY,
+            PlotKind.SOLUTION_NMR_MONOMER_PRECISION,
         ],
-        help="Comma-separated plot kinds or 'all'. Available: method_counts, solution_nmr_weight_stats, solution_nmr_period_boxplot, solution_nmr_period_area, solution_nmr_period_area_share, solution_nmr_period_area_cumulative_share, solution_nmr_monomer_secondary (default: all).",
+        help="Comma-separated plot kinds or 'all'. Available: method_counts, solution_nmr_weight_stats, solution_nmr_period_boxplot, solution_nmr_period_area, solution_nmr_period_area_share, solution_nmr_period_area_cumulative_share, solution_nmr_monomer_secondary, solution_nmr_monomer_precision (default: all).",
     )
     parser.add_argument(
         "--counts-input",
@@ -555,6 +608,12 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("data/solution_nmr_monomer_secondary_structure.csv"),
         help="Input CSV for SOLUTION NMR monomer secondary-structure plot.",
+    )
+    parser.add_argument(
+        "--nmr-monomer-precision-input",
+        type=Path,
+        default=Path("data/solution_nmr_monomer_precision.csv"),
+        help="Input CSV for SOLUTION NMR monomer precision (RMSD) plot.",
     )
 
     parser.add_argument(
@@ -683,6 +742,18 @@ def parse_args() -> argparse.Namespace:
         default=Path("figures/solution_nmr_monomer_secondary_by_year.svg"),
         help="Output SVG for SOLUTION NMR monomer secondary-structure plot.",
     )
+    parser.add_argument(
+        "--nmr-monomer-precision-output-png",
+        type=Path,
+        default=Path("figures/solution_nmr_monomer_precision_rmsd_by_year.png"),
+        help="Output PNG for SOLUTION NMR monomer precision (RMSD) plot.",
+    )
+    parser.add_argument(
+        "--nmr-monomer-precision-output-svg",
+        type=Path,
+        default=Path("figures/solution_nmr_monomer_precision_rmsd_by_year.svg"),
+        help="Output SVG for SOLUTION NMR monomer precision (RMSD) plot.",
+    )
 
     return parser.parse_args()
 
@@ -744,6 +815,13 @@ def main() -> None:
             data_path=args.nmr_monomer_secondary_input,
             output_png=args.nmr_monomer_secondary_output_png,
             output_svg=args.nmr_monomer_secondary_output_svg,
+        )
+
+    if PlotKind.SOLUTION_NMR_MONOMER_PRECISION in args.plots:
+        plotter.plot_solution_nmr_monomer_precision(
+            data_path=args.nmr_monomer_precision_input,
+            output_png=args.nmr_monomer_precision_output_png,
+            output_svg=args.nmr_monomer_precision_output_svg,
         )
 
 
