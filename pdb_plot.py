@@ -23,6 +23,7 @@ class PlotKind(str, Enum):
     SOLUTION_NMR_MONOMER_PRECISION = "solution_nmr_monomer_precision"
     SOLUTION_NMR_MONOMER_QUALITY = "solution_nmr_monomer_quality"
     SOLUTION_NMR_MONOMER_XRAY_HOMOLOGS = "solution_nmr_monomer_xray_homologs"
+    SOLUTION_NMR_MONOMER_XRAY_RMSD = "solution_nmr_monomer_xray_rmsd"
 
 
 @dataclass(frozen=True)
@@ -83,6 +84,10 @@ class PlotConfig:
     nmr_monomer_xray_homolog_100_cumulative_title: str = (
         "SOLUTION NMR Monomeric Proteins: Cumulative X-ray Analogs (100% Sequence Identity)"
     )
+    nmr_monomer_xray_rmsd_title: str = (
+        "SOLUTION NMR Monomeric Proteins: Mean RMSD(CA) to Best-Resolution X-ray Analog by Year"
+    )
+    nmr_monomer_xray_rmsd_y_label: str = "Mean RMSD(CA) (Å)"
     xray_color: str = "#1f77b4"
     cryoem_color: str = "#d62728"
     nmr_color: str = "#2ca02c"
@@ -108,6 +113,7 @@ def parse_plot_kinds(raw_value: str) -> list[PlotKind]:
             PlotKind.SOLUTION_NMR_MONOMER_PRECISION,
             PlotKind.SOLUTION_NMR_MONOMER_QUALITY,
             PlotKind.SOLUTION_NMR_MONOMER_XRAY_HOMOLOGS,
+            PlotKind.SOLUTION_NMR_MONOMER_XRAY_RMSD,
         ]
     raw_items = [item.strip() for item in raw_value.split(",") if item.strip()]
     selected: list[PlotKind] = []
@@ -713,9 +719,7 @@ class PDBScientificPlotter:
         cumulative_output_100_svg: Path,
     ) -> None:
         table_95 = self._prepare_monomer_xray_homolog_table(pd.read_csv(data_95_path))
-        table_100 = self._prepare_monomer_xray_homolog_table(
-            pd.read_csv(data_100_path)
-        )
+        table_100 = self._prepare_monomer_xray_homolog_table(pd.read_csv(data_100_path))
         self._scientific_style()
 
         yearly_95 = (
@@ -732,15 +736,17 @@ class PDBScientificPlotter:
         )
 
         yearly_count_95 = table_95.groupby("year", as_index=True)["entry_id"].count()
-        yearly_yes_95 = table_95.groupby("year", as_index=True)["has_xray_homolog"].sum()
+        yearly_yes_95 = table_95.groupby("year", as_index=True)[
+            "has_xray_homolog"
+        ].sum()
         cumulative_share_95 = (
             yearly_yes_95.cumsum().div(yearly_count_95.cumsum()).mul(100.0).sort_index()
         )
 
         yearly_count_100 = table_100.groupby("year", as_index=True)["entry_id"].count()
-        yearly_yes_100 = (
-            table_100.groupby("year", as_index=True)["has_xray_homolog"].sum()
-        )
+        yearly_yes_100 = table_100.groupby("year", as_index=True)[
+            "has_xray_homolog"
+        ].sum()
         cumulative_share_100 = (
             yearly_yes_100.cumsum()
             .div(yearly_count_100.cumsum())
@@ -797,6 +803,40 @@ class PDBScientificPlotter:
             ),
         )
 
+    @staticmethod
+    def _prepare_monomer_xray_rmsd_table(df: pd.DataFrame) -> pd.DataFrame:
+        required_columns = {"entry_id", "year", "rmsd_ca_angstrom"}
+        missing = required_columns - set(df.columns)
+        if missing:
+            raise ValueError(
+                f"Monomer X-ray RMSD CSV is missing required columns: {', '.join(sorted(missing))}"
+            )
+        prepared = df.copy()
+        prepared["year"] = prepared["year"].astype(int)
+        prepared["rmsd_ca_angstrom"] = prepared["rmsd_ca_angstrom"].astype(float)
+        return prepared
+
+    def plot_solution_nmr_monomer_xray_rmsd(
+        self, data_path: Path, output_png: Path, output_svg: Path
+    ) -> None:
+        table = self._prepare_monomer_xray_rmsd_table(pd.read_csv(data_path))
+        self._scientific_style()
+        yearly_mean_rmsd = (
+            table.groupby("year", as_index=True)["rmsd_ca_angstrom"].mean().sort_index()
+        )
+        self._render_figure(
+            output_png,
+            output_svg,
+            self.config.nmr_monomer_xray_rmsd_title,
+            self.config.nmr_monomer_xray_rmsd_y_label,
+            lambda ax: ax.plot(
+                yearly_mean_rmsd.index,
+                yearly_mean_rmsd.values,
+                linewidth=2.2,
+                color="#9467bd",
+            ),
+        )
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -816,8 +856,9 @@ def parse_args() -> argparse.Namespace:
             PlotKind.SOLUTION_NMR_MONOMER_PRECISION,
             PlotKind.SOLUTION_NMR_MONOMER_QUALITY,
             PlotKind.SOLUTION_NMR_MONOMER_XRAY_HOMOLOGS,
+            PlotKind.SOLUTION_NMR_MONOMER_XRAY_RMSD,
         ],
-        help="Comma-separated plot kinds or 'all'. Available: method_counts, solution_nmr_weight_stats, solution_nmr_period_boxplot, solution_nmr_period_area, solution_nmr_period_area_share, solution_nmr_period_area_cumulative_share, solution_nmr_monomer_secondary, solution_nmr_monomer_precision, solution_nmr_monomer_quality, solution_nmr_monomer_xray_homologs (default: all).",
+        help="Comma-separated plot kinds or 'all'. Available: method_counts, solution_nmr_weight_stats, solution_nmr_period_boxplot, solution_nmr_period_area, solution_nmr_period_area_share, solution_nmr_period_area_cumulative_share, solution_nmr_monomer_secondary, solution_nmr_monomer_precision, solution_nmr_monomer_quality, solution_nmr_monomer_xray_homologs, solution_nmr_monomer_xray_rmsd (default: all).",
     )
     parser.add_argument(
         "--counts-input",
@@ -860,6 +901,12 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("data/solution_nmr_monomer_xray_homologs_100.csv"),
         help="Input CSV for SOLUTION NMR monomer X-ray homologs at 100%% sequence identity.",
+    )
+    parser.add_argument(
+        "--nmr-monomer-xray-rmsd-input",
+        type=Path,
+        default=Path("data/solution_nmr_monomer_xray_rmsd.csv"),
+        help="Input CSV for SOLUTION NMR monomer X-ray RMSD plot.",
     )
 
     parser.add_argument(
@@ -1100,6 +1147,18 @@ def parse_args() -> argparse.Namespace:
         ),
         help="Output SVG for cumulative monomer X-ray homolog share plot at 100%% sequence identity.",
     )
+    parser.add_argument(
+        "--nmr-monomer-xray-rmsd-output-png",
+        type=Path,
+        default=Path("figures/solution_nmr_monomer_xray_rmsd_by_year.png"),
+        help="Output PNG for monomer X-ray RMSD(CA) by year plot.",
+    )
+    parser.add_argument(
+        "--nmr-monomer-xray-rmsd-output-svg",
+        type=Path,
+        default=Path("figures/solution_nmr_monomer_xray_rmsd_by_year.svg"),
+        help="Output SVG for monomer X-ray RMSD(CA) by year plot.",
+    )
 
     return parser.parse_args()
 
@@ -1193,6 +1252,13 @@ def main() -> None:
             cumulative_output_95_svg=args.nmr_monomer_xray_homolog_95_cumulative_output_svg,
             cumulative_output_100_png=args.nmr_monomer_xray_homolog_100_cumulative_output_png,
             cumulative_output_100_svg=args.nmr_monomer_xray_homolog_100_cumulative_output_svg,
+        )
+
+    if PlotKind.SOLUTION_NMR_MONOMER_XRAY_RMSD in args.plots:
+        plotter.plot_solution_nmr_monomer_xray_rmsd(
+            data_path=args.nmr_monomer_xray_rmsd_input,
+            output_png=args.nmr_monomer_xray_rmsd_output_png,
+            output_svg=args.nmr_monomer_xray_rmsd_output_svg,
         )
 
 

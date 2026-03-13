@@ -4,6 +4,7 @@ import argparse
 import csv
 import logging
 import time
+import numpy as np
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -38,6 +39,7 @@ class DatasetKind(str, Enum):
     SOLUTION_NMR_MONOMER_PRECISION = "solution_nmr_monomer_precision"
     SOLUTION_NMR_MONOMER_QUALITY = "solution_nmr_monomer_quality"
     SOLUTION_NMR_MONOMER_XRAY_HOMOLOGS = "solution_nmr_monomer_xray_homologs"
+    SOLUTION_NMR_MONOMER_XRAY_RMSD = "solution_nmr_monomer_xray_rmsd"
 
 
 @dataclass(frozen=True)
@@ -117,6 +119,36 @@ class SolutionNMRMonomerXrayHomologRecord:
     has_xray_homolog: bool
 
 
+@dataclass(frozen=True)
+class SolutionNMRMonomerXraySeedRecord:
+    entry_id: str
+    year: int
+    chain_id: str
+    group_id_95: str | None
+    group_id_100: str | None
+
+
+@dataclass(frozen=True)
+class XrayEntityGroupMappingRecord:
+    polymer_entity_id: str
+    entry_id: str
+    chain_ids: tuple[str, ...]
+    group_id: str
+
+
+@dataclass(frozen=True)
+class SolutionNMRMonomerXrayRmsdRecord:
+    entry_id: str
+    year: int
+    sequence_identity_percent: int
+    nmr_chain_id: str
+    xray_entry_id: str
+    xray_chain_id: str
+    xray_resolution_angstrom: float
+    n_common_ca: int
+    rmsd_ca_angstrom: float
+
+
 def chunked(items: list[str], size: int) -> Iterator[list[str]]:
     for i in range(0, len(items), size):
         yield items[i : i + size]
@@ -129,6 +161,86 @@ def extract_year(deposit_date: str | None) -> int | None:
         return int(deposit_date[:4])
     except (TypeError, ValueError):
         return None
+
+
+def parse_models_ca_coords(
+    pdb_path: Path,
+    chain_id: str,
+    start_seq_id: int | None = None,
+    end_seq_id: int | None = None,
+) -> list[dict[int, np.ndarray]]:
+
+    models: list[dict[int, np.ndarray]] = []
+    current_model: dict[int, np.ndarray] = {}
+    has_model_records = False
+    in_model = False
+
+    with pdb_path.open("r", encoding="utf-8", errors="ignore") as handle:
+        for line in handle:
+            record = line[:6]
+            if record.startswith("MODEL"):
+                if in_model:
+                    models.append(current_model)
+                    current_model = {}
+                has_model_records = True
+                in_model = True
+                continue
+            if record.startswith("ENDMDL"):
+                if in_model:
+                    models.append(current_model)
+                    current_model = {}
+                    in_model = False
+                continue
+            if not record.startswith("ATOM"):
+                continue
+
+            atom_name = line[12:16].strip()
+            if atom_name != "CA":
+                continue
+            alt_loc = line[16].strip()
+            if alt_loc not in {"", "A", "1"}:
+                continue
+            atom_chain = line[21].strip()
+            if atom_chain != chain_id:
+                continue
+            resid_text = line[22:26].strip()
+            try:
+                resid = int(resid_text)
+            except ValueError:
+                continue
+            if start_seq_id is not None and resid < start_seq_id:
+                continue
+            if end_seq_id is not None and resid > end_seq_id:
+                continue
+            if resid in current_model:
+                continue
+            try:
+                x = float(line[30:38].strip())
+                y = float(line[38:46].strip())
+                z = float(line[46:54].strip())
+            except ValueError:
+                continue
+            current_model[resid] = np.array([x, y, z], dtype=float)
+
+    if has_model_records:
+        if in_model or current_model:
+            models.append(current_model)
+    elif current_model:
+        models.append(current_model)
+    return models
+
+
+def kabsch_rmsd(reference: np.ndarray, mobile: np.ndarray) -> float:
+    ref_centered = reference - reference.mean(axis=0)
+    mob_centered = mobile - mobile.mean(axis=0)
+    covariance = mob_centered.T @ ref_centered
+    v_mat, _, w_t = np.linalg.svd(covariance)
+    det_sign = np.sign(np.linalg.det(v_mat @ w_t))
+    correction = np.diag([1.0, 1.0, det_sign])
+    rotation = v_mat @ correction @ w_t
+    aligned = mob_centered @ rotation
+    diff = aligned - ref_centered
+    return float(np.sqrt((diff * diff).sum() / reference.shape[0]))
 
 
 class RCSBClient:
@@ -220,6 +332,37 @@ class RCSBClient:
             if entry and entry.get("rcsb_accession_info", {}).get("deposit_date")
         ]
 
+    def fetch_entry_resolution_for_ids(self, entry_ids: list[str]) -> dict[str, float]:
+        query = """
+        query($ids:[String!]!) {
+          entries(entry_ids:$ids) {
+            rcsb_id
+            rcsb_entry_info {
+              resolution_combined
+            }
+          }
+        }
+        """
+        payload = {"query": query, "variables": {"ids": entry_ids}}
+        data = self._post_json(self.config.graphql_url, payload)
+        entries = data.get("data", {}).get("entries", [])
+        resolutions: dict[str, float] = {}
+        for entry in entries:
+            if not entry:
+                continue
+            entry_id = entry.get("rcsb_id")
+            if not entry_id:
+                continue
+            combined = entry.get("rcsb_entry_info", {}).get("resolution_combined")
+            if not combined:
+                continue
+            try:
+                value = min(float(item) for item in combined if item is not None)
+            except (TypeError, ValueError):
+                continue
+            resolutions[str(entry_id)] = value
+        return resolutions
+
     def fetch_xray_polymer_entity_ids_for_group_ids(
         self, group_ids: list[str]
     ) -> list[str]:
@@ -272,6 +415,80 @@ class RCSBClient:
                 break
         return all_ids
 
+    def fetch_polymer_entity_group_mapping_for_ids(
+        self, entity_ids: list[str], similarity_cutoff: int
+    ) -> list[XrayEntityGroupMappingRecord]:
+        if not entity_ids:
+            return []
+        query = """
+        query($ids:[String!]!) {
+          polymer_entities(entity_ids:$ids) {
+            rcsb_id
+            entity_poly {
+              pdbx_strand_id
+            }
+            rcsb_polymer_entity_container_identifiers {
+              entry_id
+            }
+            rcsb_polymer_entity_group_membership {
+              aggregation_method
+              similarity_cutoff
+              group_id
+            }
+          }
+        }
+        """
+        payload = {"query": query, "variables": {"ids": entity_ids}}
+        data = self._post_json(self.config.graphql_url, payload)
+        entities = data.get("data", {}).get("polymer_entities", [])
+
+        records: list[XrayEntityGroupMappingRecord] = []
+        for entity in entities:
+            if not entity:
+                continue
+            polymer_entity_id = entity.get("rcsb_id")
+            entry_id = (
+                entity.get("rcsb_polymer_entity_container_identifiers", {}) or {}
+            ).get("entry_id")
+            chain_ids = str(
+                (entity.get("entity_poly", {}) or {}).get("pdbx_strand_id") or ""
+            ).strip()
+            chain_id_tuple = tuple(
+                item.strip() for item in chain_ids.split(",") if item.strip()
+            )
+            if not polymer_entity_id or not entry_id or not chain_id_tuple:
+                continue
+
+            memberships = entity.get("rcsb_polymer_entity_group_membership") or []
+            matched_group_id: str | None = None
+            for membership in memberships:
+                if not membership:
+                    continue
+                if membership.get("aggregation_method") != "sequence_identity":
+                    continue
+                raw_cutoff = membership.get("similarity_cutoff")
+                group_id = membership.get("group_id")
+                if raw_cutoff is None or not group_id:
+                    continue
+                try:
+                    cutoff = int(round(float(raw_cutoff)))
+                except (TypeError, ValueError):
+                    continue
+                if cutoff == similarity_cutoff:
+                    matched_group_id = str(group_id)
+                    break
+            if not matched_group_id:
+                continue
+            records.append(
+                XrayEntityGroupMappingRecord(
+                    polymer_entity_id=str(polymer_entity_id),
+                    entry_id=str(entry_id),
+                    chain_ids=chain_id_tuple,
+                    group_id=matched_group_id,
+                )
+            )
+        return records
+
     def fetch_sequence_identity_group_ids_for_polymer_entity_ids(
         self, entity_ids: list[str], similarity_cutoff: int
     ) -> set[str]:
@@ -302,7 +519,10 @@ class RCSBClient:
                 if membership.get("aggregation_method") != "sequence_identity":
                     continue
                 raw_cutoff = membership.get("similarity_cutoff")
-                if raw_cutoff is None or int(round(float(raw_cutoff))) != similarity_cutoff:
+                if (
+                    raw_cutoff is None
+                    or int(round(float(raw_cutoff))) != similarity_cutoff
+                ):
                     continue
                 group_id = membership.get("group_id")
                 if group_id:
@@ -715,7 +935,9 @@ class RCSBClient:
             if model_count is None or int(model_count) <= 1:
                 continue
 
-            year = extract_year(entry.get("rcsb_accession_info", {}).get("deposit_date"))
+            year = extract_year(
+                entry.get("rcsb_accession_info", {}).get("deposit_date")
+            )
             if year is None:
                 continue
 
@@ -731,10 +953,9 @@ class RCSBClient:
             if not strand_id or "," in strand_id:
                 continue
 
-            memberships = (
-                (polymer_entities[0] or {}).get("rcsb_polymer_entity_group_membership")
-                or []
-            )
+            memberships = (polymer_entities[0] or {}).get(
+                "rcsb_polymer_entity_group_membership"
+            ) or []
             group_95: str | None = None
             group_100: str | None = None
             for membership in memberships:
@@ -753,6 +974,100 @@ class RCSBClient:
                     group_100 = str(group_id)
 
             records.append((str(entry_id), year, group_95, group_100))
+        return records
+
+    def fetch_solution_nmr_monomer_xray_seed_records_for_ids(
+        self, entry_ids: list[str]
+    ) -> list[SolutionNMRMonomerXraySeedRecord]:
+        query = """
+        query($ids:[String!]!) {
+          entries(entry_ids:$ids) {
+            rcsb_id
+            rcsb_entry_info {
+              deposited_model_count
+            }
+            rcsb_accession_info {
+              deposit_date
+            }
+            polymer_entities {
+              entity_poly {
+                type
+                rcsb_entity_polymer_type
+                pdbx_strand_id
+              }
+              rcsb_polymer_entity_group_membership {
+                aggregation_method
+                similarity_cutoff
+                group_id
+              }
+            }
+          }
+        }
+        """
+        payload = {"query": query, "variables": {"ids": entry_ids}}
+        data = self._post_json(self.config.graphql_url, payload)
+        entries = data.get("data", {}).get("entries", [])
+        records: list[SolutionNMRMonomerXraySeedRecord] = []
+
+        for entry in entries:
+            if not entry:
+                continue
+            entry_id = entry.get("rcsb_id")
+            if not entry_id:
+                continue
+
+            model_count = entry.get("rcsb_entry_info", {}).get("deposited_model_count")
+            if model_count is None or int(model_count) <= 1:
+                continue
+
+            year = extract_year(
+                entry.get("rcsb_accession_info", {}).get("deposit_date")
+            )
+            if year is None:
+                continue
+
+            polymer_entities = entry.get("polymer_entities") or []
+            if len(polymer_entities) != 1:
+                continue
+
+            entity_poly = (polymer_entities[0] or {}).get("entity_poly") or {}
+            if entity_poly.get("type") not in {"polypeptide(L)", "polypeptide(D)"}:
+                continue
+            if entity_poly.get("rcsb_entity_polymer_type") != "Protein":
+                continue
+            chain_id = str(entity_poly.get("pdbx_strand_id") or "").strip()
+            if not chain_id or "," in chain_id:
+                continue
+
+            memberships = (polymer_entities[0] or {}).get(
+                "rcsb_polymer_entity_group_membership"
+            ) or []
+            group_95: str | None = None
+            group_100: str | None = None
+            for membership in memberships:
+                if not membership:
+                    continue
+                if membership.get("aggregation_method") != "sequence_identity":
+                    continue
+                group_id = membership.get("group_id")
+                cutoff = membership.get("similarity_cutoff")
+                if not group_id or cutoff is None:
+                    continue
+                cutoff_value = int(round(float(cutoff)))
+                if cutoff_value == 95:
+                    group_95 = str(group_id)
+                elif cutoff_value == 100:
+                    group_100 = str(group_id)
+
+            records.append(
+                SolutionNMRMonomerXraySeedRecord(
+                    entry_id=str(entry_id),
+                    year=year,
+                    chain_id=chain_id,
+                    group_id_95=group_95,
+                    group_id_100=group_100,
+                )
+            )
         return records
 
 
@@ -922,79 +1237,12 @@ class SolutionNMRMonomerPrecisionCollector:
     def _compute_mean_rmsd_to_average(
         pdb_path: Path, chain_id: str, start_seq_id: int, end_seq_id: int
     ) -> tuple[int, int, float] | None:
-        import numpy as np
-
-        def parse_models_ca_coords() -> list[dict[int, np.ndarray]]:
-            models: list[dict[int, np.ndarray]] = []
-            current_model: dict[int, np.ndarray] = {}
-            has_model_records = False
-            in_model = False
-
-            with pdb_path.open("r", encoding="utf-8", errors="ignore") as handle:
-                for line in handle:
-                    record = line[:6]
-                    if record.startswith("MODEL"):
-                        if in_model:
-                            models.append(current_model)
-                            current_model = {}
-                        has_model_records = True
-                        in_model = True
-                        continue
-                    if record.startswith("ENDMDL"):
-                        if in_model:
-                            models.append(current_model)
-                            current_model = {}
-                            in_model = False
-                        continue
-                    if not record.startswith("ATOM"):
-                        continue
-
-                    atom_name = line[12:16].strip()
-                    if atom_name != "CA":
-                        continue
-                    alt_loc = line[16].strip()
-                    if alt_loc not in {"", "A", "1"}:
-                        continue
-                    atom_chain = line[21].strip()
-                    if atom_chain != chain_id:
-                        continue
-                    resid_text = line[22:26].strip()
-                    try:
-                        resid = int(resid_text)
-                    except ValueError:
-                        continue
-                    if resid < start_seq_id or resid > end_seq_id:
-                        continue
-                    if resid in current_model:
-                        continue
-                    try:
-                        x = float(line[30:38].strip())
-                        y = float(line[38:46].strip())
-                        z = float(line[46:54].strip())
-                    except ValueError:
-                        continue
-                    current_model[resid] = np.array([x, y, z], dtype=float)
-
-            if has_model_records:
-                if in_model or current_model:
-                    models.append(current_model)
-            elif current_model:
-                models.append(current_model)
-            return models
-
-        def kabsch_rmsd(reference: np.ndarray, mobile: np.ndarray) -> float:
-            ref_centered = reference - reference.mean(axis=0)
-            mob_centered = mobile - mobile.mean(axis=0)
-            covariance = mob_centered.T @ ref_centered
-            v_mat, _, w_t = np.linalg.svd(covariance)
-            det_sign = np.sign(np.linalg.det(v_mat @ w_t))
-            correction = np.diag([1.0, 1.0, det_sign])
-            rotation = v_mat @ correction @ w_t
-            aligned = mob_centered @ rotation
-            diff = aligned - ref_centered
-            return float(np.sqrt((diff * diff).sum() / reference.shape[0]))
-
-        model_maps = parse_models_ca_coords()
+        model_maps = parse_models_ca_coords(
+            pdb_path=pdb_path,
+            chain_id=chain_id,
+            start_seq_id=start_seq_id,
+            end_seq_id=end_seq_id,
+        )
         if len(model_maps) < 2:
             return None
 
@@ -1172,10 +1420,8 @@ class SolutionNMRMonomerXrayHomologCollector:
             )
             if entity_ids:
                 for entity_batch in chunked(entity_ids, self.config.graphql_batch_size):
-                    matched = (
-                        self.client.fetch_sequence_identity_group_ids_for_polymer_entity_ids(
-                            entity_batch, similarity_cutoff=similarity_cutoff
-                        )
+                    matched = self.client.fetch_sequence_identity_group_ids_for_polymer_entity_ids(
+                        entity_batch, similarity_cutoff=similarity_cutoff
                     )
                     found_groups.update(gid for gid in matched if gid in group_ids)
             LOGGER.info(
@@ -1262,6 +1508,315 @@ class SolutionNMRMonomerXrayHomologCollector:
 
         key_fn = lambda r: (r.year, r.entry_id)
         return sorted(records_95, key=key_fn), sorted(records_100, key=key_fn)
+
+
+class SolutionNMRMonomerXrayRmsdCollector:
+    def __init__(
+        self,
+        client: RCSBClient,
+        config: CollectorConfig,
+        cache_dir: Path,
+        rmsd_workers: int,
+        sequence_identity_percent: int = 100,
+    ) -> None:
+        if sequence_identity_percent not in {95, 100}:
+            raise ValueError("sequence_identity_percent must be 95 or 100")
+        self.client = client
+        self.config = config
+        self.cache_dir = cache_dir
+        self.rmsd_workers = max(1, rmsd_workers)
+        self.sequence_identity_percent = sequence_identity_percent
+        self.group_query_batch_size = 200
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+
+    def _download_pdb_if_needed(self, entry_id: str) -> Path:
+        path = self.cache_dir / f"{entry_id}.pdb"
+        if path.exists() and path.stat().st_size > 0:
+            return path
+
+        url = f"https://files.rcsb.org/download/{entry_id}.pdb"
+        last_error: Exception | None = None
+        for attempt in range(1, self.config.retries + 1):
+            try:
+                response = self.client.session.get(
+                    url, timeout=self.config.timeout_seconds
+                )
+                response.raise_for_status()
+                path.write_text(response.text, encoding="utf-8")
+                return path
+            except (requests.RequestException, OSError) as exc:
+                last_error = exc
+                wait_seconds = self.config.backoff_seconds * attempt
+                if attempt < self.config.retries:
+                    time.sleep(wait_seconds)
+        raise RuntimeError(f"Failed to download {entry_id}: {last_error}")
+
+    @staticmethod
+    def _compute_ca_rmsd_to_xray(
+        nmr_pdb_path: Path,
+        nmr_chain_id: str,
+        xray_pdb_path: Path,
+        xray_chain_id: str,
+    ) -> tuple[int, float] | None:
+        from collections import Counter
+
+        nmr_models = parse_models_ca_coords(nmr_pdb_path, nmr_chain_id)
+        if len(nmr_models) < 2:
+            return None
+        xray_models = parse_models_ca_coords(xray_pdb_path, xray_chain_id)
+        if not xray_models:
+            return None
+
+        common_nmr_resids = set(nmr_models[0].keys())
+        for model_map in nmr_models[1:]:
+            common_nmr_resids &= set(model_map.keys())
+        if len(common_nmr_resids) < 3:
+            return None
+
+        xray_resids = set(xray_models[0].keys())
+        if len(xray_resids) < 3:
+            return None
+
+        # Residue numbering may differ by a constant offset between NMR and X-ray entries.
+        offset_votes: Counter[int] = Counter()
+        for nmr_resid in common_nmr_resids:
+            for xray_resid in xray_resids:
+                offset_votes[xray_resid - nmr_resid] += 1
+        best_offset, _ = offset_votes.most_common(1)[0]
+
+        common_resids = sorted(
+            resid for resid in common_nmr_resids if (resid + best_offset) in xray_resids
+        )
+        if len(common_resids) < 3:
+            return None
+
+        nmr_coords = np.asarray(
+            [[model_map[resid] for resid in common_resids] for model_map in nmr_models],
+            dtype=float,
+        )
+        nmr_mean_coords = nmr_coords.mean(axis=0)
+        xray_coords = np.asarray(
+            [xray_models[0][resid + best_offset] for resid in common_resids],
+            dtype=float,
+        )
+        rmsd = kabsch_rmsd(reference=xray_coords, mobile=nmr_mean_coords)
+        return len(common_resids), rmsd
+
+    def _resolve_best_xray_analog_by_group(
+        self, group_ids: set[str]
+    ) -> dict[str, tuple[str, tuple[str, ...], float]]:
+        if not group_ids:
+            return {}
+
+        best_by_group: dict[str, tuple[str, tuple[str, ...], float]] = {}
+        resolution_cache: dict[str, float] = {}
+        group_batches = list(chunked(sorted(group_ids), self.group_query_batch_size))
+
+        for batch_idx, group_batch in enumerate(group_batches, start=1):
+            entity_ids = self.client.fetch_xray_polymer_entity_ids_for_group_ids(
+                group_batch
+            )
+            for entity_batch in chunked(entity_ids, self.config.graphql_batch_size):
+                mappings = self.client.fetch_polymer_entity_group_mapping_for_ids(
+                    entity_batch, similarity_cutoff=self.sequence_identity_percent
+                )
+                if not mappings:
+                    continue
+                unknown_entries = sorted(
+                    {m.entry_id for m in mappings if m.entry_id not in resolution_cache}
+                )
+                for entry_batch in chunked(
+                    unknown_entries, self.config.graphql_batch_size
+                ):
+                    resolution_cache.update(
+                        self.client.fetch_entry_resolution_for_ids(entry_batch)
+                    )
+
+                for mapping in mappings:
+                    if mapping.group_id not in group_ids:
+                        continue
+                    resolution = resolution_cache.get(mapping.entry_id)
+                    if resolution is None:
+                        continue
+                    candidate = (mapping.entry_id, mapping.chain_ids, resolution)
+                    current = best_by_group.get(mapping.group_id)
+                    if (
+                        current is None
+                        or candidate[2] < current[2]
+                        or (
+                            candidate[2] == current[2]
+                            and (candidate[0], candidate[1]) < (current[0], current[1])
+                        )
+                    ):
+                        best_by_group[mapping.group_id] = candidate
+
+            LOGGER.info(
+                "SOLUTION NMR X-ray RMSD %d%%: resolved best analog for group batch %d/%d",
+                self.sequence_identity_percent,
+                batch_idx,
+                len(group_batches),
+            )
+        return best_by_group
+
+    def _compute_record(
+        self,
+        seed: SolutionNMRMonomerXraySeedRecord,
+        best_xray_by_group: dict[str, tuple[str, tuple[str, ...], float]],
+    ) -> SolutionNMRMonomerXrayRmsdRecord | None:
+        group_id = (
+            seed.group_id_95
+            if self.sequence_identity_percent == 95
+            else seed.group_id_100
+        )
+        if not group_id:
+            return None
+
+        best = best_xray_by_group.get(group_id)
+        if best is None:
+            return None
+        xray_entry_id, xray_chain_ids, xray_resolution = best
+
+        try:
+            nmr_pdb_path = self._download_pdb_if_needed(seed.entry_id)
+            xray_pdb_path = self._download_pdb_if_needed(xray_entry_id)
+
+            best_chain_result: tuple[str, int, float] | None = None
+            for xray_chain_id in xray_chain_ids:
+                rmsd_result = self._compute_ca_rmsd_to_xray(
+                    nmr_pdb_path=nmr_pdb_path,
+                    nmr_chain_id=seed.chain_id,
+                    xray_pdb_path=xray_pdb_path,
+                    xray_chain_id=xray_chain_id,
+                )
+                if rmsd_result is None:
+                    continue
+                n_common_ca, rmsd_ca = rmsd_result
+                candidate = (xray_chain_id, n_common_ca, rmsd_ca)
+                if (
+                    best_chain_result is None
+                    or candidate[1] > best_chain_result[1]
+                    or (
+                        candidate[1] == best_chain_result[1]
+                        and candidate[2] < best_chain_result[2]
+                    )
+                ):
+                    best_chain_result = candidate
+
+            if best_chain_result is None:
+                return None
+            xray_chain_id, n_common_ca, rmsd_ca = best_chain_result
+            return SolutionNMRMonomerXrayRmsdRecord(
+                entry_id=seed.entry_id,
+                year=seed.year,
+                sequence_identity_percent=self.sequence_identity_percent,
+                nmr_chain_id=seed.chain_id,
+                xray_entry_id=xray_entry_id,
+                xray_chain_id=xray_chain_id,
+                xray_resolution_angstrom=xray_resolution,
+                n_common_ca=n_common_ca,
+                rmsd_ca_angstrom=rmsd_ca,
+            )
+        except Exception as exc:
+            LOGGER.warning(
+                "X-ray RMSD calculation failed for %s: %s", seed.entry_id, exc
+            )
+            return None
+
+    def collect(
+        self,
+        max_entries: int | None = None,
+        skip_entry_ids: set[str] | None = None,
+    ) -> list[SolutionNMRMonomerXrayRmsdRecord]:
+        skip_entry_ids = skip_entry_ids or set()
+        entry_ids = sorted(
+            set(
+                self.client.fetch_entry_ids_for_method(
+                    method_label="SOLUTION NMR", query_value="SOLUTION NMR"
+                )
+            )
+        )
+        LOGGER.info(
+            "SOLUTION NMR X-ray RMSD %d%%: total unique IDs collected: %d",
+            self.sequence_identity_percent,
+            len(entry_ids),
+        )
+
+        batches = list(chunked(entry_ids, self.config.graphql_batch_size))
+        seeds: list[SolutionNMRMonomerXraySeedRecord] = []
+        with ThreadPoolExecutor(max_workers=self.config.max_workers) as executor:
+            future_map = {
+                executor.submit(
+                    self.client.fetch_solution_nmr_monomer_xray_seed_records_for_ids,
+                    batch,
+                ): idx
+                for idx, batch in enumerate(batches, start=1)
+            }
+            for future in as_completed(future_map):
+                seeds.extend(future.result())
+                batch_idx = future_map[future]
+                LOGGER.info(
+                    "SOLUTION NMR X-ray RMSD base: processed batch %d/%d",
+                    batch_idx,
+                    len(batches),
+                )
+
+        filtered_seeds = [
+            seed
+            for seed in seeds
+            if seed.entry_id not in skip_entry_ids
+            and (
+                seed.group_id_95 is not None
+                if self.sequence_identity_percent == 95
+                else seed.group_id_100 is not None
+            )
+        ]
+        filtered_seeds = sorted(filtered_seeds, key=lambda s: (s.year, s.entry_id))
+        if max_entries is not None:
+            filtered_seeds = filtered_seeds[: max(0, max_entries)]
+
+        group_ids = {
+            (
+                seed.group_id_95
+                if self.sequence_identity_percent == 95
+                else seed.group_id_100
+            )
+            for seed in filtered_seeds
+        }
+        group_ids = {gid for gid in group_ids if gid}
+        LOGGER.info(
+            "SOLUTION NMR X-ray RMSD %d%%: entries to process=%d, unique groups=%d",
+            self.sequence_identity_percent,
+            len(filtered_seeds),
+            len(group_ids),
+        )
+
+        best_xray_by_group = self._resolve_best_xray_analog_by_group(group_ids)
+
+        records: list[SolutionNMRMonomerXrayRmsdRecord] = []
+        with ThreadPoolExecutor(max_workers=self.rmsd_workers) as executor:
+            future_map = {
+                executor.submit(
+                    self._compute_record,
+                    seed=seed,
+                    best_xray_by_group=best_xray_by_group,
+                ): idx
+                for idx, seed in enumerate(filtered_seeds, start=1)
+            }
+            total = len(future_map)
+            for future in as_completed(future_map):
+                record = future.result()
+                if record is not None:
+                    records.append(record)
+                idx = future_map[future]
+                if total > 0 and (idx % 50 == 0 or idx == total):
+                    LOGGER.info(
+                        "SOLUTION NMR X-ray RMSD %d%%: processed %d/%d entries",
+                        self.sequence_identity_percent,
+                        idx,
+                        total,
+                    )
+
+        return sorted(records, key=lambda r: (r.year, r.entry_id))
 
 
 def write_method_counts_csv(
@@ -1430,6 +1985,68 @@ def write_solution_nmr_monomer_xray_homolog_csv(
         )
 
 
+def read_solution_nmr_monomer_xray_rmsd_csv(
+    input_path: Path,
+) -> list[SolutionNMRMonomerXrayRmsdRecord]:
+    if not input_path.exists():
+        return []
+    records: list[SolutionNMRMonomerXrayRmsdRecord] = []
+    with input_path.open("r", newline="", encoding="utf-8") as csvfile:
+        reader = csv.DictReader(csvfile)
+        for row in reader:
+            if not row:
+                continue
+            records.append(
+                SolutionNMRMonomerXrayRmsdRecord(
+                    entry_id=str(row["entry_id"]),
+                    year=int(row["year"]),
+                    sequence_identity_percent=int(row["sequence_identity_percent"]),
+                    nmr_chain_id=str(row["nmr_chain_id"]),
+                    xray_entry_id=str(row["xray_entry_id"]),
+                    xray_chain_id=str(row["xray_chain_id"]),
+                    xray_resolution_angstrom=float(row["xray_resolution_angstrom"]),
+                    n_common_ca=int(row["n_common_ca"]),
+                    rmsd_ca_angstrom=float(row["rmsd_ca_angstrom"]),
+                )
+            )
+    return records
+
+
+def write_solution_nmr_monomer_xray_rmsd_csv(
+    records: list[SolutionNMRMonomerXrayRmsdRecord], output_path: Path
+) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w", newline="", encoding="utf-8") as csvfile:
+        writer = csv.writer(csvfile)
+        writer.writerow(
+            [
+                "entry_id",
+                "year",
+                "sequence_identity_percent",
+                "nmr_chain_id",
+                "xray_entry_id",
+                "xray_chain_id",
+                "xray_resolution_angstrom",
+                "n_common_ca",
+                "rmsd_ca_angstrom",
+            ]
+        )
+        writer.writerows(
+            (
+                r.entry_id,
+                r.year,
+                r.sequence_identity_percent,
+                r.nmr_chain_id,
+                r.xray_entry_id,
+                r.xray_chain_id,
+                f"{r.xray_resolution_angstrom:.4f}",
+                r.n_common_ca,
+                f"{r.rmsd_ca_angstrom:.4f}",
+            )
+            for r in records
+        )
+
+
 def parse_dataset_kinds(raw_value: str) -> list[DatasetKind]:
     if raw_value.strip().lower() == "all":
         return [
@@ -1439,6 +2056,7 @@ def parse_dataset_kinds(raw_value: str) -> list[DatasetKind]:
             DatasetKind.SOLUTION_NMR_MONOMER_PRECISION,
             DatasetKind.SOLUTION_NMR_MONOMER_QUALITY,
             DatasetKind.SOLUTION_NMR_MONOMER_XRAY_HOMOLOGS,
+            DatasetKind.SOLUTION_NMR_MONOMER_XRAY_RMSD,
         ]
     raw_items = [item.strip() for item in raw_value.split(",") if item.strip()]
     selected: list[DatasetKind] = []
@@ -1468,7 +2086,7 @@ def parse_args() -> argparse.Namespace:
             DatasetKind.SOLUTION_NMR_MONOMER_SECONDARY,
         ],
         help="Comma-separated dataset kinds or 'all'. "
-        "Available: method_counts, solution_nmr_weights, solution_nmr_monomer_secondary, solution_nmr_monomer_precision, solution_nmr_monomer_quality, solution_nmr_monomer_xray_homologs (default: the first three).",
+        "Available: method_counts, solution_nmr_weights, solution_nmr_monomer_secondary, solution_nmr_monomer_precision, solution_nmr_monomer_quality, solution_nmr_monomer_xray_homologs, solution_nmr_monomer_xray_rmsd (default: the first three).",
     )
     parser.add_argument(
         "--counts-output",
@@ -1513,6 +2131,12 @@ def parse_args() -> argparse.Namespace:
         help="Output CSV path for solution_nmr_monomer_xray_homologs dataset at 100%% sequence identity.",
     )
     parser.add_argument(
+        "--solution-nmr-monomer-xray-rmsd-output",
+        type=Path,
+        default=Path("data/solution_nmr_monomer_xray_rmsd.csv"),
+        help="Output CSV path for solution_nmr_monomer_xray_rmsd dataset.",
+    )
+    parser.add_argument(
         "--precision-cache-dir",
         type=Path,
         default=Path("data/pdb_cache"),
@@ -1534,6 +2158,36 @@ def parse_args() -> argparse.Namespace:
         "--precision-overwrite",
         action="store_true",
         help="Recompute precision CSV from scratch (ignore existing rows).",
+    )
+    parser.add_argument(
+        "--xray-rmsd-cache-dir",
+        type=Path,
+        default=Path("data/pdb_cache"),
+        help="Directory to cache downloaded PDB files for X-ray RMSD calculation.",
+    )
+    parser.add_argument(
+        "--xray-rmsd-max-entries",
+        type=int,
+        default=None,
+        help="Optional limit of entries to process for X-ray RMSD dataset.",
+    )
+    parser.add_argument(
+        "--xray-rmsd-workers",
+        type=int,
+        default=4,
+        help="Parallel workers for X-ray RMSD computation.",
+    )
+    parser.add_argument(
+        "--xray-rmsd-overwrite",
+        action="store_true",
+        help="Recompute X-ray RMSD CSV from scratch (ignore existing rows).",
+    )
+    parser.add_argument(
+        "--xray-rmsd-sequence-identity",
+        type=int,
+        choices=(95, 100),
+        default=100,
+        help="Sequence identity cutoff for selecting X-ray homolog groups (95 or 100).",
     )
     parser.add_argument(
         "--page-size", type=int, default=10000, help="Search API page size."
@@ -1679,6 +2333,55 @@ def main() -> None:
             "Saved %d records to %s",
             len(records_100),
             args.solution_nmr_monomer_xray_homolog_100_output,
+        )
+
+    if DatasetKind.SOLUTION_NMR_MONOMER_XRAY_RMSD in args.datasets:
+        existing_records: list[SolutionNMRMonomerXrayRmsdRecord] = []
+        skip_entry_ids: set[str] = set()
+        if (
+            not args.xray_rmsd_overwrite
+            and Path(args.solution_nmr_monomer_xray_rmsd_output).exists()
+        ):
+            existing_records = read_solution_nmr_monomer_xray_rmsd_csv(
+                Path(args.solution_nmr_monomer_xray_rmsd_output)
+            )
+            existing_records = [
+                record
+                for record in existing_records
+                if record.sequence_identity_percent == args.xray_rmsd_sequence_identity
+            ]
+            skip_entry_ids = {record.entry_id for record in existing_records}
+            LOGGER.info(
+                "SOLUTION NMR X-ray RMSD %d%%: loaded %d existing records for resume",
+                args.xray_rmsd_sequence_identity,
+                len(existing_records),
+            )
+
+        rmsd_collector = SolutionNMRMonomerXrayRmsdCollector(
+            client=client,
+            config=config,
+            cache_dir=Path(args.xray_rmsd_cache_dir),
+            rmsd_workers=args.xray_rmsd_workers,
+            sequence_identity_percent=args.xray_rmsd_sequence_identity,
+        )
+        new_records = rmsd_collector.collect(
+            max_entries=args.xray_rmsd_max_entries,
+            skip_entry_ids=skip_entry_ids,
+        )
+        combined_records = sorted(
+            existing_records + new_records,
+            key=lambda record: (record.year, record.entry_id),
+        )
+        write_solution_nmr_monomer_xray_rmsd_csv(
+            records=combined_records,
+            output_path=args.solution_nmr_monomer_xray_rmsd_output,
+        )
+        LOGGER.info(
+            "Saved %d records to %s (new: %d, identity=%d%%)",
+            len(combined_records),
+            args.solution_nmr_monomer_xray_rmsd_output,
+            len(new_records),
+            args.xray_rmsd_sequence_identity,
         )
 
 
