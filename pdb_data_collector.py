@@ -37,6 +37,7 @@ class DatasetKind(str, Enum):
     SOLUTION_NMR_MONOMER_SECONDARY = "solution_nmr_monomer_secondary"
     SOLUTION_NMR_MONOMER_PRECISION = "solution_nmr_monomer_precision"
     SOLUTION_NMR_MONOMER_QUALITY = "solution_nmr_monomer_quality"
+    SOLUTION_NMR_MONOMER_XRAY_HOMOLOGS = "solution_nmr_monomer_xray_homologs"
 
 
 @dataclass(frozen=True)
@@ -105,6 +106,15 @@ class SolutionNMRMonomerQualityRecord:
     clashscore: float
     ramachandran_outliers_percent: float
     sidechain_outliers_percent: float
+
+
+@dataclass(frozen=True)
+class SolutionNMRMonomerXrayHomologRecord:
+    entry_id: str
+    year: int
+    sequence_identity_percent: int
+    group_id: str | None
+    has_xray_homolog: bool
 
 
 def chunked(items: list[str], size: int) -> Iterator[list[str]]:
@@ -209,6 +219,95 @@ class RCSBClient:
             for entry in entries
             if entry and entry.get("rcsb_accession_info", {}).get("deposit_date")
         ]
+
+    def fetch_xray_polymer_entity_ids_for_group_ids(
+        self, group_ids: list[str]
+    ) -> list[str]:
+        if not group_ids:
+            return []
+        all_ids: list[str] = []
+        start = 0
+        total_count: int | None = None
+        while total_count is None or start < total_count:
+            payload = {
+                "query": {
+                    "type": "group",
+                    "logical_operator": "and",
+                    "nodes": [
+                        {
+                            "type": "terminal",
+                            "service": "text",
+                            "parameters": {
+                                "attribute": "exptl.method",
+                                "operator": "exact_match",
+                                "value": "X-RAY DIFFRACTION",
+                            },
+                        },
+                        {
+                            "type": "terminal",
+                            "service": "text",
+                            "parameters": {
+                                "attribute": "rcsb_polymer_entity_group_membership.group_id",
+                                "operator": "in",
+                                "value": group_ids,
+                            },
+                        },
+                    ],
+                },
+                "return_type": "polymer_entity",
+                "request_options": {
+                    "paginate": {"start": start, "rows": self.config.page_size}
+                },
+            }
+            data = self._post_json(self.config.search_url, payload)
+            total_count = int(data.get("total_count", 0))
+            batch_ids = [
+                item["identifier"]
+                for item in data.get("result_set", [])
+                if "identifier" in item
+            ]
+            all_ids.extend(batch_ids)
+            start += len(batch_ids)
+            if not batch_ids:
+                break
+        return all_ids
+
+    def fetch_sequence_identity_group_ids_for_polymer_entity_ids(
+        self, entity_ids: list[str], similarity_cutoff: int
+    ) -> set[str]:
+        if not entity_ids:
+            return set()
+        query = """
+        query($ids:[String!]!) {
+          polymer_entities(entity_ids:$ids) {
+            rcsb_polymer_entity_group_membership {
+              aggregation_method
+              similarity_cutoff
+              group_id
+            }
+          }
+        }
+        """
+        payload = {"query": query, "variables": {"ids": entity_ids}}
+        data = self._post_json(self.config.graphql_url, payload)
+        entities = data.get("data", {}).get("polymer_entities", [])
+        matching_group_ids: set[str] = set()
+        for entity in entities:
+            if not entity:
+                continue
+            memberships = entity.get("rcsb_polymer_entity_group_membership") or []
+            for membership in memberships:
+                if not membership:
+                    continue
+                if membership.get("aggregation_method") != "sequence_identity":
+                    continue
+                raw_cutoff = membership.get("similarity_cutoff")
+                if raw_cutoff is None or int(round(float(raw_cutoff))) != similarity_cutoff:
+                    continue
+                group_id = membership.get("group_id")
+                if group_id:
+                    matching_group_ids.add(str(group_id))
+        return matching_group_ids
 
     def fetch_solution_nmr_weight_records_for_ids(
         self, entry_ids: list[str]
@@ -425,7 +524,9 @@ class RCSBClient:
             if model_count is None or int(model_count) <= 1:
                 continue
 
-            year = extract_year(entry.get("rcsb_accession_info", {}).get("deposit_date"))
+            year = extract_year(
+                entry.get("rcsb_accession_info", {}).get("deposit_date")
+            )
             if year is None:
                 continue
 
@@ -531,7 +632,9 @@ class RCSBClient:
             if model_count is None or int(model_count) <= 1:
                 continue
 
-            year = extract_year(entry.get("rcsb_accession_info", {}).get("deposit_date"))
+            year = extract_year(
+                entry.get("rcsb_accession_info", {}).get("deposit_date")
+            )
             if year is None:
                 continue
 
@@ -566,6 +669,90 @@ class RCSBClient:
                     sidechain_outliers_percent=float(rotamer),
                 )
             )
+        return records
+
+    def fetch_solution_nmr_monomer_xray_group_records_for_ids(
+        self, entry_ids: list[str]
+    ) -> list[tuple[str, int, str | None, str | None]]:
+        query = """
+        query($ids:[String!]!) {
+          entries(entry_ids:$ids) {
+            rcsb_id
+            rcsb_entry_info {
+              deposited_model_count
+            }
+            rcsb_accession_info {
+              deposit_date
+            }
+            polymer_entities {
+              entity_poly {
+                type
+                rcsb_entity_polymer_type
+                pdbx_strand_id
+              }
+              rcsb_polymer_entity_group_membership {
+                aggregation_method
+                similarity_cutoff
+                group_id
+              }
+            }
+          }
+        }
+        """
+        payload = {"query": query, "variables": {"ids": entry_ids}}
+        data = self._post_json(self.config.graphql_url, payload)
+        entries = data.get("data", {}).get("entries", [])
+        records: list[tuple[str, int, str | None, str | None]] = []
+
+        for entry in entries:
+            if not entry:
+                continue
+            entry_id = entry.get("rcsb_id")
+            if not entry_id:
+                continue
+
+            model_count = entry.get("rcsb_entry_info", {}).get("deposited_model_count")
+            if model_count is None or int(model_count) <= 1:
+                continue
+
+            year = extract_year(entry.get("rcsb_accession_info", {}).get("deposit_date"))
+            if year is None:
+                continue
+
+            polymer_entities = entry.get("polymer_entities") or []
+            if len(polymer_entities) != 1:
+                continue
+            entity_poly = (polymer_entities[0] or {}).get("entity_poly") or {}
+            if entity_poly.get("type") not in {"polypeptide(L)", "polypeptide(D)"}:
+                continue
+            if entity_poly.get("rcsb_entity_polymer_type") != "Protein":
+                continue
+            strand_id = str(entity_poly.get("pdbx_strand_id") or "").strip()
+            if not strand_id or "," in strand_id:
+                continue
+
+            memberships = (
+                (polymer_entities[0] or {}).get("rcsb_polymer_entity_group_membership")
+                or []
+            )
+            group_95: str | None = None
+            group_100: str | None = None
+            for membership in memberships:
+                if not membership:
+                    continue
+                if membership.get("aggregation_method") != "sequence_identity":
+                    continue
+                group_id = membership.get("group_id")
+                cutoff = membership.get("similarity_cutoff")
+                if not group_id or cutoff is None:
+                    continue
+                cutoff_value = int(round(float(cutoff)))
+                if cutoff_value == 95:
+                    group_95 = str(group_id)
+                elif cutoff_value == 100:
+                    group_100 = str(group_id)
+
+            records.append((str(entry_id), year, group_95, group_100))
         return records
 
 
@@ -823,7 +1010,9 @@ class SolutionNMRMonomerPrecisionCollector:
             dtype=float,
         )
         mean_coords = coords.mean(axis=0)
-        per_model_rmsd = [kabsch_rmsd(mean_coords, model_coord) for model_coord in coords]
+        per_model_rmsd = [
+            kabsch_rmsd(mean_coords, model_coord) for model_coord in coords
+        ]
         return len(model_maps), len(sorted_resids), float(np.mean(per_model_rmsd))
 
     def _compute_record(
@@ -851,7 +1040,9 @@ class SolutionNMRMonomerPrecisionCollector:
                 mean_rmsd_angstrom=mean_rmsd,
             )
         except Exception as exc:
-            LOGGER.warning("Precision calculation failed for %s: %s", core.entry_id, exc)
+            LOGGER.warning(
+                "Precision calculation failed for %s: %s", core.entry_id, exc
+            )
             return None
 
     def collect(
@@ -867,7 +1058,9 @@ class SolutionNMRMonomerPrecisionCollector:
                 )
             )
         )
-        LOGGER.info("SOLUTION NMR precision: total unique IDs collected: %d", len(entry_ids))
+        LOGGER.info(
+            "SOLUTION NMR precision: total unique IDs collected: %d", len(entry_ids)
+        )
 
         batches = list(chunked(entry_ids, self.config.graphql_batch_size))
         core_records: list[SolutionNMRMonomerCoreRegionRecord] = []
@@ -889,7 +1082,9 @@ class SolutionNMRMonomerPrecisionCollector:
                     len(batches),
                 )
 
-        filtered_core = [record for record in core_records if record.entry_id not in skip_entry_ids]
+        filtered_core = [
+            record for record in core_records if record.entry_id not in skip_entry_ids
+        ]
         filtered_core = sorted(filtered_core, key=lambda r: (r.year, r.entry_id))
         if max_entries is not None:
             filtered_core = filtered_core[: max(0, max_entries)]
@@ -933,14 +1128,17 @@ class SolutionNMRMonomerQualityCollector:
                 )
             )
         )
-        LOGGER.info("SOLUTION NMR quality: total unique IDs collected: %d", len(entry_ids))
+        LOGGER.info(
+            "SOLUTION NMR quality: total unique IDs collected: %d", len(entry_ids)
+        )
         batches = list(chunked(entry_ids, self.config.graphql_batch_size))
         records: list[SolutionNMRMonomerQualityRecord] = []
 
         with ThreadPoolExecutor(max_workers=self.config.max_workers) as executor:
             future_map = {
                 executor.submit(
-                    self.client.fetch_solution_nmr_monomer_quality_records_for_ids, batch
+                    self.client.fetch_solution_nmr_monomer_quality_records_for_ids,
+                    batch,
                 ): idx
                 for idx, batch in enumerate(batches, start=1)
             }
@@ -953,6 +1151,117 @@ class SolutionNMRMonomerQualityCollector:
                     len(batches),
                 )
         return sorted(records, key=lambda r: (r.year, r.entry_id))
+
+
+class SolutionNMRMonomerXrayHomologCollector:
+    def __init__(self, client: RCSBClient, config: CollectorConfig) -> None:
+        self.client = client
+        self.config = config
+        self.group_query_batch_size = 200
+
+    def _resolve_xray_groups(
+        self, group_ids: set[str], similarity_cutoff: int
+    ) -> set[str]:
+        if not group_ids:
+            return set()
+        found_groups: set[str] = set()
+        group_batches = list(chunked(sorted(group_ids), self.group_query_batch_size))
+        for batch_idx, group_batch in enumerate(group_batches, start=1):
+            entity_ids = self.client.fetch_xray_polymer_entity_ids_for_group_ids(
+                group_batch
+            )
+            if entity_ids:
+                for entity_batch in chunked(entity_ids, self.config.graphql_batch_size):
+                    matched = (
+                        self.client.fetch_sequence_identity_group_ids_for_polymer_entity_ids(
+                            entity_batch, similarity_cutoff=similarity_cutoff
+                        )
+                    )
+                    found_groups.update(gid for gid in matched if gid in group_ids)
+            LOGGER.info(
+                "SOLUTION NMR X-ray homologs %d%%: processed group batch %d/%d",
+                similarity_cutoff,
+                batch_idx,
+                len(group_batches),
+            )
+        return found_groups
+
+    def collect(
+        self,
+    ) -> tuple[
+        list[SolutionNMRMonomerXrayHomologRecord],
+        list[SolutionNMRMonomerXrayHomologRecord],
+    ]:
+        entry_ids = sorted(
+            set(
+                self.client.fetch_entry_ids_for_method(
+                    method_label="SOLUTION NMR", query_value="SOLUTION NMR"
+                )
+            )
+        )
+        LOGGER.info(
+            "SOLUTION NMR monomer X-ray homologs: total unique IDs collected: %d",
+            len(entry_ids),
+        )
+        batches = list(chunked(entry_ids, self.config.graphql_batch_size))
+        base_rows: list[tuple[str, int, str | None, str | None]] = []
+
+        with ThreadPoolExecutor(max_workers=self.config.max_workers) as executor:
+            future_map = {
+                executor.submit(
+                    self.client.fetch_solution_nmr_monomer_xray_group_records_for_ids,
+                    batch,
+                ): idx
+                for idx, batch in enumerate(batches, start=1)
+            }
+            for future in as_completed(future_map):
+                base_rows.extend(future.result())
+                batch_idx = future_map[future]
+                LOGGER.info(
+                    "SOLUTION NMR monomer X-ray homolog base: processed batch %d/%d",
+                    batch_idx,
+                    len(batches),
+                )
+
+        group_ids_95 = {row[2] for row in base_rows if row[2]}
+        group_ids_100 = {row[3] for row in base_rows if row[3]}
+        LOGGER.info(
+            "SOLUTION NMR monomer X-ray homologs: unique groups found (%d%%=%d, %d%%=%d)",
+            95,
+            len(group_ids_95),
+            100,
+            len(group_ids_100),
+        )
+
+        xray_groups_95 = self._resolve_xray_groups(group_ids_95, similarity_cutoff=95)
+        xray_groups_100 = self._resolve_xray_groups(
+            group_ids_100, similarity_cutoff=100
+        )
+
+        records_95: list[SolutionNMRMonomerXrayHomologRecord] = []
+        records_100: list[SolutionNMRMonomerXrayHomologRecord] = []
+        for entry_id, year, group_95, group_100 in base_rows:
+            records_95.append(
+                SolutionNMRMonomerXrayHomologRecord(
+                    entry_id=entry_id,
+                    year=year,
+                    sequence_identity_percent=95,
+                    group_id=group_95,
+                    has_xray_homolog=bool(group_95 and group_95 in xray_groups_95),
+                )
+            )
+            records_100.append(
+                SolutionNMRMonomerXrayHomologRecord(
+                    entry_id=entry_id,
+                    year=year,
+                    sequence_identity_percent=100,
+                    group_id=group_100,
+                    has_xray_homolog=bool(group_100 and group_100 in xray_groups_100),
+                )
+            )
+
+        key_fn = lambda r: (r.year, r.entry_id)
+        return sorted(records_95, key=key_fn), sorted(records_100, key=key_fn)
 
 
 def write_method_counts_csv(
@@ -1094,6 +1403,33 @@ def write_solution_nmr_monomer_quality_csv(
         )
 
 
+def write_solution_nmr_monomer_xray_homolog_csv(
+    records: list[SolutionNMRMonomerXrayHomologRecord], output_path: Path
+) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w", newline="", encoding="utf-8") as csvfile:
+        writer = csv.writer(csvfile)
+        writer.writerow(
+            [
+                "entry_id",
+                "year",
+                "sequence_identity_percent",
+                "group_id",
+                "has_xray_homolog",
+            ]
+        )
+        writer.writerows(
+            (
+                r.entry_id,
+                r.year,
+                r.sequence_identity_percent,
+                r.group_id or "",
+                int(r.has_xray_homolog),
+            )
+            for r in records
+        )
+
+
 def parse_dataset_kinds(raw_value: str) -> list[DatasetKind]:
     if raw_value.strip().lower() == "all":
         return [
@@ -1102,6 +1438,7 @@ def parse_dataset_kinds(raw_value: str) -> list[DatasetKind]:
             DatasetKind.SOLUTION_NMR_MONOMER_SECONDARY,
             DatasetKind.SOLUTION_NMR_MONOMER_PRECISION,
             DatasetKind.SOLUTION_NMR_MONOMER_QUALITY,
+            DatasetKind.SOLUTION_NMR_MONOMER_XRAY_HOMOLOGS,
         ]
     raw_items = [item.strip() for item in raw_value.split(",") if item.strip()]
     selected: list[DatasetKind] = []
@@ -1131,7 +1468,7 @@ def parse_args() -> argparse.Namespace:
             DatasetKind.SOLUTION_NMR_MONOMER_SECONDARY,
         ],
         help="Comma-separated dataset kinds or 'all'. "
-        "Available: method_counts, solution_nmr_weights, solution_nmr_monomer_secondary, solution_nmr_monomer_precision (default: the first three).",
+        "Available: method_counts, solution_nmr_weights, solution_nmr_monomer_secondary, solution_nmr_monomer_precision, solution_nmr_monomer_quality, solution_nmr_monomer_xray_homologs (default: the first three).",
     )
     parser.add_argument(
         "--counts-output",
@@ -1162,6 +1499,18 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("data/solution_nmr_monomer_quality_metrics.csv"),
         help="Output CSV path for solution_nmr_monomer_quality dataset.",
+    )
+    parser.add_argument(
+        "--solution-nmr-monomer-xray-homolog-95-output",
+        type=Path,
+        default=Path("data/solution_nmr_monomer_xray_homologs_95.csv"),
+        help="Output CSV path for solution_nmr_monomer_xray_homologs dataset at 95%% sequence identity.",
+    )
+    parser.add_argument(
+        "--solution-nmr-monomer-xray-homolog-100-output",
+        type=Path,
+        default=Path("data/solution_nmr_monomer_xray_homologs_100.csv"),
+        help="Output CSV path for solution_nmr_monomer_xray_homologs dataset at 100%% sequence identity.",
     )
     parser.add_argument(
         "--precision-cache-dir",
@@ -1279,10 +1628,12 @@ def main() -> None:
             skip_entry_ids=skip_entry_ids,
         )
         combined_records = sorted(
-            existing_records + new_records, key=lambda record: (record.year, record.entry_id)
+            existing_records + new_records,
+            key=lambda record: (record.year, record.entry_id),
         )
         write_solution_nmr_monomer_precision_csv(
-            records=combined_records, output_path=args.solution_nmr_monomer_precision_output
+            records=combined_records,
+            output_path=args.solution_nmr_monomer_precision_output,
         )
         LOGGER.info(
             "Saved %d records to %s (new: %d)",
@@ -1297,12 +1648,37 @@ def main() -> None:
         )
         quality_records = quality_collector.collect()
         write_solution_nmr_monomer_quality_csv(
-            records=quality_records, output_path=args.solution_nmr_monomer_quality_output
+            records=quality_records,
+            output_path=args.solution_nmr_monomer_quality_output,
         )
         LOGGER.info(
             "Saved %d records to %s",
             len(quality_records),
             args.solution_nmr_monomer_quality_output,
+        )
+
+    if DatasetKind.SOLUTION_NMR_MONOMER_XRAY_HOMOLOGS in args.datasets:
+        homolog_collector = SolutionNMRMonomerXrayHomologCollector(
+            client=client, config=config
+        )
+        records_95, records_100 = homolog_collector.collect()
+        write_solution_nmr_monomer_xray_homolog_csv(
+            records=records_95,
+            output_path=args.solution_nmr_monomer_xray_homolog_95_output,
+        )
+        write_solution_nmr_monomer_xray_homolog_csv(
+            records=records_100,
+            output_path=args.solution_nmr_monomer_xray_homolog_100_output,
+        )
+        LOGGER.info(
+            "Saved %d records to %s",
+            len(records_95),
+            args.solution_nmr_monomer_xray_homolog_95_output,
+        )
+        LOGGER.info(
+            "Saved %d records to %s",
+            len(records_100),
+            args.solution_nmr_monomer_xray_homolog_100_output,
         )
 
 

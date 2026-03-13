@@ -22,6 +22,7 @@ class PlotKind(str, Enum):
     SOLUTION_NMR_MONOMER_SECONDARY = "solution_nmr_monomer_secondary"
     SOLUTION_NMR_MONOMER_PRECISION = "solution_nmr_monomer_precision"
     SOLUTION_NMR_MONOMER_QUALITY = "solution_nmr_monomer_quality"
+    SOLUTION_NMR_MONOMER_XRAY_HOMOLOGS = "solution_nmr_monomer_xray_homologs"
 
 
 @dataclass(frozen=True)
@@ -69,6 +70,19 @@ class PlotConfig:
         "SOLUTION NMR Monomeric Proteins: Mean Sidechain Outliers by Year"
     )
     nmr_monomer_quality_side_y_label: str = "Mean sidechain outliers (%)"
+    nmr_monomer_xray_homolog_95_title: str = (
+        "SOLUTION NMR Monomeric Proteins: X-ray Analogs (95% Sequence Identity) by Year"
+    )
+    nmr_monomer_xray_homolog_100_title: str = (
+        "SOLUTION NMR Monomeric Proteins: X-ray Analogs (100% Sequence Identity) by Year"
+    )
+    nmr_monomer_xray_homolog_y_label: str = "Structures with X-ray analog (%)"
+    nmr_monomer_xray_homolog_95_cumulative_title: str = (
+        "SOLUTION NMR Monomeric Proteins: Cumulative X-ray Analogs (95% Sequence Identity)"
+    )
+    nmr_monomer_xray_homolog_100_cumulative_title: str = (
+        "SOLUTION NMR Monomeric Proteins: Cumulative X-ray Analogs (100% Sequence Identity)"
+    )
     xray_color: str = "#1f77b4"
     cryoem_color: str = "#d62728"
     nmr_color: str = "#2ca02c"
@@ -93,6 +107,7 @@ def parse_plot_kinds(raw_value: str) -> list[PlotKind]:
             PlotKind.SOLUTION_NMR_MONOMER_SECONDARY,
             PlotKind.SOLUTION_NMR_MONOMER_PRECISION,
             PlotKind.SOLUTION_NMR_MONOMER_QUALITY,
+            PlotKind.SOLUTION_NMR_MONOMER_XRAY_HOMOLOGS,
         ]
     raw_items = [item.strip() for item in raw_value.split(",") if item.strip()]
     selected: list[PlotKind] = []
@@ -622,7 +637,9 @@ class PDBScientificPlotter:
     ) -> None:
         table = self._prepare_monomer_quality_table(pd.read_csv(data_path))
         self._scientific_style()
-        yearly = table.groupby("year", as_index=True).mean(numeric_only=True).sort_index()
+        yearly = (
+            table.groupby("year", as_index=True).mean(numeric_only=True).sort_index()
+        )
 
         self._render_figure(
             clash_output_png,
@@ -661,6 +678,125 @@ class PDBScientificPlotter:
             ),
         )
 
+    @staticmethod
+    def _prepare_monomer_xray_homolog_table(df: pd.DataFrame) -> pd.DataFrame:
+        required_columns = {
+            "entry_id",
+            "year",
+            "sequence_identity_percent",
+            "has_xray_homolog",
+        }
+        missing = required_columns - set(df.columns)
+        if missing:
+            raise ValueError(
+                f"Monomer X-ray homolog CSV is missing required columns: {', '.join(sorted(missing))}"
+            )
+        prepared = df.copy()
+        prepared["year"] = prepared["year"].astype(int)
+        prepared["sequence_identity_percent"] = prepared[
+            "sequence_identity_percent"
+        ].astype(int)
+        prepared["has_xray_homolog"] = prepared["has_xray_homolog"].astype(int)
+        return prepared
+
+    def plot_solution_nmr_monomer_xray_homologs(
+        self,
+        data_95_path: Path,
+        data_100_path: Path,
+        output_95_png: Path,
+        output_95_svg: Path,
+        output_100_png: Path,
+        output_100_svg: Path,
+        cumulative_output_95_png: Path,
+        cumulative_output_95_svg: Path,
+        cumulative_output_100_png: Path,
+        cumulative_output_100_svg: Path,
+    ) -> None:
+        table_95 = self._prepare_monomer_xray_homolog_table(pd.read_csv(data_95_path))
+        table_100 = self._prepare_monomer_xray_homolog_table(
+            pd.read_csv(data_100_path)
+        )
+        self._scientific_style()
+
+        yearly_95 = (
+            table_95.groupby("year", as_index=True)["has_xray_homolog"]
+            .mean()
+            .mul(100.0)
+            .sort_index()
+        )
+        yearly_100 = (
+            table_100.groupby("year", as_index=True)["has_xray_homolog"]
+            .mean()
+            .mul(100.0)
+            .sort_index()
+        )
+
+        yearly_count_95 = table_95.groupby("year", as_index=True)["entry_id"].count()
+        yearly_yes_95 = table_95.groupby("year", as_index=True)["has_xray_homolog"].sum()
+        cumulative_share_95 = (
+            yearly_yes_95.cumsum().div(yearly_count_95.cumsum()).mul(100.0).sort_index()
+        )
+
+        yearly_count_100 = table_100.groupby("year", as_index=True)["entry_id"].count()
+        yearly_yes_100 = (
+            table_100.groupby("year", as_index=True)["has_xray_homolog"].sum()
+        )
+        cumulative_share_100 = (
+            yearly_yes_100.cumsum()
+            .div(yearly_count_100.cumsum())
+            .mul(100.0)
+            .sort_index()
+        )
+
+        self._render_figure(
+            output_95_png,
+            output_95_svg,
+            self.config.nmr_monomer_xray_homolog_95_title,
+            self.config.nmr_monomer_xray_homolog_y_label,
+            lambda ax: ax.plot(
+                yearly_95.index,
+                yearly_95.values,
+                linewidth=2.2,
+                color="#1f77b4",
+            ),
+        )
+        self._render_figure(
+            output_100_png,
+            output_100_svg,
+            self.config.nmr_monomer_xray_homolog_100_title,
+            self.config.nmr_monomer_xray_homolog_y_label,
+            lambda ax: ax.plot(
+                yearly_100.index,
+                yearly_100.values,
+                linewidth=2.2,
+                color="#2ca02c",
+            ),
+        )
+        self._render_figure(
+            cumulative_output_95_png,
+            cumulative_output_95_svg,
+            self.config.nmr_monomer_xray_homolog_95_cumulative_title,
+            self.config.nmr_monomer_xray_homolog_y_label,
+            lambda ax: ax.plot(
+                cumulative_share_95.index,
+                cumulative_share_95.values,
+                linewidth=2.2,
+                color="#1f77b4",
+            ),
+        )
+        self._render_figure(
+            cumulative_output_100_png,
+            cumulative_output_100_svg,
+            self.config.nmr_monomer_xray_homolog_100_cumulative_title,
+            self.config.nmr_monomer_xray_homolog_y_label,
+            lambda ax: ax.plot(
+                cumulative_share_100.index,
+                cumulative_share_100.values,
+                linewidth=2.2,
+                color="#2ca02c",
+            ),
+        )
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -679,8 +815,9 @@ def parse_args() -> argparse.Namespace:
             PlotKind.SOLUTION_NMR_MONOMER_SECONDARY,
             PlotKind.SOLUTION_NMR_MONOMER_PRECISION,
             PlotKind.SOLUTION_NMR_MONOMER_QUALITY,
+            PlotKind.SOLUTION_NMR_MONOMER_XRAY_HOMOLOGS,
         ],
-        help="Comma-separated plot kinds or 'all'. Available: method_counts, solution_nmr_weight_stats, solution_nmr_period_boxplot, solution_nmr_period_area, solution_nmr_period_area_share, solution_nmr_period_area_cumulative_share, solution_nmr_monomer_secondary, solution_nmr_monomer_precision, solution_nmr_monomer_quality (default: all).",
+        help="Comma-separated plot kinds or 'all'. Available: method_counts, solution_nmr_weight_stats, solution_nmr_period_boxplot, solution_nmr_period_area, solution_nmr_period_area_share, solution_nmr_period_area_cumulative_share, solution_nmr_monomer_secondary, solution_nmr_monomer_precision, solution_nmr_monomer_quality, solution_nmr_monomer_xray_homologs (default: all).",
     )
     parser.add_argument(
         "--counts-input",
@@ -711,6 +848,18 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("data/solution_nmr_monomer_quality_metrics.csv"),
         help="Input CSV for SOLUTION NMR monomer quality-metrics plots.",
+    )
+    parser.add_argument(
+        "--nmr-monomer-xray-homolog-95-input",
+        type=Path,
+        default=Path("data/solution_nmr_monomer_xray_homologs_95.csv"),
+        help="Input CSV for SOLUTION NMR monomer X-ray homologs at 95%% sequence identity.",
+    )
+    parser.add_argument(
+        "--nmr-monomer-xray-homolog-100-input",
+        type=Path,
+        default=Path("data/solution_nmr_monomer_xray_homologs_100.csv"),
+        help="Input CSV for SOLUTION NMR monomer X-ray homologs at 100%% sequence identity.",
     )
 
     parser.add_argument(
@@ -882,14 +1031,74 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--nmr-monomer-quality-side-output-png",
         type=Path,
-        default=Path("figures/solution_nmr_monomer_quality_sidechain_outliers_by_year.png"),
+        default=Path(
+            "figures/solution_nmr_monomer_quality_sidechain_outliers_by_year.png"
+        ),
         help="Output PNG for monomer quality sidechain-outliers plot.",
     )
     parser.add_argument(
         "--nmr-monomer-quality-side-output-svg",
         type=Path,
-        default=Path("figures/solution_nmr_monomer_quality_sidechain_outliers_by_year.svg"),
+        default=Path(
+            "figures/solution_nmr_monomer_quality_sidechain_outliers_by_year.svg"
+        ),
         help="Output SVG for monomer quality sidechain-outliers plot.",
+    )
+    parser.add_argument(
+        "--nmr-monomer-xray-homolog-95-output-png",
+        type=Path,
+        default=Path("figures/solution_nmr_monomer_xray_homologs_95_by_year.png"),
+        help="Output PNG for monomer X-ray homolog share plot at 95%% sequence identity.",
+    )
+    parser.add_argument(
+        "--nmr-monomer-xray-homolog-95-output-svg",
+        type=Path,
+        default=Path("figures/solution_nmr_monomer_xray_homologs_95_by_year.svg"),
+        help="Output SVG for monomer X-ray homolog share plot at 95%% sequence identity.",
+    )
+    parser.add_argument(
+        "--nmr-monomer-xray-homolog-100-output-png",
+        type=Path,
+        default=Path("figures/solution_nmr_monomer_xray_homologs_100_by_year.png"),
+        help="Output PNG for monomer X-ray homolog share plot at 100%% sequence identity.",
+    )
+    parser.add_argument(
+        "--nmr-monomer-xray-homolog-100-output-svg",
+        type=Path,
+        default=Path("figures/solution_nmr_monomer_xray_homologs_100_by_year.svg"),
+        help="Output SVG for monomer X-ray homolog share plot at 100%% sequence identity.",
+    )
+    parser.add_argument(
+        "--nmr-monomer-xray-homolog-95-cumulative-output-png",
+        type=Path,
+        default=Path(
+            "figures/solution_nmr_monomer_xray_homologs_95_cumulative_share_by_year.png"
+        ),
+        help="Output PNG for cumulative monomer X-ray homolog share plot at 95%% sequence identity.",
+    )
+    parser.add_argument(
+        "--nmr-monomer-xray-homolog-95-cumulative-output-svg",
+        type=Path,
+        default=Path(
+            "figures/solution_nmr_monomer_xray_homologs_95_cumulative_share_by_year.svg"
+        ),
+        help="Output SVG for cumulative monomer X-ray homolog share plot at 95%% sequence identity.",
+    )
+    parser.add_argument(
+        "--nmr-monomer-xray-homolog-100-cumulative-output-png",
+        type=Path,
+        default=Path(
+            "figures/solution_nmr_monomer_xray_homologs_100_cumulative_share_by_year.png"
+        ),
+        help="Output PNG for cumulative monomer X-ray homolog share plot at 100%% sequence identity.",
+    )
+    parser.add_argument(
+        "--nmr-monomer-xray-homolog-100-cumulative-output-svg",
+        type=Path,
+        default=Path(
+            "figures/solution_nmr_monomer_xray_homologs_100_cumulative_share_by_year.svg"
+        ),
+        help="Output SVG for cumulative monomer X-ray homolog share plot at 100%% sequence identity.",
     )
 
     return parser.parse_args()
@@ -970,6 +1179,20 @@ def main() -> None:
             rama_output_svg=args.nmr_monomer_quality_rama_output_svg,
             side_output_png=args.nmr_monomer_quality_side_output_png,
             side_output_svg=args.nmr_monomer_quality_side_output_svg,
+        )
+
+    if PlotKind.SOLUTION_NMR_MONOMER_XRAY_HOMOLOGS in args.plots:
+        plotter.plot_solution_nmr_monomer_xray_homologs(
+            data_95_path=args.nmr_monomer_xray_homolog_95_input,
+            data_100_path=args.nmr_monomer_xray_homolog_100_input,
+            output_95_png=args.nmr_monomer_xray_homolog_95_output_png,
+            output_95_svg=args.nmr_monomer_xray_homolog_95_output_svg,
+            output_100_png=args.nmr_monomer_xray_homolog_100_output_png,
+            output_100_svg=args.nmr_monomer_xray_homolog_100_output_svg,
+            cumulative_output_95_png=args.nmr_monomer_xray_homolog_95_cumulative_output_png,
+            cumulative_output_95_svg=args.nmr_monomer_xray_homolog_95_cumulative_output_svg,
+            cumulative_output_100_png=args.nmr_monomer_xray_homolog_100_cumulative_output_png,
+            cumulative_output_100_svg=args.nmr_monomer_xray_homolog_100_cumulative_output_svg,
         )
 
 
