@@ -4,7 +4,7 @@ import argparse
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -109,6 +109,10 @@ class PlotConfig:
     area_colors: tuple[str, str, str] = ("#4c78a8", "#f58518", "#54a24b")
 
 
+NMR_WEIGHT_BINS: tuple[float, ...] = (0.0, 10.0, 25.0, float("inf"))
+NMR_WEIGHT_LABELS: tuple[str, ...] = ("<10 kDa", "10-25 kDa", ">25 kDa")
+
+
 def parse_plot_kinds(raw_value: str) -> list[PlotKind]:
     if raw_value.strip().lower() == "all":
         return [
@@ -143,6 +147,13 @@ def parse_plot_kinds(raw_value: str) -> list[PlotKind]:
 class PDBScientificPlotter:
     def __init__(self, config: PlotConfig) -> None:
         self.config = config
+        self._csv_cache: dict[Path, pd.DataFrame] = {}
+
+    def _read_csv(self, data_path: Path) -> pd.DataFrame:
+        resolved = data_path.resolve()
+        if resolved not in self._csv_cache:
+            self._csv_cache[resolved] = pd.read_csv(resolved)
+        return self._csv_cache[resolved]
 
     @staticmethod
     def _scientific_style() -> None:
@@ -168,13 +179,14 @@ class PDBScientificPlotter:
         title: str,
         y_label: str,
         draw_fn: Callable[[plt.Axes], None],
+        x_label: str | None = None,
     ) -> None:
         fig, ax = plt.subplots(
             figsize=(self.config.width_inches, self.config.height_inches)
         )
         draw_fn(ax)
         ax.set_title(title, pad=10)
-        ax.set_xlabel(self.config.x_label)
+        ax.set_xlabel(x_label if x_label is not None else self.config.x_label)
         ax.set_ylabel(y_label)
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
@@ -186,13 +198,137 @@ class PDBScientificPlotter:
         plt.close(fig)
 
     @staticmethod
-    def _prepare_method_count_table(df: pd.DataFrame) -> pd.DataFrame:
-        required_columns = {"year", "method", "count"}
+    def _validate_required_columns(
+        df: pd.DataFrame, required_columns: set[str], dataset_name: str
+    ) -> None:
         missing = required_columns - set(df.columns)
         if missing:
             raise ValueError(
-                f"Method count CSV is missing required columns: {', '.join(sorted(missing))}"
+                f"{dataset_name} is missing required columns: {', '.join(sorted(missing))}"
             )
+
+    @classmethod
+    def _prepare_typed_table(
+        cls,
+        df: pd.DataFrame,
+        required_columns: set[str],
+        column_types: dict[str, type[Any]],
+        dataset_name: str,
+    ) -> pd.DataFrame:
+        cls._validate_required_columns(df, required_columns, dataset_name)
+        prepared = df.copy()
+        for column, dtype in column_types.items():
+            prepared[column] = prepared[column].astype(dtype)
+        return prepared
+
+    def _render_line_series(
+        self,
+        output_png: Path,
+        output_svg: Path,
+        title: str,
+        y_label: str,
+        x_values: pd.Index[Any] | pd.Series[Any],
+        y_values: pd.Series[Any],
+        color: str,
+        linewidth: float = 2.2,
+        label: str | None = None,
+        y_limits: tuple[float, float] | None = None,
+        x_left: float | None = None,
+    ) -> None:
+        def draw(ax: plt.Axes) -> None:
+            ax.plot(
+                x_values,
+                y_values,
+                linewidth=linewidth,
+                color=color,
+                label=label,
+            )
+            if y_limits is not None:
+                ax.set_ylim(*y_limits)
+            if x_left is not None:
+                ax.set_xlim(left=x_left)
+            if label:
+                ax.legend(loc="upper left", frameon=False)
+
+        self._render_figure(
+            output_png=output_png,
+            output_svg=output_svg,
+            title=title,
+            y_label=y_label,
+            draw_fn=draw,
+        )
+
+    @staticmethod
+    def _build_weight_category_yearly_counts(table: pd.DataFrame) -> pd.DataFrame:
+        categorized = table.copy()
+        categorized["weight_category"] = pd.cut(
+            categorized["molecular_weight_kda"],
+            bins=NMR_WEIGHT_BINS,
+            labels=NMR_WEIGHT_LABELS,
+            right=False,
+        )
+        return (
+            categorized.groupby(["year", "weight_category"], observed=False)
+            .size()
+            .unstack(fill_value=0)
+            .reindex(columns=NMR_WEIGHT_LABELS, fill_value=0)
+            .sort_index()
+        )
+
+    def _render_weight_category_stackplot(
+        self,
+        table: pd.DataFrame,
+        output_png: Path,
+        output_svg: Path,
+        title: str,
+        y_label: str,
+        y_limits: tuple[float, float] | None = None,
+        x_left: float | None = None,
+    ) -> None:
+        def draw(ax: plt.Axes) -> None:
+            ax.stackplot(
+                table.index,
+                *(table[label] for label in NMR_WEIGHT_LABELS),
+                labels=NMR_WEIGHT_LABELS,
+                colors=self.config.area_colors,
+                alpha=0.85,
+            )
+            if y_limits is not None:
+                ax.set_ylim(*y_limits)
+            if x_left is not None:
+                ax.set_xlim(left=x_left)
+            ax.legend(loc="upper left", frameon=False, title="Weight category")
+
+        self._render_figure(
+            output_png=output_png,
+            output_svg=output_svg,
+            title=title,
+            y_label=y_label,
+            draw_fn=draw,
+        )
+
+    @staticmethod
+    def _homolog_share_series(table: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
+        yearly_share = (
+            table.groupby("year", as_index=True)["has_xray_homolog"]
+            .mean()
+            .mul(100.0)
+            .sort_index()
+        )
+        yearly_counts = table.groupby("year", as_index=True)["entry_id"].count()
+        yearly_yes = table.groupby("year", as_index=True)["has_xray_homolog"].sum()
+        cumulative_share = (
+            yearly_yes.cumsum().div(yearly_counts.cumsum()).mul(100.0).sort_index()
+        )
+        return yearly_share, cumulative_share
+
+    @staticmethod
+    def _prepare_method_count_table(df: pd.DataFrame) -> pd.DataFrame:
+        PDBScientificPlotter._validate_required_columns(
+            df=df,
+            required_columns={"year", "method", "count"},
+            dataset_name="Method count CSV",
+        )
         return (
             df.pivot(index="year", columns="method", values="count")
             .fillna(0)
@@ -202,31 +338,22 @@ class PDBScientificPlotter:
 
     @staticmethod
     def _prepare_membrane_count_table(df: pd.DataFrame) -> pd.DataFrame:
-        required_columns = {"year", "count"}
-        missing = required_columns - set(df.columns)
-        if missing:
-            raise ValueError(
-                f"Membrane count CSV is missing required columns: {', '.join(sorted(missing))}"
-            )
-        prepared = df.copy()
-        prepared["year"] = prepared["year"].astype(int)
-        prepared["count"] = prepared["count"].astype(int)
+        prepared = PDBScientificPlotter._prepare_typed_table(
+            df=df,
+            required_columns={"year", "count"},
+            column_types={"year": int, "count": int},
+            dataset_name="Membrane count CSV",
+        )
         return prepared.sort_values("year")
 
     @staticmethod
     def _prepare_nmr_weight_table(df: pd.DataFrame) -> pd.DataFrame:
-        required_columns = {"entry_id", "year", "molecular_weight_kda"}
-        missing = required_columns - set(df.columns)
-        if missing:
-            raise ValueError(
-                f"NMR weight CSV is missing required columns: {', '.join(sorted(missing))}"
-            )
-        prepared = df.copy()
-        prepared["year"] = prepared["year"].astype(int)
-        prepared["molecular_weight_kda"] = prepared["molecular_weight_kda"].astype(
-            float
+        return PDBScientificPlotter._prepare_typed_table(
+            df=df,
+            required_columns={"entry_id", "year", "molecular_weight_kda"},
+            column_types={"year": int, "molecular_weight_kda": float},
+            dataset_name="NMR weight CSV",
         )
-        return prepared
 
     @staticmethod
     def _period_series(table: pd.DataFrame) -> dict[str, pd.Series]:
@@ -239,25 +366,6 @@ class PDBScientificPlotter:
             "After 2006": table.loc[table["year"] > 2006, "molecular_weight_kda"],
         }
 
-    @staticmethod
-    def _place_bottom_legend(ax: plt.Axes) -> None:
-        ax.legend(
-            loc="upper center",
-            bbox_to_anchor=(0.5, -0.14),
-            frameon=False,
-            ncol=3,
-            title="Weight category",
-        )
-
-    @staticmethod
-    def _place_right_legend(ax: plt.Axes) -> None:
-        ax.legend(
-            loc="center left",
-            bbox_to_anchor=(1.02, 0.5),
-            frameon=False,
-            title="Weight category",
-        )
-
     def plot_method_counts(
         self,
         data_path: Path,
@@ -266,7 +374,7 @@ class PDBScientificPlotter:
         cumulative_output_png: Path,
         cumulative_output_svg: Path,
     ) -> None:
-        table = self._prepare_method_count_table(pd.read_csv(data_path))
+        table = self._prepare_method_count_table(self._read_csv(data_path))
         cumulative_table = table.cumsum()
         self._scientific_style()
 
@@ -307,7 +415,7 @@ class PDBScientificPlotter:
         max_output_png: Path,
         max_output_svg: Path,
     ) -> None:
-        table = self._prepare_nmr_weight_table(pd.read_csv(data_path))
+        table = self._prepare_nmr_weight_table(self._read_csv(data_path))
         stats = (
             table.groupby("year", as_index=True)["molecular_weight_kda"]
             .agg(["mean", "median", "max"])
@@ -315,35 +423,35 @@ class PDBScientificPlotter:
         )
         self._scientific_style()
 
-        self._render_figure(
-            avg_output_png,
-            avg_output_svg,
-            self.config.nmr_avg_title,
-            self.config.nmr_avg_y_label,
-            lambda ax: ax.plot(
-                stats.index, stats["mean"], color=self.config.avg_color, linewidth=2.0
-            ),
+        self._render_line_series(
+            output_png=avg_output_png,
+            output_svg=avg_output_svg,
+            title=self.config.nmr_avg_title,
+            y_label=self.config.nmr_avg_y_label,
+            x_values=stats.index,
+            y_values=stats["mean"],
+            color=self.config.avg_color,
+            linewidth=2.0,
         )
-        self._render_figure(
-            median_output_png,
-            median_output_svg,
-            self.config.nmr_median_title,
-            self.config.nmr_median_y_label,
-            lambda ax: ax.plot(
-                stats.index,
-                stats["median"],
-                color=self.config.median_color,
-                linewidth=2.0,
-            ),
+        self._render_line_series(
+            output_png=median_output_png,
+            output_svg=median_output_svg,
+            title=self.config.nmr_median_title,
+            y_label=self.config.nmr_median_y_label,
+            x_values=stats.index,
+            y_values=stats["median"],
+            color=self.config.median_color,
+            linewidth=2.0,
         )
-        self._render_figure(
-            max_output_png,
-            max_output_svg,
-            self.config.nmr_max_title,
-            self.config.nmr_max_y_label,
-            lambda ax: ax.plot(
-                stats.index, stats["max"], color=self.config.max_color, linewidth=2.0
-            ),
+        self._render_line_series(
+            output_png=max_output_png,
+            output_svg=max_output_svg,
+            title=self.config.nmr_max_title,
+            y_label=self.config.nmr_max_y_label,
+            x_values=stats.index,
+            y_values=stats["max"],
+            color=self.config.max_color,
+            linewidth=2.0,
         )
 
     def plot_membrane_protein_counts(
@@ -354,234 +462,130 @@ class PDBScientificPlotter:
         cumulative_output_png: Path,
         cumulative_output_svg: Path,
     ) -> None:
-        table = self._prepare_membrane_count_table(pd.read_csv(data_path))
+        table = self._prepare_membrane_count_table(self._read_csv(data_path))
         cumulative = table.copy()
         cumulative["count"] = cumulative["count"].cumsum()
         self._scientific_style()
-        self._render_figure(
-            annual_output_png,
-            annual_output_svg,
-            self.config.membrane_annual_title,
-            self.config.membrane_annual_y_label,
-            lambda ax: ax.plot(
-                table["year"],
-                table["count"],
-                linewidth=2.2,
-                color="#17becf",
-            ),
+        self._render_line_series(
+            output_png=annual_output_png,
+            output_svg=annual_output_svg,
+            title=self.config.membrane_annual_title,
+            y_label=self.config.membrane_annual_y_label,
+            x_values=table["year"],
+            y_values=table["count"],
+            color="#17becf",
         )
-        self._render_figure(
-            cumulative_output_png,
-            cumulative_output_svg,
-            self.config.membrane_cumulative_title,
-            self.config.membrane_cumulative_y_label,
-            lambda ax: ax.plot(
-                cumulative["year"],
-                cumulative["count"],
-                linewidth=2.2,
-                color="#17becf",
-            ),
+        self._render_line_series(
+            output_png=cumulative_output_png,
+            output_svg=cumulative_output_svg,
+            title=self.config.membrane_cumulative_title,
+            y_label=self.config.membrane_cumulative_y_label,
+            x_values=cumulative["year"],
+            y_values=cumulative["count"],
+            color="#17becf",
         )
 
     def plot_solution_nmr_period_boxplot(
         self, data_path: Path, output_png: Path, output_svg: Path
     ) -> None:
-        table = self._prepare_nmr_weight_table(pd.read_csv(data_path))
+        table = self._prepare_nmr_weight_table(self._read_csv(data_path))
         periods = self._period_series(table)
         labels = list(periods.keys())
         values = [periods[label].values for label in labels]
         self._scientific_style()
 
-        fig, ax = plt.subplots(
-            figsize=(self.config.width_inches, self.config.height_inches)
+        def draw(ax: plt.Axes) -> None:
+            bp = ax.boxplot(
+                values, tick_labels=labels, patch_artist=True, showfliers=False
+            )
+            for patch, color in zip(
+                bp["boxes"],
+                [
+                    self.config.before_color,
+                    self.config.middle_color,
+                    self.config.after_color,
+                ],
+            ):
+                patch.set_facecolor(color)
+                patch.set_alpha(0.5)
+
+        self._render_figure(
+            output_png=output_png,
+            output_svg=output_svg,
+            title=self.config.nmr_boxplot_title,
+            y_label="Molecular weight (kDa)",
+            draw_fn=draw,
+            x_label="Period",
         )
-        bp = ax.boxplot(values, tick_labels=labels, patch_artist=True, showfliers=False)
-        for patch, color in zip(
-            bp["boxes"],
-            [
-                self.config.before_color,
-                self.config.middle_color,
-                self.config.after_color,
-            ],
-        ):
-            patch.set_facecolor(color)
-            patch.set_alpha(0.5)
-        ax.set_title(self.config.nmr_boxplot_title, pad=10)
-        ax.set_xlabel("Period")
-        ax.set_ylabel("Molecular weight (kDa)")
-        ax.spines["top"].set_visible(False)
-        ax.spines["right"].set_visible(False)
-        fig.tight_layout()
-        output_png.parent.mkdir(parents=True, exist_ok=True)
-        fig.savefig(output_png, dpi=self.config.dpi)
-        fig.savefig(output_svg)
-        plt.close(fig)
 
     def plot_solution_nmr_period_area(
         self, data_path: Path, output_png: Path, output_svg: Path
     ) -> None:
-        table = self._prepare_nmr_weight_table(pd.read_csv(data_path))
+        table = self._prepare_nmr_weight_table(self._read_csv(data_path))
         self._scientific_style()
-
-        # Three broad categories for readable long-term cumulative trends.
-        bins = [0.0, 10.0, 25.0, float("inf")]
-        labels = ["<10 kDa", "10-25 kDa", ">25 kDa"]
-        table["weight_category"] = pd.cut(
-            table["molecular_weight_kda"], bins=bins, labels=labels, right=False
-        )
-
-        yearly = (
-            table.groupby(["year", "weight_category"], observed=False)
-            .size()
-            .unstack(fill_value=0)
-            .reindex(columns=labels, fill_value=0)
-            .sort_index()
-        )
+        yearly = self._build_weight_category_yearly_counts(table)
         cumulative = yearly.cumsum()
-
-        fig, ax = plt.subplots(
-            figsize=(self.config.width_inches, self.config.height_inches)
+        self._render_weight_category_stackplot(
+            table=cumulative,
+            output_png=output_png,
+            output_svg=output_svg,
+            title=self.config.nmr_area_title,
+            y_label=self.config.nmr_area_y_label,
         )
-        ax.stackplot(
-            cumulative.index,
-            cumulative[labels[0]],
-            cumulative[labels[1]],
-            cumulative[labels[2]],
-            labels=labels,
-            colors=self.config.area_colors,
-            alpha=0.85,
-        )
-        ax.set_title(self.config.nmr_area_title, pad=10)
-        ax.set_xlabel(self.config.x_label)
-        ax.set_ylabel(self.config.nmr_area_y_label)
-        ax.legend(loc="upper left", frameon=False, title="Weight category")
-        ax.spines["top"].set_visible(False)
-        ax.spines["right"].set_visible(False)
-        fig.tight_layout()
-        output_png.parent.mkdir(parents=True, exist_ok=True)
-        fig.savefig(output_png, dpi=self.config.dpi)
-        fig.savefig(output_svg)
-        plt.close(fig)
 
     def plot_solution_nmr_period_area_share(
         self, data_path: Path, output_png: Path, output_svg: Path
     ) -> None:
-        table = self._prepare_nmr_weight_table(pd.read_csv(data_path))
+        table = self._prepare_nmr_weight_table(self._read_csv(data_path))
         self._scientific_style()
-
-        bins = [0.0, 10.0, 25.0, float("inf")]
-        labels = ["<10 kDa", "10-25 kDa", ">25 kDa"]
-        table["weight_category"] = pd.cut(
-            table["molecular_weight_kda"], bins=bins, labels=labels, right=False
-        )
-
-        yearly_counts = (
-            table.groupby(["year", "weight_category"], observed=False)
-            .size()
-            .unstack(fill_value=0)
-            .reindex(columns=labels, fill_value=0)
-            .sort_index()
-        )
+        yearly_counts = self._build_weight_category_yearly_counts(table)
         yearly_share = (
             yearly_counts.div(yearly_counts.sum(axis=1), axis=0).fillna(0.0) * 100.0
         )
-
-        fig, ax = plt.subplots(
-            figsize=(self.config.width_inches, self.config.height_inches)
+        self._render_weight_category_stackplot(
+            table=yearly_share,
+            output_png=output_png,
+            output_svg=output_svg,
+            title=self.config.nmr_area_share_title,
+            y_label=self.config.nmr_area_share_y_label,
+            y_limits=(0.0, 100.0),
+            x_left=1978,
         )
-        ax.stackplot(
-            yearly_share.index,
-            yearly_share[labels[0]],
-            yearly_share[labels[1]],
-            yearly_share[labels[2]],
-            labels=labels,
-            colors=self.config.area_colors,
-            alpha=0.85,
-        )
-        ax.set_title(self.config.nmr_area_share_title, pad=10)
-        ax.set_xlabel(self.config.x_label)
-        ax.set_ylabel(self.config.nmr_area_share_y_label)
-        ax.set_ylim(0, 100)
-        ax.set_xlim(left=1978)
-        ax.legend(loc="upper left", frameon=False, title="Weight category")
-        ax.spines["top"].set_visible(False)
-        ax.spines["right"].set_visible(False)
-        fig.tight_layout()
-        output_png.parent.mkdir(parents=True, exist_ok=True)
-        fig.savefig(output_png, dpi=self.config.dpi)
-        fig.savefig(output_svg)
-        plt.close(fig)
 
     def plot_solution_nmr_period_area_cumulative_share(
         self, data_path: Path, output_png: Path, output_svg: Path
     ) -> None:
-        table = self._prepare_nmr_weight_table(pd.read_csv(data_path))
+        table = self._prepare_nmr_weight_table(self._read_csv(data_path))
         self._scientific_style()
-
-        bins = [0.0, 10.0, 25.0, float("inf")]
-        labels = ["<10 kDa", "10-25 kDa", ">25 kDa"]
-        table["weight_category"] = pd.cut(
-            table["molecular_weight_kda"], bins=bins, labels=labels, right=False
-        )
-
-        yearly_counts = (
-            table.groupby(["year", "weight_category"], observed=False)
-            .size()
-            .unstack(fill_value=0)
-            .reindex(columns=labels, fill_value=0)
-            .sort_index()
-        )
+        yearly_counts = self._build_weight_category_yearly_counts(table)
         cumulative_counts = yearly_counts.cumsum()
         cumulative_share = (
             cumulative_counts.div(cumulative_counts.sum(axis=1), axis=0).fillna(0.0)
             * 100.0
         )
-
-        fig, ax = plt.subplots(
-            figsize=(self.config.width_inches, self.config.height_inches)
+        self._render_weight_category_stackplot(
+            table=cumulative_share,
+            output_png=output_png,
+            output_svg=output_svg,
+            title=self.config.nmr_area_cumulative_share_title,
+            y_label=self.config.nmr_area_cumulative_share_y_label,
+            y_limits=(0.0, 100.0),
+            x_left=1978,
         )
-        ax.stackplot(
-            cumulative_share.index,
-            cumulative_share[labels[0]],
-            cumulative_share[labels[1]],
-            cumulative_share[labels[2]],
-            labels=labels,
-            colors=self.config.area_colors,
-            alpha=0.85,
-        )
-        ax.set_title(self.config.nmr_area_cumulative_share_title, pad=10)
-        ax.set_xlabel(self.config.x_label)
-        ax.set_ylabel(self.config.nmr_area_cumulative_share_y_label)
-        ax.set_ylim(0, 100)
-        ax.set_xlim(left=1978)
-        ax.legend(loc="upper left", frameon=False, title="Weight category")
-        ax.spines["top"].set_visible(False)
-        ax.spines["right"].set_visible(False)
-        fig.tight_layout()
-        output_png.parent.mkdir(parents=True, exist_ok=True)
-        fig.savefig(output_png, dpi=self.config.dpi)
-        fig.savefig(output_svg)
-        plt.close(fig)
 
     @staticmethod
     def _prepare_monomer_secondary_table(df: pd.DataFrame) -> pd.DataFrame:
-        required_columns = {"entry_id", "year", "secondary_structure_percent"}
-        missing = required_columns - set(df.columns)
-        if missing:
-            raise ValueError(
-                f"Monomer secondary CSV is missing required columns: {', '.join(sorted(missing))}"
-            )
-        prepared = df.copy()
-        prepared["year"] = prepared["year"].astype(int)
-        prepared["secondary_structure_percent"] = prepared[
-            "secondary_structure_percent"
-        ].astype(float)
-        return prepared
+        return PDBScientificPlotter._prepare_typed_table(
+            df=df,
+            required_columns={"entry_id", "year", "secondary_structure_percent"},
+            column_types={"year": int, "secondary_structure_percent": float},
+            dataset_name="Monomer secondary CSV",
+        )
 
     def plot_solution_nmr_monomer_secondary(
         self, data_path: Path, output_png: Path, output_svg: Path
     ) -> None:
-        table = self._prepare_monomer_secondary_table(pd.read_csv(data_path))
+        table = self._prepare_monomer_secondary_table(self._read_csv(data_path))
         self._scientific_style()
         yearly_mean = (
             table.groupby("year", as_index=True)["secondary_structure_percent"]
@@ -589,54 +593,46 @@ class PDBScientificPlotter:
             .sort_index()
         )
 
-        fig, ax = plt.subplots(
-            figsize=(self.config.width_inches, self.config.height_inches)
+        def draw(ax: plt.Axes) -> None:
+            ax.scatter(
+                table["year"],
+                table["secondary_structure_percent"],
+                s=10,
+                alpha=0.2,
+                color="#7f7f7f",
+                label="Individual structures",
+            )
+            ax.plot(
+                yearly_mean.index,
+                yearly_mean.values,
+                linewidth=2.2,
+                color=self.config.nmr_color,
+                label="Yearly mean",
+            )
+            ax.set_ylim(0, 100)
+            ax.legend(loc="upper left", frameon=False)
+
+        self._render_figure(
+            output_png=output_png,
+            output_svg=output_svg,
+            title=self.config.nmr_monomer_secondary_title,
+            y_label=self.config.nmr_monomer_secondary_y_label,
+            draw_fn=draw,
         )
-        ax.scatter(
-            table["year"],
-            table["secondary_structure_percent"],
-            s=10,
-            alpha=0.2,
-            color="#7f7f7f",
-            label="Individual structures",
-        )
-        ax.plot(
-            yearly_mean.index,
-            yearly_mean.values,
-            linewidth=2.2,
-            color=self.config.nmr_color,
-            label="Yearly mean",
-        )
-        ax.set_title(self.config.nmr_monomer_secondary_title, pad=10)
-        ax.set_xlabel(self.config.x_label)
-        ax.set_ylabel(self.config.nmr_monomer_secondary_y_label)
-        ax.set_ylim(0, 100)
-        ax.legend(loc="upper left", frameon=False)
-        ax.spines["top"].set_visible(False)
-        ax.spines["right"].set_visible(False)
-        fig.tight_layout()
-        output_png.parent.mkdir(parents=True, exist_ok=True)
-        fig.savefig(output_png, dpi=self.config.dpi)
-        fig.savefig(output_svg)
-        plt.close(fig)
 
     @staticmethod
     def _prepare_monomer_precision_table(df: pd.DataFrame) -> pd.DataFrame:
-        required_columns = {"entry_id", "year", "mean_rmsd_angstrom"}
-        missing = required_columns - set(df.columns)
-        if missing:
-            raise ValueError(
-                f"Monomer precision CSV is missing required columns: {', '.join(sorted(missing))}"
-            )
-        prepared = df.copy()
-        prepared["year"] = prepared["year"].astype(int)
-        prepared["mean_rmsd_angstrom"] = prepared["mean_rmsd_angstrom"].astype(float)
-        return prepared
+        return PDBScientificPlotter._prepare_typed_table(
+            df=df,
+            required_columns={"entry_id", "year", "mean_rmsd_angstrom"},
+            column_types={"year": int, "mean_rmsd_angstrom": float},
+            dataset_name="Monomer precision CSV",
+        )
 
     def plot_solution_nmr_monomer_precision(
         self, data_path: Path, output_png: Path, output_svg: Path
     ) -> None:
-        table = self._prepare_monomer_precision_table(pd.read_csv(data_path))
+        table = self._prepare_monomer_precision_table(self._read_csv(data_path))
         self._scientific_style()
         yearly_mean_rmsd = (
             table.groupby("year", as_index=True)["mean_rmsd_angstrom"]
@@ -644,52 +640,36 @@ class PDBScientificPlotter:
             .sort_index()
         )
 
-        fig, ax = plt.subplots(
-            figsize=(self.config.width_inches, self.config.height_inches)
-        )
-        ax.plot(
-            yearly_mean_rmsd.index,
-            yearly_mean_rmsd.values,
-            linewidth=2.2,
+        self._render_line_series(
+            output_png=output_png,
+            output_svg=output_svg,
+            title=self.config.nmr_monomer_precision_title,
+            y_label=self.config.nmr_monomer_precision_y_label,
+            x_values=yearly_mean_rmsd.index,
+            y_values=yearly_mean_rmsd,
             color="#8c564b",
             label="Yearly mean RMSD",
         )
-        ax.set_title(self.config.nmr_monomer_precision_title, pad=10)
-        ax.set_xlabel(self.config.x_label)
-        ax.set_ylabel(self.config.nmr_monomer_precision_y_label)
-        ax.legend(loc="upper left", frameon=False)
-        ax.spines["top"].set_visible(False)
-        ax.spines["right"].set_visible(False)
-        fig.tight_layout()
-        output_png.parent.mkdir(parents=True, exist_ok=True)
-        fig.savefig(output_png, dpi=self.config.dpi)
-        fig.savefig(output_svg)
-        plt.close(fig)
 
     @staticmethod
     def _prepare_monomer_quality_table(df: pd.DataFrame) -> pd.DataFrame:
-        required_columns = {
-            "entry_id",
-            "year",
-            "clashscore",
-            "ramachandran_outliers_percent",
-            "sidechain_outliers_percent",
-        }
-        missing = required_columns - set(df.columns)
-        if missing:
-            raise ValueError(
-                f"Monomer quality CSV is missing required columns: {', '.join(sorted(missing))}"
-            )
-        prepared = df.copy()
-        prepared["year"] = prepared["year"].astype(int)
-        prepared["clashscore"] = prepared["clashscore"].astype(float)
-        prepared["ramachandran_outliers_percent"] = prepared[
-            "ramachandran_outliers_percent"
-        ].astype(float)
-        prepared["sidechain_outliers_percent"] = prepared[
-            "sidechain_outliers_percent"
-        ].astype(float)
-        return prepared
+        return PDBScientificPlotter._prepare_typed_table(
+            df=df,
+            required_columns={
+                "entry_id",
+                "year",
+                "clashscore",
+                "ramachandran_outliers_percent",
+                "sidechain_outliers_percent",
+            },
+            column_types={
+                "year": int,
+                "clashscore": float,
+                "ramachandran_outliers_percent": float,
+                "sidechain_outliers_percent": float,
+            },
+            dataset_name="Monomer quality CSV",
+        )
 
     def plot_solution_nmr_monomer_quality(
         self,
@@ -701,69 +681,57 @@ class PDBScientificPlotter:
         side_output_png: Path,
         side_output_svg: Path,
     ) -> None:
-        table = self._prepare_monomer_quality_table(pd.read_csv(data_path))
+        table = self._prepare_monomer_quality_table(self._read_csv(data_path))
         self._scientific_style()
         yearly = (
             table.groupby("year", as_index=True).mean(numeric_only=True).sort_index()
         )
 
-        self._render_figure(
-            clash_output_png,
-            clash_output_svg,
-            self.config.nmr_monomer_quality_clash_title,
-            self.config.nmr_monomer_quality_clash_y_label,
-            lambda ax: ax.plot(
-                yearly.index,
-                yearly["clashscore"],
-                linewidth=2.2,
-                color="#8c564b",
-            ),
+        self._render_line_series(
+            output_png=clash_output_png,
+            output_svg=clash_output_svg,
+            title=self.config.nmr_monomer_quality_clash_title,
+            y_label=self.config.nmr_monomer_quality_clash_y_label,
+            x_values=yearly.index,
+            y_values=yearly["clashscore"],
+            color="#8c564b",
         )
-        self._render_figure(
-            rama_output_png,
-            rama_output_svg,
-            self.config.nmr_monomer_quality_rama_title,
-            self.config.nmr_monomer_quality_rama_y_label,
-            lambda ax: ax.plot(
-                yearly.index,
-                yearly["ramachandran_outliers_percent"],
-                linewidth=2.2,
-                color="#1f77b4",
-            ),
+        self._render_line_series(
+            output_png=rama_output_png,
+            output_svg=rama_output_svg,
+            title=self.config.nmr_monomer_quality_rama_title,
+            y_label=self.config.nmr_monomer_quality_rama_y_label,
+            x_values=yearly.index,
+            y_values=yearly["ramachandran_outliers_percent"],
+            color="#1f77b4",
         )
-        self._render_figure(
-            side_output_png,
-            side_output_svg,
-            self.config.nmr_monomer_quality_side_title,
-            self.config.nmr_monomer_quality_side_y_label,
-            lambda ax: ax.plot(
-                yearly.index,
-                yearly["sidechain_outliers_percent"],
-                linewidth=2.2,
-                color="#ff7f0e",
-            ),
+        self._render_line_series(
+            output_png=side_output_png,
+            output_svg=side_output_svg,
+            title=self.config.nmr_monomer_quality_side_title,
+            y_label=self.config.nmr_monomer_quality_side_y_label,
+            x_values=yearly.index,
+            y_values=yearly["sidechain_outliers_percent"],
+            color="#ff7f0e",
         )
 
     @staticmethod
     def _prepare_monomer_xray_homolog_table(df: pd.DataFrame) -> pd.DataFrame:
-        required_columns = {
-            "entry_id",
-            "year",
-            "sequence_identity_percent",
-            "has_xray_homolog",
-        }
-        missing = required_columns - set(df.columns)
-        if missing:
-            raise ValueError(
-                f"Monomer X-ray homolog CSV is missing required columns: {', '.join(sorted(missing))}"
-            )
-        prepared = df.copy()
-        prepared["year"] = prepared["year"].astype(int)
-        prepared["sequence_identity_percent"] = prepared[
-            "sequence_identity_percent"
-        ].astype(int)
-        prepared["has_xray_homolog"] = prepared["has_xray_homolog"].astype(int)
-        return prepared
+        return PDBScientificPlotter._prepare_typed_table(
+            df=df,
+            required_columns={
+                "entry_id",
+                "year",
+                "sequence_identity_percent",
+                "has_xray_homolog",
+            },
+            column_types={
+                "year": int,
+                "sequence_identity_percent": int,
+                "has_xray_homolog": int,
+            },
+            dataset_name="Monomer X-ray homolog CSV",
+        )
 
     def plot_solution_nmr_monomer_xray_homologs(
         self,
@@ -778,123 +746,79 @@ class PDBScientificPlotter:
         cumulative_output_100_png: Path,
         cumulative_output_100_svg: Path,
     ) -> None:
-        table_95 = self._prepare_monomer_xray_homolog_table(pd.read_csv(data_95_path))
-        table_100 = self._prepare_monomer_xray_homolog_table(pd.read_csv(data_100_path))
+        table_95 = self._prepare_monomer_xray_homolog_table(
+            self._read_csv(data_95_path)
+        )
+        table_100 = self._prepare_monomer_xray_homolog_table(
+            self._read_csv(data_100_path)
+        )
         self._scientific_style()
 
-        yearly_95 = (
-            table_95.groupby("year", as_index=True)["has_xray_homolog"]
-            .mean()
-            .mul(100.0)
-            .sort_index()
-        )
-        yearly_100 = (
-            table_100.groupby("year", as_index=True)["has_xray_homolog"]
-            .mean()
-            .mul(100.0)
-            .sort_index()
-        )
+        yearly_95, cumulative_share_95 = self._homolog_share_series(table_95)
+        yearly_100, cumulative_share_100 = self._homolog_share_series(table_100)
 
-        yearly_count_95 = table_95.groupby("year", as_index=True)["entry_id"].count()
-        yearly_yes_95 = table_95.groupby("year", as_index=True)[
-            "has_xray_homolog"
-        ].sum()
-        cumulative_share_95 = (
-            yearly_yes_95.cumsum().div(yearly_count_95.cumsum()).mul(100.0).sort_index()
+        self._render_line_series(
+            output_png=output_95_png,
+            output_svg=output_95_svg,
+            title=self.config.nmr_monomer_xray_homolog_95_title,
+            y_label=self.config.nmr_monomer_xray_homolog_y_label,
+            x_values=yearly_95.index,
+            y_values=yearly_95,
+            color="#1f77b4",
         )
-
-        yearly_count_100 = table_100.groupby("year", as_index=True)["entry_id"].count()
-        yearly_yes_100 = table_100.groupby("year", as_index=True)[
-            "has_xray_homolog"
-        ].sum()
-        cumulative_share_100 = (
-            yearly_yes_100.cumsum()
-            .div(yearly_count_100.cumsum())
-            .mul(100.0)
-            .sort_index()
+        self._render_line_series(
+            output_png=output_100_png,
+            output_svg=output_100_svg,
+            title=self.config.nmr_monomer_xray_homolog_100_title,
+            y_label=self.config.nmr_monomer_xray_homolog_y_label,
+            x_values=yearly_100.index,
+            y_values=yearly_100,
+            color="#2ca02c",
         )
-
-        self._render_figure(
-            output_95_png,
-            output_95_svg,
-            self.config.nmr_monomer_xray_homolog_95_title,
-            self.config.nmr_monomer_xray_homolog_y_label,
-            lambda ax: ax.plot(
-                yearly_95.index,
-                yearly_95.values,
-                linewidth=2.2,
-                color="#1f77b4",
-            ),
+        self._render_line_series(
+            output_png=cumulative_output_95_png,
+            output_svg=cumulative_output_95_svg,
+            title=self.config.nmr_monomer_xray_homolog_95_cumulative_title,
+            y_label=self.config.nmr_monomer_xray_homolog_y_label,
+            x_values=cumulative_share_95.index,
+            y_values=cumulative_share_95,
+            color="#1f77b4",
         )
-        self._render_figure(
-            output_100_png,
-            output_100_svg,
-            self.config.nmr_monomer_xray_homolog_100_title,
-            self.config.nmr_monomer_xray_homolog_y_label,
-            lambda ax: ax.plot(
-                yearly_100.index,
-                yearly_100.values,
-                linewidth=2.2,
-                color="#2ca02c",
-            ),
-        )
-        self._render_figure(
-            cumulative_output_95_png,
-            cumulative_output_95_svg,
-            self.config.nmr_monomer_xray_homolog_95_cumulative_title,
-            self.config.nmr_monomer_xray_homolog_y_label,
-            lambda ax: ax.plot(
-                cumulative_share_95.index,
-                cumulative_share_95.values,
-                linewidth=2.2,
-                color="#1f77b4",
-            ),
-        )
-        self._render_figure(
-            cumulative_output_100_png,
-            cumulative_output_100_svg,
-            self.config.nmr_monomer_xray_homolog_100_cumulative_title,
-            self.config.nmr_monomer_xray_homolog_y_label,
-            lambda ax: ax.plot(
-                cumulative_share_100.index,
-                cumulative_share_100.values,
-                linewidth=2.2,
-                color="#2ca02c",
-            ),
+        self._render_line_series(
+            output_png=cumulative_output_100_png,
+            output_svg=cumulative_output_100_svg,
+            title=self.config.nmr_monomer_xray_homolog_100_cumulative_title,
+            y_label=self.config.nmr_monomer_xray_homolog_y_label,
+            x_values=cumulative_share_100.index,
+            y_values=cumulative_share_100,
+            color="#2ca02c",
         )
 
     @staticmethod
     def _prepare_monomer_xray_rmsd_table(df: pd.DataFrame) -> pd.DataFrame:
-        required_columns = {"entry_id", "year", "rmsd_ca_angstrom"}
-        missing = required_columns - set(df.columns)
-        if missing:
-            raise ValueError(
-                f"Monomer X-ray RMSD CSV is missing required columns: {', '.join(sorted(missing))}"
-            )
-        prepared = df.copy()
-        prepared["year"] = prepared["year"].astype(int)
-        prepared["rmsd_ca_angstrom"] = prepared["rmsd_ca_angstrom"].astype(float)
-        return prepared
+        return PDBScientificPlotter._prepare_typed_table(
+            df=df,
+            required_columns={"entry_id", "year", "rmsd_ca_angstrom"},
+            column_types={"year": int, "rmsd_ca_angstrom": float},
+            dataset_name="Monomer X-ray RMSD CSV",
+        )
 
     def plot_solution_nmr_monomer_xray_rmsd(
         self, data_path: Path, output_png: Path, output_svg: Path
     ) -> None:
-        table = self._prepare_monomer_xray_rmsd_table(pd.read_csv(data_path))
+        table = self._prepare_monomer_xray_rmsd_table(self._read_csv(data_path))
         self._scientific_style()
         yearly_mean_rmsd = (
             table.groupby("year", as_index=True)["rmsd_ca_angstrom"].mean().sort_index()
         )
-        self._render_figure(
-            output_png,
-            output_svg,
-            self.config.nmr_monomer_xray_rmsd_title,
-            self.config.nmr_monomer_xray_rmsd_y_label,
-            lambda ax: ax.plot(
-                yearly_mean_rmsd.index,
-                yearly_mean_rmsd.values,
-                linewidth=2.2,
-                color="#9467bd",
-            ),
+        self._render_line_series(
+            output_png=output_png,
+            output_svg=output_svg,
+            title=self.config.nmr_monomer_xray_rmsd_title,
+            y_label=self.config.nmr_monomer_xray_rmsd_y_label,
+            x_values=yearly_mean_rmsd.index,
+            y_values=yearly_mean_rmsd,
+            color="#9467bd",
         )
 
 
