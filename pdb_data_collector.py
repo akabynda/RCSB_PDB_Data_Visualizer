@@ -816,7 +816,8 @@ class RCSBClient:
 
             helix_fraction = coverage_by_type.get("HELIX_P", 0.0)
             sheet_fraction = coverage_by_type.get("SHEET", 0.0)
-            secondary_fraction = min(1.0, max(0.0, helix_fraction + sheet_fraction))
+            unassigned_fraction = coverage_by_type.get("UNASSIGNED_SEC_STRUCT", 0.0)
+            secondary_fraction = min(1.0, max(0.0, 1.0 - unassigned_fraction))
 
             records.append(
                 SolutionNMRMonomerSecondaryRecord(
