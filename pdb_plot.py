@@ -111,7 +111,7 @@ class PlotConfig:
 
 NMR_WEIGHT_BINS: tuple[float, ...] = (0.0, 10.0, 25.0, float("inf"))
 NMR_WEIGHT_LABELS: tuple[str, ...] = ("<10 kDa", "10-25 kDa", ">25 kDa")
-MAX_PLOT_YEAR: int = 2025
+MAX_PLOT_YEAR: int = 2024
 
 
 def parse_plot_kinds(raw_value: str) -> list[PlotKind]:
@@ -560,7 +560,7 @@ class PDBScientificPlotter:
             title=self.config.nmr_area_share_title,
             y_label=self.config.nmr_area_share_y_label,
             y_limits=(0.0, 100.0),
-            x_left=1978,
+            x_left=1979,
         )
 
     def plot_solution_nmr_period_area_cumulative_share(
@@ -581,7 +581,7 @@ class PDBScientificPlotter:
             title=self.config.nmr_area_cumulative_share_title,
             y_label=self.config.nmr_area_cumulative_share_y_label,
             y_limits=(0.0, 100.0),
-            x_left=1978,
+            x_left=1979,
         )
 
     @staticmethod
