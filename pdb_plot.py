@@ -270,6 +270,34 @@ class PDBScientificPlotter:
             draw_fn=draw,
         )
 
+    def _render_bar_series(
+        self,
+        output_png: Path,
+        output_svg: Path,
+        title: str,
+        y_label: str,
+        x_values: pd.Index[Any] | pd.Series[Any],
+        y_values: pd.Series[Any],
+        color: str,
+        width: float = 0.8,
+        y_limits: tuple[float, float] | None = None,
+        x_left: float | None = None,
+    ) -> None:
+        def draw(ax: plt.Axes) -> None:
+            ax.bar(x_values, y_values, color=color, width=width)
+            if y_limits is not None:
+                ax.set_ylim(*y_limits)
+            if x_left is not None:
+                ax.set_xlim(left=x_left)
+
+        self._render_figure(
+            output_png=output_png,
+            output_svg=output_svg,
+            title=title,
+            y_label=y_label,
+            draw_fn=draw,
+        )
+
     @staticmethod
     def _build_weight_category_yearly_counts(table: pd.DataFrame) -> pd.DataFrame:
         categorized = table.copy()
@@ -437,7 +465,7 @@ class PDBScientificPlotter:
         )
         self._scientific_style()
 
-        self._render_line_series(
+        self._render_bar_series(
             output_png=avg_output_png,
             output_svg=avg_output_svg,
             title=self.config.nmr_avg_title,
@@ -445,9 +473,8 @@ class PDBScientificPlotter:
             x_values=stats.index,
             y_values=stats["mean"],
             color=self.config.avg_color,
-            linewidth=2.0,
         )
-        self._render_line_series(
+        self._render_bar_series(
             output_png=median_output_png,
             output_svg=median_output_svg,
             title=self.config.nmr_median_title,
@@ -455,9 +482,8 @@ class PDBScientificPlotter:
             x_values=stats.index,
             y_values=stats["median"],
             color=self.config.median_color,
-            linewidth=2.0,
         )
-        self._render_line_series(
+        self._render_bar_series(
             output_png=max_output_png,
             output_svg=max_output_svg,
             title=self.config.nmr_max_title,
@@ -465,7 +491,6 @@ class PDBScientificPlotter:
             x_values=stats.index,
             y_values=stats["max"],
             color=self.config.max_color,
-            linewidth=2.0,
         )
 
     def plot_membrane_protein_counts(
