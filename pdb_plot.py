@@ -146,8 +146,9 @@ def parse_plot_kinds(raw_value: str) -> list[PlotKind]:
 
 
 class PDBScientificPlotter:
-    def __init__(self, config: PlotConfig) -> None:
+    def __init__(self, config: PlotConfig, generate_svg: bool = True) -> None:
         self.config = config
+        self.generate_svg = generate_svg
         self._csv_cache: dict[Path, pd.DataFrame] = {}
 
     def _read_csv(self, data_path: Path) -> pd.DataFrame:
@@ -195,7 +196,8 @@ class PDBScientificPlotter:
         fig.tight_layout()
         output_png.parent.mkdir(parents=True, exist_ok=True)
         fig.savefig(output_png, dpi=self.config.dpi)
-        fig.savefig(output_svg)
+        if self.generate_svg:
+            fig.savefig(output_svg)
         plt.close(fig)
 
     @staticmethod
@@ -1187,13 +1189,18 @@ def parse_args() -> argparse.Namespace:
         default=Path("figures/solution_nmr_monomer_xray_rmsd_by_year.svg"),
         help="Output SVG for monomer X-ray RMSD(CA) by year plot.",
     )
+    parser.add_argument(
+        "--no-svg",
+        action="store_true",
+        help="Disable SVG output generation.",
+    )
 
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    plotter = PDBScientificPlotter(config=PlotConfig())
+    plotter = PDBScientificPlotter(config=PlotConfig(), generate_svg=not args.no_svg)
 
     if PlotKind.METHOD_COUNTS in args.plots:
         plotter.plot_method_counts(
