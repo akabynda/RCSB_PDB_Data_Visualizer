@@ -4,6 +4,7 @@ import argparse
 import csv
 import logging
 import time
+import requests
 import numpy as np
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -11,10 +12,7 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Sequence, TypeVar
-
-import requests
-import rmsd as rmsd_lib
-
+from MDAnalysis.analysis.rms import rmsd as mda_rmsd
 
 LOGGER = logging.getLogger(__name__)
 T = TypeVar("T")
@@ -318,6 +316,10 @@ def parse_models_ca_coords(
     elif current_model:
         models.append(current_model)
     return models
+
+
+def _superposed_rmsd(a: np.ndarray, b: np.ndarray) -> float:
+    return float(mda_rmsd(a, b, center=True, superposition=True))
 
 
 MEMBRANE_ANNOTATION_TYPES: tuple[str, ...] = ("OPM", "PDBTM", "MemProtMD", "mpstruc")
@@ -1244,7 +1246,10 @@ class SolutionNMRMonomerPrecisionCollector:
 
     @staticmethod
     def _compute_mean_rmsd_to_average(
-        pdb_path: Path, chain_id: str, start_seq_id: int, end_seq_id: int
+        pdb_path: Path,
+        chain_id: str,
+        start_seq_id: int,
+        end_seq_id: int,
     ) -> tuple[int, int, float] | None:
         model_maps = parse_models_ca_coords(
             pdb_path=pdb_path,
@@ -1266,17 +1271,11 @@ class SolutionNMRMonomerPrecisionCollector:
             [[model_map[resid] for resid in sorted_resids] for model_map in model_maps],
             dtype=float,
         )
-        mean_coords = coords.mean(axis=0)
+        reference_coords = coords[0]
         per_model_rmsd = [
-            float(
-                rmsd_lib.kabsch_rmsd(
-                    P=model_coord,
-                    Q=mean_coords,
-                    translate=True,
-                )
-            )
-            for model_coord in coords
+            _superposed_rmsd(model_coord, reference_coords) for model_coord in coords
         ]
+
         return len(model_maps), len(sorted_resids), float(np.mean(per_model_rmsd))
 
     def _compute_record(
@@ -1547,18 +1546,15 @@ class SolutionNMRMonomerXrayRmsdCollector:
             [[model_map[resid] for resid in common_resids] for model_map in nmr_models],
             dtype=float,
         )
-        nmr_mean_coords = nmr_coords.mean(axis=0)
+
         xray_coords = np.asarray(
             [xray_models[0][resid + best_offset] for resid in common_resids],
             dtype=float,
         )
-        rmsd_value = float(
-            rmsd_lib.kabsch_rmsd(
-                P=nmr_mean_coords,
-                Q=xray_coords,
-                translate=True,
-            )
-        )
+        per_model_rmsd = [
+            _superposed_rmsd(model_coord, xray_coords) for model_coord in nmr_coords
+        ]
+        rmsd_value = float(np.mean(per_model_rmsd))
         return len(common_resids), rmsd_value
 
     def _resolve_best_xray_analog_by_group(
