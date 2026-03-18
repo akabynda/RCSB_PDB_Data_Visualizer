@@ -111,6 +111,7 @@ class PlotConfig:
 
 NMR_WEIGHT_BINS: tuple[float, ...] = (0.0, 10.0, 25.0, float("inf"))
 NMR_WEIGHT_LABELS: tuple[str, ...] = ("<10 kDa", "10-25 kDa", ">25 kDa")
+MAX_PLOT_YEAR: int = 2025
 
 
 def parse_plot_kinds(raw_value: str) -> list[PlotKind]:
@@ -196,6 +197,12 @@ class PDBScientificPlotter:
         fig.savefig(output_png, dpi=self.config.dpi)
         fig.savefig(output_svg)
         plt.close(fig)
+
+    @staticmethod
+    def _limit_year_column(table: pd.DataFrame) -> pd.DataFrame:
+        if "year" not in table.columns:
+            return table
+        return table.loc[table["year"] <= MAX_PLOT_YEAR].copy()
 
     @staticmethod
     def _validate_required_columns(
@@ -329,8 +336,9 @@ class PDBScientificPlotter:
             required_columns={"year", "method", "count"},
             dataset_name="Method count CSV",
         )
+        limited = PDBScientificPlotter._limit_year_column(df)
         return (
-            df.pivot(index="year", columns="method", values="count")
+            limited.pivot(index="year", columns="method", values="count")
             .fillna(0)
             .sort_index()
             .astype(int)
@@ -344,16 +352,17 @@ class PDBScientificPlotter:
             column_types={"year": int, "count": int},
             dataset_name="Membrane count CSV",
         )
-        return prepared.sort_values("year")
+        return PDBScientificPlotter._limit_year_column(prepared).sort_values("year")
 
     @staticmethod
     def _prepare_nmr_weight_table(df: pd.DataFrame) -> pd.DataFrame:
-        return PDBScientificPlotter._prepare_typed_table(
+        prepared = PDBScientificPlotter._prepare_typed_table(
             df=df,
             required_columns={"entry_id", "year", "molecular_weight_kda"},
             column_types={"year": int, "molecular_weight_kda": float},
             dataset_name="NMR weight CSV",
         )
+        return PDBScientificPlotter._limit_year_column(prepared)
 
     @staticmethod
     def _period_series(table: pd.DataFrame) -> dict[str, pd.Series]:
@@ -575,12 +584,13 @@ class PDBScientificPlotter:
 
     @staticmethod
     def _prepare_monomer_secondary_table(df: pd.DataFrame) -> pd.DataFrame:
-        return PDBScientificPlotter._prepare_typed_table(
+        prepared = PDBScientificPlotter._prepare_typed_table(
             df=df,
             required_columns={"entry_id", "year", "secondary_structure_percent"},
             column_types={"year": int, "secondary_structure_percent": float},
             dataset_name="Monomer secondary CSV",
         )
+        return PDBScientificPlotter._limit_year_column(prepared)
 
     def plot_solution_nmr_monomer_secondary(
         self, data_path: Path, output_png: Path, output_svg: Path
@@ -622,12 +632,13 @@ class PDBScientificPlotter:
 
     @staticmethod
     def _prepare_monomer_precision_table(df: pd.DataFrame) -> pd.DataFrame:
-        return PDBScientificPlotter._prepare_typed_table(
+        prepared = PDBScientificPlotter._prepare_typed_table(
             df=df,
             required_columns={"entry_id", "year", "mean_rmsd_angstrom"},
             column_types={"year": int, "mean_rmsd_angstrom": float},
             dataset_name="Monomer precision CSV",
         )
+        return PDBScientificPlotter._limit_year_column(prepared)
 
     def plot_solution_nmr_monomer_precision(
         self, data_path: Path, output_png: Path, output_svg: Path
@@ -648,12 +659,11 @@ class PDBScientificPlotter:
             x_values=yearly_mean_rmsd.index,
             y_values=yearly_mean_rmsd,
             color="#8c564b",
-            label="Yearly mean RMSD",
         )
 
     @staticmethod
     def _prepare_monomer_quality_table(df: pd.DataFrame) -> pd.DataFrame:
-        return PDBScientificPlotter._prepare_typed_table(
+        prepared = PDBScientificPlotter._prepare_typed_table(
             df=df,
             required_columns={
                 "entry_id",
@@ -670,6 +680,7 @@ class PDBScientificPlotter:
             },
             dataset_name="Monomer quality CSV",
         )
+        return PDBScientificPlotter._limit_year_column(prepared)
 
     def plot_solution_nmr_monomer_quality(
         self,
@@ -717,7 +728,7 @@ class PDBScientificPlotter:
 
     @staticmethod
     def _prepare_monomer_xray_homolog_table(df: pd.DataFrame) -> pd.DataFrame:
-        return PDBScientificPlotter._prepare_typed_table(
+        prepared = PDBScientificPlotter._prepare_typed_table(
             df=df,
             required_columns={
                 "entry_id",
@@ -732,6 +743,7 @@ class PDBScientificPlotter:
             },
             dataset_name="Monomer X-ray homolog CSV",
         )
+        return PDBScientificPlotter._limit_year_column(prepared)
 
     def plot_solution_nmr_monomer_xray_homologs(
         self,
@@ -796,12 +808,13 @@ class PDBScientificPlotter:
 
     @staticmethod
     def _prepare_monomer_xray_rmsd_table(df: pd.DataFrame) -> pd.DataFrame:
-        return PDBScientificPlotter._prepare_typed_table(
+        prepared = PDBScientificPlotter._prepare_typed_table(
             df=df,
             required_columns={"entry_id", "year", "rmsd_ca_angstrom"},
             column_types={"year": int, "rmsd_ca_angstrom": float},
             dataset_name="Monomer X-ray RMSD CSV",
         )
+        return PDBScientificPlotter._limit_year_column(prepared)
 
     def plot_solution_nmr_monomer_xray_rmsd(
         self, data_path: Path, output_png: Path, output_svg: Path
