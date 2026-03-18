@@ -476,11 +476,73 @@ class RCSBClient:
                 "value": query_value,
             },
         }
-        return self._fetch_paginated_identifiers(
+        matched_entry_ids = self._fetch_paginated_identifiers(
             query=query,
             return_type="entry",
             progress_label=f"{method_label} ({query_value})",
         )
+        if not matched_entry_ids:
+            return []
+
+        filtered_entry_ids: list[str] = []
+        for batch in chunked(matched_entry_ids, self.config.graphql_batch_size):
+            filtered_entry_ids.extend(
+                self._filter_entry_ids_by_exact_single_method(
+                    entry_ids=batch,
+                    method_value=query_value,
+                )
+            )
+
+        LOGGER.info(
+            "%s (%s): kept %d/%d entries with exactly one method",
+            method_label,
+            query_value,
+            len(filtered_entry_ids),
+            len(matched_entry_ids),
+        )
+        return filtered_entry_ids
+
+    def _filter_entry_ids_by_exact_single_method(
+        self, entry_ids: list[str], method_value: str
+    ) -> list[str]:
+        if not entry_ids:
+            return []
+
+        query = """
+        query($ids:[String!]!) {
+          entries(entry_ids:$ids) {
+            rcsb_id
+            exptl {
+              method
+            }
+          }
+        }
+        """
+        payload = {"query": query, "variables": {"ids": entry_ids}}
+        data = self._post_json(self.config.graphql_url, payload)
+        entries = data.get("data", {}).get("entries", [])
+
+        filtered: list[str] = []
+        for entry in entries:
+            if not entry:
+                continue
+            entry_id = entry.get("rcsb_id")
+            if not entry_id:
+                continue
+
+            methods = []
+            for exptl in entry.get("exptl") or []:
+                if not exptl:
+                    continue
+                method = exptl.get("method")
+                if method:
+                    methods.append(str(method))
+
+            unique_methods = set(methods)
+            if len(unique_methods) == 1 and method_value in unique_methods:
+                filtered.append(str(entry_id))
+
+        return filtered
 
     def fetch_entry_ids_for_membrane_annotations(
         self, annotation_types: tuple[str, ...]
