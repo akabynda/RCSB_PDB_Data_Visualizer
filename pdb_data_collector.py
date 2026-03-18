@@ -765,9 +765,13 @@ class RCSBClient:
             polymer_entities {
               entity_poly {
                 rcsb_entity_polymer_type
+                pdbx_strand_id
               }
               rcsb_polymer_entity {
                 formula_weight
+              }
+              polymer_entity_instances {
+                rcsb_id
               }
             }
           }
@@ -802,7 +806,29 @@ class RCSBClient:
                     "formula_weight"
                 )
                 if entity_weight is not None:
-                    total_weight_kda += float(entity_weight)
+                    instances = polymer_entity.get("polymer_entity_instances") or []
+                    instance_count = len(
+                        [
+                            instance
+                            for instance in instances
+                            if instance and instance.get("rcsb_id")
+                        ]
+                    )
+                    if instance_count <= 0:
+                        strand_ids = str(
+                            polymer_entity.get("entity_poly", {}).get(
+                                "pdbx_strand_id"
+                            )
+                            or ""
+                        )
+                        chain_ids = {
+                            chain_id.strip()
+                            for chain_id in strand_ids.split(",")
+                            if chain_id.strip()
+                        }
+                        instance_count = len(chain_ids) if chain_ids else 1
+
+                    total_weight_kda += float(entity_weight) * instance_count
 
             records.append(
                 SolutionNMRWeightRecord(
