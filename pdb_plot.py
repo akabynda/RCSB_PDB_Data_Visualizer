@@ -187,6 +187,9 @@ class PDBScientificPlotter:
             figsize=(self.config.width_inches, self.config.height_inches)
         )
         draw_fn(ax)
+        y_bottom, y_top = ax.get_ylim()
+        if y_bottom < 0.0 < y_top:
+            ax.set_ylim(bottom=0.0)
         ax.set_title(title, pad=10)
         ax.set_xlabel(x_label if x_label is not None else self.config.x_label)
         ax.set_ylabel(y_label)
