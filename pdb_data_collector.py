@@ -80,6 +80,7 @@ class SolutionNMRWeightRecord:
     entry_id: str
     year: int
     molecular_weight_kda: float
+    rcsb_entry_molecular_weight_kda: float | None
 
 
 @dataclass(frozen=True)
@@ -762,6 +763,9 @@ class RCSBClient:
             rcsb_accession_info {
               deposit_date
             }
+            rcsb_entry_info {
+              molecular_weight
+            }
             polymer_entities {
               entity_poly {
                 rcsb_entity_polymer_type
@@ -792,6 +796,11 @@ class RCSBClient:
             )
             if not entry_id or year is None:
                 continue
+            entry_mw_raw = (entry.get("rcsb_entry_info") or {}).get("molecular_weight")
+            try:
+                entry_mw_kda = float(entry_mw_raw) if entry_mw_raw is not None else None
+            except (TypeError, ValueError):
+                entry_mw_kda = None
 
             total_weight_kda = 0.0
             for polymer_entity in entry.get("polymer_entities") or []:
@@ -816,9 +825,7 @@ class RCSBClient:
                     )
                     if instance_count <= 0:
                         strand_ids = str(
-                            polymer_entity.get("entity_poly", {}).get(
-                                "pdbx_strand_id"
-                            )
+                            polymer_entity.get("entity_poly", {}).get("pdbx_strand_id")
                             or ""
                         )
                         chain_ids = {
@@ -835,6 +842,7 @@ class RCSBClient:
                     entry_id=entry_id,
                     year=year,
                     molecular_weight_kda=total_weight_kda,
+                    rcsb_entry_molecular_weight_kda=entry_mw_kda,
                 )
             )
         return records
@@ -1870,8 +1878,25 @@ def write_solution_nmr_weights_csv(
 ) -> None:
     write_csv_rows(
         output_path=output_path,
-        header=["entry_id", "year", "molecular_weight_kda"],
-        rows=((r.entry_id, r.year, f"{r.molecular_weight_kda:.3f}") for r in records),
+        header=[
+            "entry_id",
+            "year",
+            "molecular_weight_kda",
+            "rcsb_entry_molecular_weight_kda",
+        ],
+        rows=(
+            (
+                r.entry_id,
+                r.year,
+                f"{r.molecular_weight_kda:.3f}",
+                (
+                    f"{r.rcsb_entry_molecular_weight_kda:.3f}"
+                    if r.rcsb_entry_molecular_weight_kda is not None
+                    else ""
+                ),
+            )
+            for r in records
+        ),
     )
 
 
