@@ -109,8 +109,8 @@ class PlotConfig:
     area_colors: tuple[str, str, str] = ("#4c78a8", "#f58518", "#54a24b")
 
 
-NMR_WEIGHT_BINS: tuple[float, ...] = (0.0, 10.0, 25.0, float("inf"))
-NMR_WEIGHT_LABELS: tuple[str, ...] = ("<10 kDa", "10-25 kDa", ">25 kDa")
+NMR_WEIGHT_BINS: tuple[float, ...] = (0.0, 10.0, 20.0, float("inf"))
+NMR_WEIGHT_LABELS: tuple[str, ...] = ("<10 kDa", "10-20 kDa", ">20 kDa")
 MAX_PLOT_YEAR: int = 2024
 
 
