@@ -6,6 +6,7 @@ import logging
 import time
 import requests
 import numpy as np
+from Bio.SeqUtils import molecular_weight as sequence_molecular_weight
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -23,6 +24,14 @@ PROTEIN_MONOMER_ENTITY_TYPES: frozenset[str] = frozenset(
 )
 PROTEIN_POLYMER_TYPE = "Protein"
 SEQUENCE_IDENTITY_AGGREGATION_METHOD = "sequence_identity"
+UNMODELED_INSTANCE_FEATURE_TYPES: frozenset[str] = frozenset(
+    {
+        "UNOBSERVED_RESIDUE_XYZ",
+        "ZERO_OCCUPANCY_RESIDUE_XYZ",
+        "UNMODELED_RESIDUE_XYZ",
+        "MISSING_RESIDUE",
+    }
+)
 
 
 class ExperimentalMethod(Enum):
@@ -81,6 +90,7 @@ class SolutionNMRWeightRecord:
     year: int
     molecular_weight_kda: float
     rcsb_entry_molecular_weight_kda: float | None
+    modeled_molecular_weight_kda: float | None
 
 
 @dataclass(frozen=True)
@@ -321,6 +331,100 @@ def parse_models_ca_coords(
 
 def _superposed_rmsd(a: np.ndarray, b: np.ndarray) -> float:
     return float(mda_rmsd(a, b, center=True, superposition=True))
+
+
+def _normalize_polymer_sequence(
+    raw_sequence: Any, expected_length: int | None = None
+) -> str | None:
+    if not isinstance(raw_sequence, str):
+        return None
+    compact = "".join(raw_sequence.split()).upper()
+    if not compact:
+        return None
+    if (
+        expected_length is not None
+        and expected_length > 0
+        and len(compact) != expected_length
+    ):
+        return None
+    return compact
+
+
+def _seq_type_for_polymer(polymer_type: str, sequence: str | None = None) -> str | None:
+    mapping = {
+        "Protein": "protein",
+        "DNA": "DNA",
+        "RNA": "RNA",
+    }
+    if polymer_type in mapping:
+        return mapping[polymer_type]
+    if polymer_type != "NA-hybrid":
+        return None
+    seq = (sequence or "").upper()
+    has_u = "U" in seq
+    has_t = "T" in seq
+    if has_u and not has_t:
+        return "RNA"
+    return "DNA"
+
+
+def _modeled_sequence_from_instance_features(
+    sequence: str, instance_features: list[dict[str, Any] | None]
+) -> str:
+    if not sequence:
+        return sequence
+    modeled_mask = [True] * len(sequence)
+    for feature in instance_features:
+        if not feature:
+            continue
+        feature_type = str(feature.get("type") or "")
+        if feature_type not in UNMODELED_INSTANCE_FEATURE_TYPES:
+            continue
+        for pos in feature.get("feature_positions") or []:
+            if not pos:
+                continue
+            beg = pos.get("beg_seq_id")
+            end = pos.get("end_seq_id")
+            if beg is None:
+                continue
+            try:
+                beg_i = int(beg)
+                end_i = int(end) if end is not None else beg_i
+            except (TypeError, ValueError):
+                continue
+            start = max(1, min(beg_i, end_i))
+            stop = min(len(sequence), max(beg_i, end_i))
+            if start > stop:
+                continue
+            for idx in range(start - 1, stop):
+                modeled_mask[idx] = False
+    return "".join(
+        residue for residue, keep in zip(sequence, modeled_mask, strict=False) if keep
+    )
+
+
+def _sequence_weight_kda(sequence: str, seq_type: str) -> float | None:
+    if sequence_molecular_weight is None:
+        return None
+    sequence_for_weight = sequence
+    if seq_type == "protein":
+        allowed = set("ACDEFGHIKLMNPQRSTVWY")
+        sequence_for_weight = "".join(aa for aa in sequence_for_weight if aa in allowed)
+    elif seq_type == "DNA":
+        allowed = set("ACGT")
+        sequence_for_weight = "".join(nt for nt in sequence_for_weight if nt in allowed)
+    elif seq_type == "RNA":
+        allowed = set("ACGU")
+        sequence_for_weight = "".join(nt for nt in sequence_for_weight if nt in allowed)
+    if not sequence_for_weight:
+        return 0.0
+    try:
+        daltons = float(
+            sequence_molecular_weight(sequence_for_weight, seq_type=seq_type)
+        )
+    except Exception:
+        return None
+    return daltons / 1000.0
 
 
 MEMBRANE_ANNOTATION_TYPES: tuple[str, ...] = ("OPM", "PDBTM", "MemProtMD", "mpstruc")
@@ -770,12 +874,21 @@ class RCSBClient:
               entity_poly {
                 rcsb_entity_polymer_type
                 pdbx_strand_id
+                rcsb_sample_sequence_length
+                pdbx_seq_one_letter_code_can
               }
               rcsb_polymer_entity {
                 formula_weight
               }
               polymer_entity_instances {
                 rcsb_id
+                rcsb_polymer_instance_feature {
+                  type
+                  feature_positions {
+                    beg_seq_id
+                    end_seq_id
+                  }
+                }
               }
             }
           }
@@ -801,8 +914,9 @@ class RCSBClient:
                 entry_mw_kda = float(entry_mw_raw) if entry_mw_raw is not None else None
             except (TypeError, ValueError):
                 entry_mw_kda = None
-
             total_weight_kda = 0.0
+            modeled_weight_total_kda = 0.0
+            has_modeled_weight = False
             for polymer_entity in entry.get("polymer_entities") or []:
                 if not polymer_entity:
                     continue
@@ -815,6 +929,7 @@ class RCSBClient:
                     "formula_weight"
                 )
                 if entity_weight is not None:
+                    entity_weight_f = float(entity_weight)
                     instances = polymer_entity.get("polymer_entity_instances") or []
                     instance_count = len(
                         [
@@ -835,7 +950,67 @@ class RCSBClient:
                         }
                         instance_count = len(chain_ids) if chain_ids else 1
 
-                    total_weight_kda += float(entity_weight) * instance_count
+                    total_weight_kda += entity_weight_f * instance_count
+
+                    sequence_length_raw = polymer_entity.get("entity_poly", {}).get(
+                        "rcsb_sample_sequence_length"
+                    )
+                    try:
+                        sequence_length = int(sequence_length_raw)
+                    except (TypeError, ValueError):
+                        sequence_length = 0
+
+                    if sequence_length > 0:
+                        raw_sequence = polymer_entity.get("entity_poly", {}).get(
+                            "pdbx_seq_one_letter_code_can"
+                        )
+                        normalized_sequence = _normalize_polymer_sequence(
+                            raw_sequence=raw_sequence,
+                            expected_length=sequence_length,
+                        )
+                        seq_type = _seq_type_for_polymer(
+                            str(polymer_type), normalized_sequence
+                        )
+                        if normalized_sequence is None or seq_type is None:
+                            continue
+
+                        valid_instances = [
+                            instance
+                            for instance in instances
+                            if instance and instance.get("rcsb_id")
+                        ]
+                        if valid_instances:
+                            for instance in valid_instances:
+                                modeled_sequence = (
+                                    _modeled_sequence_from_instance_features(
+                                        sequence=normalized_sequence,
+                                        instance_features=instance.get(
+                                            "rcsb_polymer_instance_feature"
+                                        )
+                                        or [],
+                                    )
+                                )
+                                modeled_sequence_weight = _sequence_weight_kda(
+                                    sequence=modeled_sequence,
+                                    seq_type=seq_type,
+                                )
+                                if modeled_sequence_weight is not None:
+                                    modeled_weight_total_kda += modeled_sequence_weight
+                                    has_modeled_weight = True
+                        else:
+                            full_sequence_weight = _sequence_weight_kda(
+                                sequence=normalized_sequence,
+                                seq_type=seq_type,
+                            )
+                            if full_sequence_weight is not None:
+                                modeled_weight_total_kda += (
+                                    full_sequence_weight * instance_count
+                                )
+                                has_modeled_weight = True
+
+            modeled_weight_kda: float | None = None
+            if has_modeled_weight:
+                modeled_weight_kda = modeled_weight_total_kda
 
             records.append(
                 SolutionNMRWeightRecord(
@@ -843,6 +1018,7 @@ class RCSBClient:
                     year=year,
                     molecular_weight_kda=total_weight_kda,
                     rcsb_entry_molecular_weight_kda=entry_mw_kda,
+                    modeled_molecular_weight_kda=modeled_weight_kda,
                 )
             )
         return records
@@ -1883,6 +2059,7 @@ def write_solution_nmr_weights_csv(
             "year",
             "molecular_weight_kda",
             "rcsb_entry_molecular_weight_kda",
+            "modeled_molecular_weight_kda",
         ],
         rows=(
             (
@@ -1892,6 +2069,11 @@ def write_solution_nmr_weights_csv(
                 (
                     f"{r.rcsb_entry_molecular_weight_kda:.3f}"
                     if r.rcsb_entry_molecular_weight_kda is not None
+                    else ""
+                ),
+                (
+                    f"{r.modeled_molecular_weight_kda:.3f}"
+                    if r.modeled_molecular_weight_kda is not None
                     else ""
                 ),
             )
