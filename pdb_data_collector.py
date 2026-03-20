@@ -916,7 +916,6 @@ class RCSBClient:
                 entry_mw_kda = None
             total_weight_kda = 0.0
             modeled_weight_total_kda = 0.0
-            has_modeled_weight = False
             for polymer_entity in entry.get("polymer_entities") or []:
                 if not polymer_entity:
                     continue
@@ -996,7 +995,6 @@ class RCSBClient:
                                 )
                                 if modeled_sequence_weight is not None:
                                     modeled_weight_total_kda += modeled_sequence_weight
-                                    has_modeled_weight = True
                         else:
                             full_sequence_weight = _sequence_weight_kda(
                                 sequence=normalized_sequence,
@@ -1006,11 +1004,12 @@ class RCSBClient:
                                 modeled_weight_total_kda += (
                                     full_sequence_weight * instance_count
                                 )
-                                has_modeled_weight = True
 
-            modeled_weight_kda: float | None = None
-            if has_modeled_weight:
-                modeled_weight_kda = modeled_weight_total_kda
+            if total_weight_kda <= 0.0:
+                total_weight_kda = entry_mw_kda
+
+            if modeled_weight_total_kda <= 0.0:
+                modeled_weight_total_kda = total_weight_kda
 
             records.append(
                 SolutionNMRWeightRecord(
@@ -1018,7 +1017,7 @@ class RCSBClient:
                     year=year,
                     molecular_weight_kda=total_weight_kda,
                     rcsb_entry_molecular_weight_kda=entry_mw_kda,
-                    modeled_molecular_weight_kda=modeled_weight_kda,
+                    modeled_molecular_weight_kda=modeled_weight_total_kda,
                 )
             )
         return records
