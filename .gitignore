@@ -3,3 +3,4 @@ figures
 __pycache__
 .venv
 helpers
+dssp
