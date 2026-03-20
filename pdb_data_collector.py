@@ -158,6 +158,8 @@ class SolutionNMRMonomerXraySeedRecord:
     entry_id: str
     year: int
     chain_id: str
+    core_start_seq_id: int
+    core_end_seq_id: int
     group_id_95: str | None
     group_id_100: str | None
 
@@ -176,8 +178,12 @@ class SolutionNMRMonomerXrayRmsdRecord:
     year: int
     sequence_identity_percent: int
     nmr_chain_id: str
+    nmr_core_start_seq_id: int | None
+    nmr_core_end_seq_id: int | None
     xray_entry_id: str
     xray_chain_id: str
+    xray_core_start_seq_id: int | None
+    xray_core_end_seq_id: int | None
     xray_resolution_angstrom: float
     n_common_ca: int
     rmsd_ca_angstrom: float
@@ -520,6 +526,45 @@ class RCSBClient:
         return str(entry_id), year, model_count, polymer_entity, chain_id
 
     @staticmethod
+    def _extract_secondary_core_range(
+        polymer_entity: dict[str, Any],
+    ) -> tuple[int, int] | None:
+        instances = polymer_entity.get("polymer_entity_instances") or []
+        if len(instances) != 1:
+            return None
+
+        features = instances[0].get("rcsb_polymer_instance_feature") or []
+        sec_ranges: list[tuple[int, int]] = []
+        for feature in features:
+            if not feature:
+                continue
+            feature_type = feature.get("type")
+            if feature_type not in {"HELIX_P", "SHEET"}:
+                continue
+            for pos in feature.get("feature_positions") or []:
+                if not pos:
+                    continue
+                beg = pos.get("beg_seq_id")
+                end = pos.get("end_seq_id")
+                if beg is None:
+                    continue
+                try:
+                    beg_i = int(beg)
+                    end_i = int(end) if end is not None else beg_i
+                except (TypeError, ValueError):
+                    continue
+                sec_ranges.append((beg_i, end_i))
+
+        if not sec_ranges:
+            return None
+
+        core_start = min(beg for beg, _ in sec_ranges)
+        core_end = max(end for _, end in sec_ranges)
+        if core_end < core_start:
+            return None
+        return core_start, core_end
+
+    @staticmethod
     def _extract_model_pdb_texts(pdb_path: Path) -> list[str]:
         model_texts: list[str] = []
         model_lines: list[str] = []
@@ -664,7 +709,9 @@ class RCSBClient:
                             continue
 
                         secondary_count = int(
-                            np.count_nonzero(np.isin(dssp_labels[0], np.array(["H", "E"])))
+                            np.count_nonzero(
+                                np.isin(dssp_labels[0], np.array(["H", "E"]))
+                            )
                         )
                         secondary_percent = (
                             secondary_count / float(sequence_length)
@@ -1426,36 +1473,10 @@ class RCSBClient:
             if context is None:
                 continue
             entry_id, year, model_count, polymer_entity, chain_id = context
-            instances = polymer_entity.get("polymer_entity_instances") or []
-            if len(instances) != 1:
+            core_range = self._extract_secondary_core_range(polymer_entity)
+            if core_range is None:
                 continue
-
-            features = instances[0].get("rcsb_polymer_instance_feature") or []
-            sec_ranges: list[tuple[int, int]] = []
-            for feature in features:
-                if not feature:
-                    continue
-                feature_type = feature.get("type")
-                if feature_type not in {"HELIX_P", "SHEET"}:
-                    continue
-                for pos in feature.get("feature_positions") or []:
-                    if not pos:
-                        continue
-                    beg = pos.get("beg_seq_id")
-                    end = pos.get("end_seq_id")
-                    if beg is None:
-                        continue
-                    beg_i = int(beg)
-                    end_i = int(end) if end is not None else beg_i
-                    sec_ranges.append((beg_i, end_i))
-
-            if not sec_ranges:
-                continue
-
-            core_start = min(beg for beg, _ in sec_ranges)
-            core_end = max(end for _, end in sec_ranges)
-            if core_end < core_start:
-                continue
+            core_start, core_end = core_range
 
             records.append(
                 SolutionNMRMonomerCoreRegionRecord(
@@ -1602,6 +1623,15 @@ class RCSBClient:
                 rcsb_entity_polymer_type
                 pdbx_strand_id
               }
+              polymer_entity_instances {
+                rcsb_polymer_instance_feature {
+                  type
+                  feature_positions {
+                    beg_seq_id
+                    end_seq_id
+                  }
+                }
+              }
               rcsb_polymer_entity_group_membership {
                 aggregation_method
                 similarity_cutoff
@@ -1632,12 +1662,18 @@ class RCSBClient:
             )
             group_95 = groups.get(95)
             group_100 = groups.get(100)
+            core_range = self._extract_secondary_core_range(polymer_entity)
+            if core_range is None:
+                continue
+            core_start, core_end = core_range
 
             records.append(
                 SolutionNMRMonomerXraySeedRecord(
                     entry_id=str(entry_id),
                     year=year,
                     chain_id=chain_id,
+                    core_start_seq_id=core_start,
+                    core_end_seq_id=core_end,
                     group_id_95=group_95,
                     group_id_100=group_100,
                 )
@@ -2057,10 +2093,17 @@ class SolutionNMRMonomerXrayRmsdCollector:
     def _compute_ca_rmsd_to_xray(
         nmr_pdb_path: Path,
         nmr_chain_id: str,
+        nmr_core_start_seq_id: int,
+        nmr_core_end_seq_id: int,
         xray_pdb_path: Path,
         xray_chain_id: str,
-    ) -> tuple[int, float] | None:
-        nmr_models = parse_models_ca_coords(nmr_pdb_path, nmr_chain_id)
+    ) -> tuple[int, float, int, int, int, int] | None:
+        nmr_models = parse_models_ca_coords(
+            nmr_pdb_path,
+            nmr_chain_id,
+            start_seq_id=nmr_core_start_seq_id,
+            end_seq_id=nmr_core_end_seq_id,
+        )
         if len(nmr_models) < 2:
             return None
         xray_models = parse_models_ca_coords(xray_pdb_path, xray_chain_id)
@@ -2078,32 +2121,73 @@ class SolutionNMRMonomerXrayRmsdCollector:
             return None
 
         # Residue numbering may differ by a constant offset between NMR and X-ray entries.
-        offset_votes: Counter[int] = Counter()
-        for nmr_resid in common_nmr_resids:
-            for xray_resid in xray_resids:
-                offset_votes[xray_resid - nmr_resid] += 1
-        best_offset, _ = offset_votes.most_common(1)[0]
+        # We first maximize overlap by offset, then break ties by minimal mean RMSD.
+        nmr_min = min(common_nmr_resids)
+        nmr_max = max(common_nmr_resids)
+        xray_min = min(xray_resids)
+        xray_max = max(xray_resids)
 
-        common_resids = sorted(
-            resid for resid in common_nmr_resids if (resid + best_offset) in xray_resids
-        )
-        if len(common_resids) < 3:
+        max_overlap = 0
+        overlap_candidates: list[tuple[int, list[int]]] = []
+        for offset in range(xray_min - nmr_max, xray_max - nmr_min + 1):
+            mapped_resids = sorted(
+                resid
+                for resid in common_nmr_resids
+                if (resid + offset) in xray_resids
+            )
+            overlap = len(mapped_resids)
+            if overlap < 3:
+                continue
+            if overlap > max_overlap:
+                max_overlap = overlap
+                overlap_candidates = [(offset, mapped_resids)]
+            elif overlap == max_overlap:
+                overlap_candidates.append((offset, mapped_resids))
+
+        if not overlap_candidates:
             return None
 
-        nmr_coords = np.asarray(
-            [[model_map[resid] for resid in common_resids] for model_map in nmr_models],
-            dtype=float,
-        )
+        best_alignment: tuple[int, list[int], float] | None = None
+        for offset, common_resids in overlap_candidates:
+            nmr_coords = np.asarray(
+                [[model_map[resid] for resid in common_resids] for model_map in nmr_models],
+                dtype=float,
+            )
+            xray_coords = np.asarray(
+                [xray_models[0][resid + offset] for resid in common_resids],
+                dtype=float,
+            )
+            per_model_rmsd = [
+                _superposed_rmsd(model_coord, xray_coords) for model_coord in nmr_coords
+            ]
+            mean_rmsd = float(np.mean(per_model_rmsd))
 
-        xray_coords = np.asarray(
-            [xray_models[0][resid + best_offset] for resid in common_resids],
-            dtype=float,
+            if best_alignment is None:
+                best_alignment = (offset, common_resids, mean_rmsd)
+                continue
+
+            best_offset, _, best_rmsd = best_alignment
+            if (
+                mean_rmsd < best_rmsd
+                or (
+                    np.isclose(mean_rmsd, best_rmsd)
+                    and (abs(offset), offset) < (abs(best_offset), best_offset)
+                )
+            ):
+                best_alignment = (offset, common_resids, mean_rmsd)
+
+        if best_alignment is None:
+            return None
+        best_offset, common_resids, rmsd_value = best_alignment
+        xray_common_resids = [resid + best_offset for resid in common_resids]
+        return (
+            len(common_resids),
+            rmsd_value,
+            min(common_resids),
+            max(common_resids),
+            min(xray_common_resids),
+            max(xray_common_resids),
         )
-        per_model_rmsd = [
-            _superposed_rmsd(model_coord, xray_coords) for model_coord in nmr_coords
-        ]
-        rmsd_value = float(np.mean(per_model_rmsd))
-        return len(common_resids), rmsd_value
 
     def _resolve_best_xray_analog_by_group(
         self, group_ids: set[str]
@@ -2183,18 +2267,35 @@ class SolutionNMRMonomerXrayRmsdCollector:
             nmr_pdb_path = self._download_pdb_if_needed(seed.entry_id)
             xray_pdb_path = self._download_pdb_if_needed(xray_entry_id)
 
-            best_chain_result: tuple[str, int, float] | None = None
+            best_chain_result: tuple[str, int, float, int, int, int, int] | None = None
             for xray_chain_id in xray_chain_ids:
                 rmsd_result = self._compute_ca_rmsd_to_xray(
                     nmr_pdb_path=nmr_pdb_path,
                     nmr_chain_id=seed.chain_id,
+                    nmr_core_start_seq_id=seed.core_start_seq_id,
+                    nmr_core_end_seq_id=seed.core_end_seq_id,
                     xray_pdb_path=xray_pdb_path,
                     xray_chain_id=xray_chain_id,
                 )
                 if rmsd_result is None:
                     continue
-                n_common_ca, rmsd_ca = rmsd_result
-                candidate = (xray_chain_id, n_common_ca, rmsd_ca)
+                (
+                    n_common_ca,
+                    rmsd_ca,
+                    nmr_core_start,
+                    nmr_core_end,
+                    xray_core_start,
+                    xray_core_end,
+                ) = rmsd_result
+                candidate = (
+                    xray_chain_id,
+                    n_common_ca,
+                    rmsd_ca,
+                    nmr_core_start,
+                    nmr_core_end,
+                    xray_core_start,
+                    xray_core_end,
+                )
                 if (
                     best_chain_result is None
                     or candidate[1] > best_chain_result[1]
@@ -2207,14 +2308,26 @@ class SolutionNMRMonomerXrayRmsdCollector:
 
             if best_chain_result is None:
                 return None
-            xray_chain_id, n_common_ca, rmsd_ca = best_chain_result
+            (
+                xray_chain_id,
+                n_common_ca,
+                rmsd_ca,
+                nmr_core_start,
+                nmr_core_end,
+                xray_core_start,
+                xray_core_end,
+            ) = best_chain_result
             return SolutionNMRMonomerXrayRmsdRecord(
                 entry_id=seed.entry_id,
                 year=seed.year,
                 sequence_identity_percent=self.sequence_identity_percent,
                 nmr_chain_id=seed.chain_id,
+                nmr_core_start_seq_id=nmr_core_start,
+                nmr_core_end_seq_id=nmr_core_end,
                 xray_entry_id=xray_entry_id,
                 xray_chain_id=xray_chain_id,
+                xray_core_start_seq_id=xray_core_start,
+                xray_core_end_seq_id=xray_core_end,
                 xray_resolution_angstrom=xray_resolution,
                 n_common_ca=n_common_ca,
                 rmsd_ca_angstrom=rmsd_ca,
@@ -2517,14 +2630,38 @@ def read_solution_nmr_monomer_xray_rmsd_csv(
         for row in reader:
             if not row:
                 continue
+            nmr_core_start_raw = row.get("nmr_core_start_seq_id")
+            nmr_core_end_raw = row.get("nmr_core_end_seq_id")
+            xray_core_start_raw = row.get("xray_core_start_seq_id")
+            xray_core_end_raw = row.get("xray_core_end_seq_id")
             records.append(
                 SolutionNMRMonomerXrayRmsdRecord(
                     entry_id=str(row["entry_id"]),
                     year=int(row["year"]),
                     sequence_identity_percent=int(row["sequence_identity_percent"]),
                     nmr_chain_id=str(row["nmr_chain_id"]),
+                    nmr_core_start_seq_id=(
+                        int(nmr_core_start_raw)
+                        if nmr_core_start_raw not in {None, ""}
+                        else None
+                    ),
+                    nmr_core_end_seq_id=(
+                        int(nmr_core_end_raw)
+                        if nmr_core_end_raw not in {None, ""}
+                        else None
+                    ),
                     xray_entry_id=str(row["xray_entry_id"]),
                     xray_chain_id=str(row["xray_chain_id"]),
+                    xray_core_start_seq_id=(
+                        int(xray_core_start_raw)
+                        if xray_core_start_raw not in {None, ""}
+                        else None
+                    ),
+                    xray_core_end_seq_id=(
+                        int(xray_core_end_raw)
+                        if xray_core_end_raw not in {None, ""}
+                        else None
+                    ),
                     xray_resolution_angstrom=float(row["xray_resolution_angstrom"]),
                     n_common_ca=int(row["n_common_ca"]),
                     rmsd_ca_angstrom=float(row["rmsd_ca_angstrom"]),
@@ -2543,8 +2680,12 @@ def write_solution_nmr_monomer_xray_rmsd_csv(
             "year",
             "sequence_identity_percent",
             "nmr_chain_id",
+            "nmr_core_start_seq_id",
+            "nmr_core_end_seq_id",
             "xray_entry_id",
             "xray_chain_id",
+            "xray_core_start_seq_id",
+            "xray_core_end_seq_id",
             "xray_resolution_angstrom",
             "n_common_ca",
             "rmsd_ca_angstrom",
@@ -2555,8 +2696,16 @@ def write_solution_nmr_monomer_xray_rmsd_csv(
                 r.year,
                 r.sequence_identity_percent,
                 r.nmr_chain_id,
+                r.nmr_core_start_seq_id if r.nmr_core_start_seq_id is not None else "",
+                r.nmr_core_end_seq_id if r.nmr_core_end_seq_id is not None else "",
                 r.xray_entry_id,
                 r.xray_chain_id,
+                (
+                    r.xray_core_start_seq_id
+                    if r.xray_core_start_seq_id is not None
+                    else ""
+                ),
+                r.xray_core_end_seq_id if r.xray_core_end_seq_id is not None else "",
                 f"{r.xray_resolution_angstrom:.4f}",
                 r.n_common_ca,
                 f"{r.rmsd_ca_angstrom:.4f}",
@@ -2890,11 +3039,21 @@ def main() -> None:
                 for record in existing_records
                 if record.sequence_identity_percent == args.xray_rmsd_sequence_identity
             ]
-            skip_entry_ids = {record.entry_id for record in existing_records}
+            valid_existing_records = [
+                record
+                for record in existing_records
+                if record.nmr_core_start_seq_id is not None
+                and record.nmr_core_end_seq_id is not None
+                and record.xray_core_start_seq_id is not None
+                and record.xray_core_end_seq_id is not None
+            ]
+            dropped_existing = len(existing_records) - len(valid_existing_records)
+            skip_entry_ids = {record.entry_id for record in valid_existing_records}
             LOGGER.info(
-                "SOLUTION NMR X-ray RMSD %d%%: loaded %d existing records for resume",
+                "SOLUTION NMR X-ray RMSD %d%%: loaded %d existing records for resume (outdated=%d)",
                 args.xray_rmsd_sequence_identity,
-                len(existing_records),
+                len(valid_existing_records),
+                dropped_existing,
             )
 
         rmsd_collector = SolutionNMRMonomerXrayRmsdCollector(
@@ -2908,8 +3067,13 @@ def main() -> None:
             max_entries=args.xray_rmsd_max_entries,
             skip_entry_ids=skip_entry_ids,
         )
+        combined_by_entry: dict[str, SolutionNMRMonomerXrayRmsdRecord] = {
+            record.entry_id: record for record in existing_records
+        }
+        for record in new_records:
+            combined_by_entry[record.entry_id] = record
         combined_records = sorted(
-            existing_records + new_records,
+            combined_by_entry.values(),
             key=lambda record: (record.year, record.entry_id),
         )
         write_solution_nmr_monomer_xray_rmsd_csv(
