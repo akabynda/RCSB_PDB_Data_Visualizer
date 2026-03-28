@@ -509,7 +509,7 @@ class PDBScientificPlotter:
         cumulative = table.copy()
         cumulative["count"] = cumulative["count"].cumsum()
         self._scientific_style()
-        self._render_line_series(
+        self._render_bar_series(
             output_png=annual_output_png,
             output_svg=annual_output_svg,
             title=self.config.membrane_annual_title,
@@ -685,7 +685,7 @@ class PDBScientificPlotter:
             .sort_index()
         )
 
-        self._render_line_series(
+        self._render_bar_series(
             output_png=output_png,
             output_svg=output_svg,
             title=self.config.nmr_monomer_precision_title,
@@ -732,7 +732,7 @@ class PDBScientificPlotter:
             table.groupby("year", as_index=True).mean(numeric_only=True).sort_index()
         )
 
-        self._render_line_series(
+        self._render_bar_series(
             output_png=clash_output_png,
             output_svg=clash_output_svg,
             title=self.config.nmr_monomer_quality_clash_title,
@@ -741,7 +741,7 @@ class PDBScientificPlotter:
             y_values=yearly["clashscore"],
             color="#8c564b",
         )
-        self._render_line_series(
+        self._render_bar_series(
             output_png=rama_output_png,
             output_svg=rama_output_svg,
             title=self.config.nmr_monomer_quality_rama_title,
@@ -750,7 +750,7 @@ class PDBScientificPlotter:
             y_values=yearly["ramachandran_outliers_percent"],
             color="#1f77b4",
         )
-        self._render_line_series(
+        self._render_bar_series(
             output_png=side_output_png,
             output_svg=side_output_svg,
             title=self.config.nmr_monomer_quality_side_title,
@@ -803,7 +803,7 @@ class PDBScientificPlotter:
         yearly_95, cumulative_share_95 = self._homolog_share_series(table_95)
         yearly_100, cumulative_share_100 = self._homolog_share_series(table_100)
 
-        self._render_line_series(
+        self._render_bar_series(
             output_png=output_95_png,
             output_svg=output_95_svg,
             title=self.config.nmr_monomer_xray_homolog_95_title,
@@ -812,7 +812,7 @@ class PDBScientificPlotter:
             y_values=yearly_95,
             color="#1f77b4",
         )
-        self._render_line_series(
+        self._render_bar_series(
             output_png=output_100_png,
             output_svg=output_100_svg,
             title=self.config.nmr_monomer_xray_homolog_100_title,
@@ -858,7 +858,7 @@ class PDBScientificPlotter:
         yearly_mean_rmsd = (
             table.groupby("year", as_index=True)["rmsd_ca_angstrom"].mean().sort_index()
         )
-        self._render_line_series(
+        self._render_bar_series(
             output_png=output_png,
             output_svg=output_svg,
             title=self.config.nmr_monomer_xray_rmsd_title,
