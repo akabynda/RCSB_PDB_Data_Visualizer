@@ -3,13 +3,9 @@ from __future__ import annotations
 import argparse
 import csv
 import logging
-import shutil
-import tempfile
 import time
 import requests
 import numpy as np
-from Bio.PDB import PDBParser
-from Bio.PDB.DSSP import DSSP as BioDSSP
 from Bio.SeqUtils import molecular_weight as sequence_molecular_weight
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -17,8 +13,6 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Sequence, TypeVar
-import MDAnalysis as mda
-from MDAnalysis.analysis.dssp import DSSP as MDADSSP
 from MDAnalysis.analysis.rms import rmsd as mda_rmsd
 
 LOGGER = logging.getLogger(__name__)
@@ -106,8 +100,6 @@ class SolutionNMRMonomerSecondaryRecord:
     year: int
     sequence_length: int
     secondary_structure_percent: float
-    dssp_secondary_structure_percent: float | None
-    dssp_full_secondary_structure_percent: float | None
     helix_fraction: float
     sheet_fraction: float
     deposited_model_count: int
@@ -450,8 +442,6 @@ class RCSBClient:
         self.config = config
         self.session = requests.Session()
         self.session.headers.update({"User-Agent": "pdb-extensible-collector/1.0"})
-        self._external_dssp_executable = self._resolve_external_dssp_executable()
-        self._logged_missing_external_dssp = False
 
     @staticmethod
     def _normalize_similarity_cutoff(raw_cutoff: Any) -> int | None:
@@ -563,259 +553,6 @@ class RCSBClient:
         if core_end < core_start:
             return None
         return core_start, core_end
-
-    @staticmethod
-    def _extract_model_pdb_texts(pdb_path: Path) -> list[str]:
-        model_texts: list[str] = []
-        model_lines: list[str] = []
-        saw_model = False
-        in_model = False
-
-        with pdb_path.open("r", encoding="utf-8", errors="ignore") as handle:
-            for line in handle:
-                record = line[:6]
-                if record.startswith("MODEL"):
-                    if in_model and model_lines:
-                        model_lines.append("END\n")
-                        model_texts.append("".join(model_lines))
-                        model_lines = []
-                    saw_model = True
-                    in_model = True
-                    continue
-                if record.startswith("ENDMDL"):
-                    if in_model and model_lines:
-                        model_lines.append("END\n")
-                        model_texts.append("".join(model_lines))
-                        model_lines = []
-                    in_model = False
-                    continue
-                if saw_model and not in_model:
-                    continue
-                if (
-                    record.startswith("ATOM")
-                    or record.startswith("HETATM")
-                    or record.startswith("TER")
-                ):
-                    model_lines.append(line)
-
-        if model_lines:
-            model_lines.append("END\n")
-            model_texts.append("".join(model_lines))
-
-        return model_texts
-
-    @staticmethod
-    def _select_backbone_atoms_for_dssp(
-        universe: mda.Universe, chain_id: str
-    ) -> Any | None:
-        protein = universe.select_atoms("protein")
-        if protein.n_atoms <= 0:
-            return None
-
-        chain_ids = np.array([str(value).strip() for value in protein.chainIDs])
-        selected = protein[chain_ids == chain_id]
-        if selected.n_atoms <= 0:
-            unique_chain_ids = sorted({value for value in chain_ids if value})
-            if len(unique_chain_ids) <= 1:
-                selected = protein
-
-        if selected.n_atoms <= 0:
-            return None
-
-        backbone_indices: list[int] = []
-        for residue in selected.residues:
-            n_atoms = residue.atoms.select_atoms("name N")
-            ca_atoms = residue.atoms.select_atoms("name CA")
-            c_atoms = residue.atoms.select_atoms("name C")
-            o_atoms = residue.atoms.select_atoms("name O or name O1 or name OT1")
-            if (
-                n_atoms.n_atoms < 1
-                or ca_atoms.n_atoms < 1
-                or c_atoms.n_atoms < 1
-                or o_atoms.n_atoms < 1
-            ):
-                continue
-            backbone_indices.extend(
-                [
-                    int(n_atoms.indices[0]),
-                    int(ca_atoms.indices[0]),
-                    int(c_atoms.indices[0]),
-                    int(o_atoms.indices[0]),
-                ]
-            )
-
-        if not backbone_indices:
-            return None
-        return universe.atoms[backbone_indices]
-
-    @staticmethod
-    def _resolve_external_dssp_executable() -> str | None:
-        mkdssp_path = shutil.which("mkdssp")
-        if mkdssp_path:
-            return mkdssp_path
-        dssp_path = shutil.which("dssp")
-        if dssp_path:
-            return dssp_path
-        return None
-
-    def _compute_dssp_secondary_structure_percent(
-        self,
-        entry_id: str,
-        chain_id: str,
-        sequence_length: int,
-    ) -> float:
-        if sequence_length <= 0:
-            return 0.0
-
-        try:
-            pdb_path = download_pdb_if_needed(
-                session=self.session,
-                config=self.config,
-                cache_dir=DEFAULT_PDB_CACHE_DIR,
-                entry_id=entry_id,
-            )
-        except Exception as exc:
-            LOGGER.warning(
-                "SOLUTION NMR monomer-secondary DSSP: failed to fetch %s: %s",
-                entry_id,
-                exc,
-            )
-            return 0.0
-
-        try:
-            model_texts = self._extract_model_pdb_texts(pdb_path)
-            if not model_texts:
-                return 0.0
-
-            model_percents: list[float] = []
-            for model_text in model_texts:
-                try:
-                    with tempfile.NamedTemporaryFile(
-                        "w", suffix=".pdb", encoding="utf-8", delete=True
-                    ) as handle:
-                        handle.write(model_text)
-                        handle.flush()
-                        universe = mda.Universe(handle.name)
-                        dssp_atoms = self._select_backbone_atoms_for_dssp(
-                            universe=universe,
-                            chain_id=chain_id,
-                        )
-                        if dssp_atoms is None or dssp_atoms.n_residues <= 0:
-                            continue
-
-                        dssp_labels = MDADSSP(dssp_atoms).run().results.dssp
-                        if dssp_labels.size <= 0:
-                            model_percents.append(0.0)
-                            continue
-
-                        secondary_count = int(
-                            np.count_nonzero(
-                                np.isin(dssp_labels[0], np.array(["H", "E"]))
-                            )
-                        )
-                        secondary_percent = (
-                            secondary_count / float(sequence_length)
-                        ) * 100.0
-                        model_percents.append(min(100.0, max(0.0, secondary_percent)))
-                except Exception:
-                    continue
-
-            if not model_percents:
-                return 0.0
-            return float(np.mean(model_percents))
-        except Exception as exc:
-            LOGGER.warning(
-                "SOLUTION NMR monomer-secondary DSSP: failed for %s chain %s: %s",
-                entry_id,
-                chain_id,
-                exc,
-            )
-            return 0.0
-
-    def _compute_dssp_full_secondary_structure_percent(
-        self,
-        entry_id: str,
-        chain_id: str,
-        sequence_length: int,
-    ) -> float | None:
-        if sequence_length <= 0:
-            return None
-
-        dssp_executable = self._external_dssp_executable
-        if dssp_executable is None:
-            if not self._logged_missing_external_dssp:
-                LOGGER.warning(
-                    "SOLUTION NMR monomer-secondary DSSP(full): external executable not found (mkdssp/dssp). "
-                    "Column dssp_full_secondary_structure_percent will remain empty."
-                )
-                self._logged_missing_external_dssp = True
-            return None
-
-        try:
-            pdb_path = download_pdb_if_needed(
-                session=self.session,
-                config=self.config,
-                cache_dir=DEFAULT_PDB_CACHE_DIR,
-                entry_id=entry_id,
-            )
-        except Exception:
-            return None
-
-        try:
-            model_texts = self._extract_model_pdb_texts(pdb_path)
-            if not model_texts:
-                return None
-
-            structured_states = {"H", "B", "E", "G", "I", "T", "S"}
-            parser = PDBParser(QUIET=True)
-            model_percents: list[float] = []
-
-            for model_text in model_texts:
-                try:
-                    with tempfile.NamedTemporaryFile(
-                        "w", suffix=".pdb", encoding="utf-8", delete=True
-                    ) as handle:
-                        handle.write(model_text)
-                        handle.flush()
-                        structure = parser.get_structure(entry_id, handle.name)
-                        model = next(structure.get_models(), None)
-                        if model is None:
-                            continue
-
-                        dssp_result = BioDSSP(
-                            model,
-                            handle.name,
-                            dssp=dssp_executable,
-                            file_type="PDB",
-                        )
-
-                        state_by_chain: dict[str, list[str]] = {}
-                        for key in dssp_result.keys():
-                            chain_label = str(key[0]).strip()
-                            state = str(dssp_result[key][2]).strip() or "-"
-                            state_by_chain.setdefault(chain_label, []).append(state)
-
-                        states = state_by_chain.get(chain_id, [])
-                        if not states and len(state_by_chain) == 1:
-                            states = next(iter(state_by_chain.values()))
-                        if not states:
-                            continue
-
-                        structured_count = sum(
-                            1 for state in states if state in structured_states
-                        )
-                        secondary_percent = (
-                            structured_count / float(sequence_length)
-                        ) * 100.0
-                        model_percents.append(min(100.0, max(0.0, secondary_percent)))
-                except Exception:
-                    continue
-
-            if not model_percents:
-                return None
-            return float(np.mean(model_percents))
-        except Exception:
-            return None
 
     def _fetch_paginated_identifiers(
         self,
@@ -1396,23 +1133,16 @@ class RCSBClient:
                 if feature_type and coverage is not None:
                     coverage_by_type[str(feature_type)] = float(coverage)
 
+            required_feature_types = {
+                "UNASSIGNED_SEC_STRUCT",
+            }
+            if not required_feature_types.issubset(coverage_by_type):
+                continue
+
             helix_fraction = coverage_by_type.get("HELIX_P", 0.0)
             sheet_fraction = coverage_by_type.get("SHEET", 0.0)
             unassigned_fraction = coverage_by_type.get("UNASSIGNED_SEC_STRUCT", 0.0)
             secondary_fraction = min(1.0, max(0.0, 1.0 - unassigned_fraction))
-            dssp_secondary_percent = self._compute_dssp_secondary_structure_percent(
-                entry_id=entry_id,
-                chain_id=chain_id,
-                sequence_length=sequence_length,
-            )
-
-            dssp_full_secondary_percent = (
-                self._compute_dssp_full_secondary_structure_percent(
-                    entry_id=entry_id,
-                    chain_id=chain_id,
-                    sequence_length=sequence_length,
-                )
-            )
 
             records.append(
                 SolutionNMRMonomerSecondaryRecord(
@@ -1420,8 +1150,6 @@ class RCSBClient:
                     year=year,
                     sequence_length=sequence_length,
                     secondary_structure_percent=secondary_fraction * 100.0,
-                    dssp_secondary_structure_percent=dssp_secondary_percent,
-                    dssp_full_secondary_structure_percent=dssp_full_secondary_percent,
                     helix_fraction=helix_fraction,
                     sheet_fraction=sheet_fraction,
                     deposited_model_count=model_count,
@@ -2120,8 +1848,6 @@ class SolutionNMRMonomerXrayRmsdCollector:
         if len(xray_resids) < 3:
             return None
 
-        # Residue numbering may differ by a constant offset between NMR and X-ray entries.
-        # We first maximize overlap by offset, then break ties by minimal mean RMSD.
         nmr_min = min(common_nmr_resids)
         nmr_max = max(common_nmr_resids)
         xray_min = min(xray_resids)
@@ -2131,9 +1857,7 @@ class SolutionNMRMonomerXrayRmsdCollector:
         overlap_candidates: list[tuple[int, list[int]]] = []
         for offset in range(xray_min - nmr_max, xray_max - nmr_min + 1):
             mapped_resids = sorted(
-                resid
-                for resid in common_nmr_resids
-                if (resid + offset) in xray_resids
+                resid for resid in common_nmr_resids if (resid + offset) in xray_resids
             )
             overlap = len(mapped_resids)
             if overlap < 3:
@@ -2150,7 +1874,10 @@ class SolutionNMRMonomerXrayRmsdCollector:
         best_alignment: tuple[int, list[int], float] | None = None
         for offset, common_resids in overlap_candidates:
             nmr_coords = np.asarray(
-                [[model_map[resid] for resid in common_resids] for model_map in nmr_models],
+                [
+                    [model_map[resid] for resid in common_resids]
+                    for model_map in nmr_models
+                ],
                 dtype=float,
             )
             xray_coords = np.asarray(
@@ -2167,12 +1894,9 @@ class SolutionNMRMonomerXrayRmsdCollector:
                 continue
 
             best_offset, _, best_rmsd = best_alignment
-            if (
-                mean_rmsd < best_rmsd
-                or (
-                    np.isclose(mean_rmsd, best_rmsd)
-                    and (abs(offset), offset) < (abs(best_offset), best_offset)
-                )
+            if mean_rmsd < best_rmsd or (
+                np.isclose(mean_rmsd, best_rmsd)
+                and (abs(offset), offset) < (abs(best_offset), best_offset)
             ):
                 best_alignment = (offset, common_resids, mean_rmsd)
 
@@ -2481,8 +2205,6 @@ def write_solution_nmr_monomer_secondary_csv(
             "year",
             "sequence_length",
             "secondary_structure_percent",
-            "dssp_secondary_structure_percent",
-            "dssp_full_secondary_structure_percent",
             "helix_fraction",
             "sheet_fraction",
             "deposited_model_count",
@@ -2493,16 +2215,6 @@ def write_solution_nmr_monomer_secondary_csv(
                 r.year,
                 r.sequence_length,
                 f"{r.secondary_structure_percent:.3f}",
-                (
-                    f"{r.dssp_secondary_structure_percent:.3f}"
-                    if r.dssp_secondary_structure_percent is not None
-                    else ""
-                ),
-                (
-                    f"{r.dssp_full_secondary_structure_percent:.3f}"
-                    if r.dssp_full_secondary_structure_percent is not None
-                    else ""
-                ),
                 f"{r.helix_fraction:.6f}",
                 f"{r.sheet_fraction:.6f}",
                 r.deposited_model_count,
