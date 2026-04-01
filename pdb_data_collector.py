@@ -100,6 +100,7 @@ class SolutionNMRWeightRecord:
     year: int
     molecular_weight_kda: float
     rcsb_entry_molecular_weight_kda: float | None
+    polymer_molecular_weight_maximum_kda: float | None
     modeled_molecular_weight_kda: float | None
 
 
@@ -1139,6 +1140,7 @@ class RCSBClient:
             }
             rcsb_entry_info {
               molecular_weight
+              polymer_molecular_weight_maximum
             }
             polymer_entities {
               entity_poly {
@@ -1184,6 +1186,17 @@ class RCSBClient:
                 entry_mw_kda = float(entry_mw_raw) if entry_mw_raw is not None else None
             except (TypeError, ValueError):
                 entry_mw_kda = None
+            polymer_mw_max_raw = (entry.get("rcsb_entry_info") or {}).get(
+                "polymer_molecular_weight_maximum"
+            )
+            try:
+                polymer_mw_max_kda = (
+                    float(polymer_mw_max_raw)
+                    if polymer_mw_max_raw is not None
+                    else None
+                )
+            except (TypeError, ValueError):
+                polymer_mw_max_kda = None
             total_weight_kda = 0.0
             modeled_weight_total_kda = 0.0
             for polymer_entity in entry.get("polymer_entities") or []:
@@ -1287,6 +1300,7 @@ class RCSBClient:
                     year=year,
                     molecular_weight_kda=total_weight_kda,
                     rcsb_entry_molecular_weight_kda=entry_mw_kda,
+                    polymer_molecular_weight_maximum_kda=polymer_mw_max_kda,
                     modeled_molecular_weight_kda=modeled_weight_total_kda,
                 )
             )
@@ -2552,6 +2566,7 @@ def write_solution_nmr_weights_csv(
             "year",
             "molecular_weight_kda",
             "rcsb_entry_molecular_weight_kda",
+            "polymer_molecular_weight_maximum",
             "modeled_molecular_weight_kda",
         ],
         rows=(
@@ -2562,6 +2577,11 @@ def write_solution_nmr_weights_csv(
                 (
                     f"{r.rcsb_entry_molecular_weight_kda:.3f}"
                     if r.rcsb_entry_molecular_weight_kda is not None
+                    else ""
+                ),
+                (
+                    f"{r.polymer_molecular_weight_maximum_kda:.3f}"
+                    if r.polymer_molecular_weight_maximum_kda is not None
                     else ""
                 ),
                 (
