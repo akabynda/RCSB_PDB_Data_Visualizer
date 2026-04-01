@@ -3,9 +3,14 @@ from __future__ import annotations
 import argparse
 import csv
 import logging
+import os
+import shutil
+import tempfile
 import time
 import requests
 import numpy as np
+from Bio.PDB import PDBParser
+from Bio.PDB.DSSP import DSSP as BioDSSP
 from Bio.SeqUtils import molecular_weight as sequence_molecular_weight
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -33,6 +38,10 @@ UNMODELED_INSTANCE_FEATURE_TYPES: frozenset[str] = frozenset(
     }
 )
 DEFAULT_PDB_CACHE_DIR = Path("data/pdb_cache")
+LOCAL_DSSP_CANDIDATE = Path("dssp/build/mkdssp")
+DSSP_STATE_CODES: tuple[str, ...] = ("H", "B", "E", "G", "I", "T", "S", "-")
+DEFAULT_MAX_WORKERS = max(1, os.cpu_count() or 1)
+print(f"Using up to {DEFAULT_MAX_WORKERS} worker threads for concurrent tasks")
 
 
 class ExperimentalMethod(Enum):
@@ -66,7 +75,7 @@ class CollectorConfig:
     graphql_url: str = "https://data.rcsb.org/graphql"
     page_size: int = 10000
     graphql_batch_size: int = 300
-    max_workers: int = 8
+    max_workers: int = DEFAULT_MAX_WORKERS
     timeout_seconds: int = 60
     retries: int = 4
     backoff_seconds: float = 1.3
@@ -103,6 +112,41 @@ class SolutionNMRMonomerSecondaryRecord:
     helix_fraction: float
     sheet_fraction: float
     deposited_model_count: int
+    dssp_alpha_helix_fraction: float
+    dssp_isolated_beta_bridge_fraction: float
+    dssp_beta_strand_fraction: float
+    dssp_3_10_helix_fraction: float
+    dssp_pi_helix_fraction: float
+    dssp_turn_fraction: float
+    dssp_bend_fraction: float
+    dssp_unassigned_percent: float
+    dssp_secondary_structure_percent: float
+    dssp_pdb_model_count: int
+    dssp_analyzed_model_count: int
+
+
+@dataclass(frozen=True)
+class SolutionNMRMonomerSecondaryByModelRecord:
+    entry_id: str
+    year: int
+    chain_id: str
+    sequence_length: int
+    deposited_model_count: int
+    pdb_model_count: int
+    model_index: int
+    assigned_residue_count: int
+    secondary_structure_percent: float
+    helix_fraction: float
+    sheet_fraction: float
+    dssp_alpha_helix_fraction: float
+    dssp_isolated_beta_bridge_fraction: float
+    dssp_beta_strand_fraction: float
+    dssp_3_10_helix_fraction: float
+    dssp_pi_helix_fraction: float
+    dssp_turn_fraction: float
+    dssp_bend_fraction: float
+    dssp_unassigned_percent: float
+    dssp_secondary_structure_percent: float
 
 
 @dataclass(frozen=True)
@@ -231,6 +275,25 @@ def fetch_solution_nmr_entry_ids(client: "RCSBClient", log_label: str) -> list[s
     return entry_ids
 
 
+def resolve_dssp_executable(explicit_value: str) -> str | None:
+    explicit_path = explicit_value.strip()
+    if explicit_path:
+        path = Path(explicit_path).expanduser()
+        if path.exists():
+            return str(path)
+        return None
+
+    for cmd in ("mkdssp", "dssp"):
+        resolved = shutil.which(cmd)
+        if resolved:
+            return resolved
+
+    if LOCAL_DSSP_CANDIDATE.exists():
+        return str(LOCAL_DSSP_CANDIDATE.resolve())
+
+    return None
+
+
 def download_pdb_if_needed(
     session: requests.Session,
     config: CollectorConfig,
@@ -267,6 +330,146 @@ def write_csv_rows(
         writer = csv.writer(csvfile)
         writer.writerow(header)
         writer.writerows(rows)
+
+
+def extract_model_pdb_texts(pdb_path: Path) -> list[str]:
+    model_texts: list[str] = []
+    model_lines: list[str] = []
+    saw_model = False
+    in_model = False
+
+    with pdb_path.open("r", encoding="utf-8", errors="ignore") as handle:
+        for line in handle:
+            record = line[:6]
+            if record.startswith("MODEL"):
+                if in_model and model_lines:
+                    model_lines.append("END\n")
+                    model_texts.append("".join(model_lines))
+                    model_lines = []
+                saw_model = True
+                in_model = True
+                continue
+            if record.startswith("ENDMDL"):
+                if in_model and model_lines:
+                    model_lines.append("END\n")
+                    model_texts.append("".join(model_lines))
+                    model_lines = []
+                in_model = False
+                continue
+            if saw_model and not in_model:
+                continue
+            if (
+                record.startswith("ATOM")
+                or record.startswith("HETATM")
+                or record.startswith("TER")
+            ):
+                model_lines.append(line)
+
+    if model_lines:
+        model_lines.append("END\n")
+        model_texts.append("".join(model_lines))
+
+    return model_texts
+
+
+def compute_dssp_state_coverages_for_chain(
+    session: requests.Session,
+    config: CollectorConfig,
+    cache_dir: Path,
+    entry_id: str,
+    chain_id: str,
+    sequence_length: int,
+    dssp_executable: str,
+) -> tuple[dict[str, float], int, int, list[tuple[int, int, dict[str, float]]]]:
+    default_coverages = {state: -1.0 for state in DSSP_STATE_CODES}
+    if sequence_length <= 0:
+        return default_coverages, 0, 0, []
+
+    try:
+        pdb_path = download_pdb_if_needed(
+            session=session,
+            config=config,
+            cache_dir=cache_dir,
+            entry_id=entry_id,
+        )
+    except Exception:
+        return default_coverages, 0, 0, []
+
+    model_texts = extract_model_pdb_texts(pdb_path)
+    if not model_texts:
+        return default_coverages, 0, 0, []
+
+    parser = PDBParser(QUIET=True)
+    state_counts: Counter[str] = Counter()
+    analyzed_model_count = 0
+    per_model_coverages: list[tuple[int, int, dict[str, float]]] = []
+
+    for model_index, model_text in enumerate(model_texts, start=1):
+        model_state_coverages = {state: -1.0 for state in DSSP_STATE_CODES}
+        assigned_residue_count = 0
+        try:
+            with tempfile.NamedTemporaryFile(
+                "w", suffix=".pdb", encoding="utf-8", delete=True
+            ) as handle:
+                handle.write(model_text)
+                handle.flush()
+
+                structure = parser.get_structure(entry_id, handle.name)
+                model = next(structure.get_models(), None)
+                if model is None:
+                    continue
+
+                dssp_result = BioDSSP(
+                    model,
+                    handle.name,
+                    dssp=dssp_executable,
+                    file_type="PDB",
+                )
+
+                state_by_chain: dict[str, list[str]] = {}
+                for key in dssp_result.keys():
+                    chain_label = str(key[0]).strip()
+                    state_raw = str(dssp_result[key][2]).strip() or "-"
+                    state = state_raw if state_raw in DSSP_STATE_CODES else "-"
+                    state_by_chain.setdefault(chain_label, []).append(state)
+
+                states = state_by_chain.get(chain_id, [])
+                if not states and len(state_by_chain) == 1:
+                    states = next(iter(state_by_chain.values()))
+                if not states:
+                    per_model_coverages.append(
+                        (model_index, assigned_residue_count, model_state_coverages)
+                    )
+                    continue
+
+                analyzed_model_count += 1
+                assigned_residue_count = len(states)
+                model_state_counts = Counter(states)
+                model_denominator = float(sequence_length)
+                for state in DSSP_STATE_CODES:
+                    model_state_coverages[state] = min(
+                        1.0,
+                        max(0.0, model_state_counts.get(state, 0) / model_denominator),
+                    )
+                state_counts.update(states)
+                per_model_coverages.append(
+                    (model_index, assigned_residue_count, model_state_coverages)
+                )
+        except Exception:
+            per_model_coverages.append(
+                (model_index, assigned_residue_count, model_state_coverages)
+            )
+            continue
+
+    if analyzed_model_count <= 0:
+        return default_coverages, len(model_texts), 0, per_model_coverages
+
+    denominator = float(sequence_length * analyzed_model_count)
+    coverages = {
+        state: min(1.0, max(0.0, state_counts.get(state, 0) / denominator))
+        for state in DSSP_STATE_CODES
+    }
+    return coverages, len(model_texts), analyzed_model_count, per_model_coverages
 
 
 def parse_models_ca_coords(
@@ -1068,9 +1271,18 @@ class RCSBClient:
             )
         return records
 
-    def fetch_solution_nmr_monomer_secondary_records_for_ids(
-        self, entry_ids: list[str]
-    ) -> list[SolutionNMRMonomerSecondaryRecord]:
+    def iter_solution_nmr_monomer_secondary_records_for_ids(
+        self,
+        entry_ids: list[str],
+        dssp_executable: str,
+        pdb_cache_dir: Path,
+        skip_entry_ids: set[str] | None = None,
+    ) -> Iterator[
+        tuple[
+            SolutionNMRMonomerSecondaryRecord,
+            list[SolutionNMRMonomerSecondaryByModelRecord],
+        ]
+    ]:
         query = """
         query($ids:[String!]!) {
           entries(entry_ids:$ids) {
@@ -1102,60 +1314,164 @@ class RCSBClient:
         payload = {"query": query, "variables": {"ids": entry_ids}}
         data = self._post_json(self.config.graphql_url, payload)
         entries = data.get("data", {}).get("entries", [])
-        records: list[SolutionNMRMonomerSecondaryRecord] = []
-
+        normalized_skip_ids = (
+            {entry_id.strip().upper() for entry_id in skip_entry_ids}
+            if skip_entry_ids
+            else set()
+        )
+        entries_to_process: list[dict[str, Any] | None] = []
         for entry in entries:
-            if not entry:
+            raw_entry_id = str((entry or {}).get("rcsb_id") or "").strip().upper()
+            if raw_entry_id and raw_entry_id in normalized_skip_ids:
                 continue
-            context = self._extract_solution_nmr_monomer_context(entry)
-            if context is None:
-                continue
-            entry_id, year, model_count, polymer_entity, chain_id = context
-            entity_poly = polymer_entity.get("entity_poly") or {}
+            entries_to_process.append(entry)
 
-            sequence_length = entity_poly.get("rcsb_sample_sequence_length")
-            if sequence_length is None or int(sequence_length) <= 0:
-                continue
-            sequence_length = int(sequence_length)
-
-            instances = polymer_entity.get("polymer_entity_instances") or []
-            if len(instances) != 1:
-                continue
-            feature_summary = (
-                instances[0].get("rcsb_polymer_instance_feature_summary") or []
-            )
-            coverage_by_type: dict[str, float] = {}
-            for item in feature_summary:
-                if not item:
-                    continue
-                feature_type = item.get("type")
-                coverage = item.get("coverage")
-                if feature_type and coverage is not None:
-                    coverage_by_type[str(feature_type)] = float(coverage)
-
-            required_feature_types = {
-                "UNASSIGNED_SEC_STRUCT",
+        with ThreadPoolExecutor(max_workers=self.config.max_workers) as executor:
+            future_map = {
+                executor.submit(
+                    self._compute_solution_nmr_monomer_secondary_for_entry,
+                    entry=entry,
+                    dssp_executable=dssp_executable,
+                    pdb_cache_dir=pdb_cache_dir,
+                ): idx
+                for idx, entry in enumerate(entries_to_process, start=1)
             }
-            if not required_feature_types.issubset(coverage_by_type):
+            for future in as_completed(future_map):
+                secondary_record, by_model_records = future.result()
+                if secondary_record is None:
+                    continue
+                yield secondary_record, by_model_records
+
+    def _compute_solution_nmr_monomer_secondary_for_entry(
+        self,
+        entry: dict[str, Any] | None,
+        dssp_executable: str,
+        pdb_cache_dir: Path,
+    ) -> tuple[
+        SolutionNMRMonomerSecondaryRecord | None,
+        list[SolutionNMRMonomerSecondaryByModelRecord],
+    ]:
+        if not entry:
+            return None, []
+        context = self._extract_solution_nmr_monomer_context(entry)
+        if context is None:
+            return None, []
+        entry_id, year, model_count, polymer_entity, chain_id = context
+        entity_poly = polymer_entity.get("entity_poly") or {}
+
+        sequence_length = entity_poly.get("rcsb_sample_sequence_length")
+        if sequence_length is None or int(sequence_length) <= 0:
+            return None, []
+        sequence_length = int(sequence_length)
+
+        instances = polymer_entity.get("polymer_entity_instances") or []
+        if len(instances) != 1:
+            return None, []
+        feature_summary = instances[0].get("rcsb_polymer_instance_feature_summary") or []
+        coverage_by_type: dict[str, float] = {}
+        for item in feature_summary:
+            if not item:
                 continue
+            feature_type = item.get("type")
+            coverage = item.get("coverage")
+            if feature_type and coverage is not None:
+                coverage_by_type[str(feature_type)] = float(coverage)
 
-            helix_fraction = coverage_by_type.get("HELIX_P", 0.0)
-            sheet_fraction = coverage_by_type.get("SHEET", 0.0)
-            unassigned_fraction = coverage_by_type.get("UNASSIGNED_SEC_STRUCT", 0.0)
-            secondary_fraction = min(1.0, max(0.0, 1.0 - unassigned_fraction))
+        helix_fraction = coverage_by_type.get("HELIX_P", -1.0)
+        sheet_fraction = coverage_by_type.get("SHEET", -1.0)
+        unassigned_fraction = coverage_by_type.get("UNASSIGNED_SEC_STRUCT", -1.0)
+        secondary_fraction = 1.0 - unassigned_fraction
+        (
+            dssp_coverages,
+            dssp_pdb_model_count,
+            dssp_analyzed_model_count,
+            dssp_per_model_coverages,
+        ) = compute_dssp_state_coverages_for_chain(
+            session=self.session,
+            config=self.config,
+            cache_dir=pdb_cache_dir,
+            entry_id=entry_id,
+            chain_id=chain_id,
+            sequence_length=sequence_length,
+            dssp_executable=dssp_executable,
+        )
+        dssp_unassigned_percent = dssp_coverages["-"]
+        dssp_secondary_structure_percent = (1.0 - dssp_unassigned_percent) * 100.0
 
-            records.append(
-                SolutionNMRMonomerSecondaryRecord(
+        secondary_record = SolutionNMRMonomerSecondaryRecord(
+            entry_id=entry_id,
+            year=year,
+            sequence_length=sequence_length,
+            secondary_structure_percent=secondary_fraction * 100.0,
+            helix_fraction=helix_fraction,
+            sheet_fraction=sheet_fraction,
+            deposited_model_count=model_count,
+            dssp_alpha_helix_fraction=dssp_coverages["H"],
+            dssp_isolated_beta_bridge_fraction=dssp_coverages["B"],
+            dssp_beta_strand_fraction=dssp_coverages["E"],
+            dssp_3_10_helix_fraction=dssp_coverages["G"],
+            dssp_pi_helix_fraction=dssp_coverages["I"],
+            dssp_turn_fraction=dssp_coverages["T"],
+            dssp_bend_fraction=dssp_coverages["S"],
+            dssp_unassigned_percent=dssp_unassigned_percent,
+            dssp_secondary_structure_percent=dssp_secondary_structure_percent,
+            dssp_pdb_model_count=dssp_pdb_model_count,
+            dssp_analyzed_model_count=dssp_analyzed_model_count,
+        )
+
+        by_model_records: list[SolutionNMRMonomerSecondaryByModelRecord] = []
+        for model_index, assigned_residue_count, model_coverages in dssp_per_model_coverages:
+            model_unassigned_percent = model_coverages["-"]
+            by_model_records.append(
+                SolutionNMRMonomerSecondaryByModelRecord(
                     entry_id=entry_id,
                     year=year,
+                    chain_id=chain_id,
                     sequence_length=sequence_length,
+                    deposited_model_count=model_count,
+                    pdb_model_count=dssp_pdb_model_count,
+                    model_index=model_index,
+                    assigned_residue_count=assigned_residue_count,
                     secondary_structure_percent=secondary_fraction * 100.0,
                     helix_fraction=helix_fraction,
                     sheet_fraction=sheet_fraction,
-                    deposited_model_count=model_count,
+                    dssp_alpha_helix_fraction=model_coverages["H"],
+                    dssp_isolated_beta_bridge_fraction=model_coverages["B"],
+                    dssp_beta_strand_fraction=model_coverages["E"],
+                    dssp_3_10_helix_fraction=model_coverages["G"],
+                    dssp_pi_helix_fraction=model_coverages["I"],
+                    dssp_turn_fraction=model_coverages["T"],
+                    dssp_bend_fraction=model_coverages["S"],
+                    dssp_unassigned_percent=model_unassigned_percent,
+                    dssp_secondary_structure_percent=(1.0 - model_unassigned_percent)
+                    * 100.0,
                 )
             )
-        return records
+
+        return secondary_record, by_model_records
+
+    def fetch_solution_nmr_monomer_secondary_records_for_ids(
+        self,
+        entry_ids: list[str],
+        dssp_executable: str,
+        pdb_cache_dir: Path,
+    ) -> tuple[
+        list[SolutionNMRMonomerSecondaryRecord],
+        list[SolutionNMRMonomerSecondaryByModelRecord],
+    ]:
+        records: list[SolutionNMRMonomerSecondaryRecord] = []
+        by_model_records: list[SolutionNMRMonomerSecondaryByModelRecord] = []
+        for (
+            secondary_record,
+            secondary_by_model_records,
+        ) in self.iter_solution_nmr_monomer_secondary_records_for_ids(
+            entry_ids=entry_ids,
+            dssp_executable=dssp_executable,
+            pdb_cache_dir=pdb_cache_dir,
+        ):
+            records.append(secondary_record)
+            by_model_records.extend(secondary_by_model_records)
+        return records, by_model_records
 
     def fetch_solution_nmr_monomer_core_region_records_for_ids(
         self, entry_ids: list[str]
@@ -1512,25 +1828,67 @@ class SolutionNMRWeightCollector:
 
 
 class SolutionNMRMonomerSecondaryCollector:
-    def __init__(self, client: RCSBClient, config: CollectorConfig) -> None:
+    def __init__(
+        self,
+        client: RCSBClient,
+        config: CollectorConfig,
+        dssp_executable: str,
+        cache_dir: Path,
+    ) -> None:
         self.client = client
         self.config = config
+        self.dssp_executable = dssp_executable
+        self.cache_dir = cache_dir
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
 
-    def collect(self) -> list[SolutionNMRMonomerSecondaryRecord]:
+    def iter_batches(
+        self,
+        skip_entry_ids: set[str] | None = None,
+    ) -> Iterator[
+        tuple[
+            list[SolutionNMRMonomerSecondaryRecord],
+            list[SolutionNMRMonomerSecondaryByModelRecord],
+        ]
+    ]:
         entry_ids = fetch_solution_nmr_entry_ids(
             client=self.client,
             log_label="SOLUTION NMR monomer-secondary",
         )
         batches = list(chunked(entry_ids, self.config.graphql_batch_size))
-        records: list[SolutionNMRMonomerSecondaryRecord] = []
+        if not batches:
+            return
 
-        for batch_records in collect_batch_results(
-            batches=batches,
-            max_workers=self.config.max_workers,
-            fetch_fn=self.client.fetch_solution_nmr_monomer_secondary_records_for_ids,
-            progress_label="SOLUTION NMR monomer-secondary",
-        ):
-            records.extend(batch_records)
+        for batch_idx, batch in enumerate(batches, start=1):
+            batch_entry_count = 0
+            for secondary_record, by_model_records in (
+                self.client.iter_solution_nmr_monomer_secondary_records_for_ids(
+                    entry_ids=batch,
+                    dssp_executable=self.dssp_executable,
+                    pdb_cache_dir=self.cache_dir,
+                    skip_entry_ids=skip_entry_ids,
+                )
+            ):
+                batch_entry_count += 1
+                yield [secondary_record], by_model_records
+            LOGGER.info(
+                "SOLUTION NMR monomer-secondary: processed batch %d/%d (entries: %d)",
+                batch_idx,
+                len(batches),
+                batch_entry_count,
+            )
+
+    def iter_records(self) -> Iterator[SolutionNMRMonomerSecondaryRecord]:
+        for batch_records, _ in self.iter_batches():
+            for record in batch_records:
+                yield record
+
+    def iter_model_records(self) -> Iterator[SolutionNMRMonomerSecondaryByModelRecord]:
+        for _, batch_model_records in self.iter_batches():
+            for record in batch_model_records:
+                yield record
+
+    def collect(self) -> list[SolutionNMRMonomerSecondaryRecord]:
+        records = list(self.iter_records())
         return sorted(records, key=lambda record: (record.year, record.entry_id))
 
 
@@ -2198,30 +2556,403 @@ def write_solution_nmr_weights_csv(
 def write_solution_nmr_monomer_secondary_csv(
     records: list[SolutionNMRMonomerSecondaryRecord], output_path: Path
 ) -> None:
+    header = [
+        "entry_id",
+        "year",
+        "sequence_length",
+        "secondary_structure_percent",
+        "helix_fraction",
+        "sheet_fraction",
+        "deposited_model_count",
+        "dssp_alpha_helix_fraction",
+        "dssp_isolated_beta_bridge_fraction",
+        "dssp_beta_strand_fraction",
+        "dssp_3_10_helix_fraction",
+        "dssp_pi_helix_fraction",
+        "dssp_turn_fraction",
+        "dssp_bend_fraction",
+        "dssp_unassigned_percent",
+        "dssp_secondary_structure_percent",
+        "dssp_pdb_model_count",
+        "dssp_analyzed_model_count",
+    ]
+
+    def _to_row(r: SolutionNMRMonomerSecondaryRecord) -> tuple[Any, ...]:
+        return (
+            r.entry_id,
+            r.year,
+            r.sequence_length,
+            f"{r.secondary_structure_percent:.3f}",
+            f"{r.helix_fraction:.6f}",
+            f"{r.sheet_fraction:.6f}",
+            r.deposited_model_count,
+            f"{r.dssp_alpha_helix_fraction:.6f}",
+            f"{r.dssp_isolated_beta_bridge_fraction:.6f}",
+            f"{r.dssp_beta_strand_fraction:.6f}",
+            f"{r.dssp_3_10_helix_fraction:.6f}",
+            f"{r.dssp_pi_helix_fraction:.6f}",
+            f"{r.dssp_turn_fraction:.6f}",
+            f"{r.dssp_bend_fraction:.6f}",
+            f"{r.dssp_unassigned_percent:.6f}",
+            f"{r.dssp_secondary_structure_percent:.3f}",
+            r.dssp_pdb_model_count,
+            r.dssp_analyzed_model_count,
+        )
+
+    write_csv_rows(
+        output_path=output_path,
+        header=header,
+        rows=(_to_row(r) for r in records),
+    )
+
+
+def stream_solution_nmr_monomer_secondary_csv(
+    records: Iterator[SolutionNMRMonomerSecondaryRecord],
+    output_path: Path,
+) -> int:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    count = 0
+    with output_path.open("w", newline="", encoding="utf-8") as csvfile:
+        writer = csv.writer(csvfile)
+        writer.writerow(
+            [
+                "entry_id",
+                "year",
+                "sequence_length",
+                "secondary_structure_percent",
+                "helix_fraction",
+                "sheet_fraction",
+                "deposited_model_count",
+                "dssp_alpha_helix_fraction",
+                "dssp_isolated_beta_bridge_fraction",
+                "dssp_beta_strand_fraction",
+                "dssp_3_10_helix_fraction",
+                "dssp_pi_helix_fraction",
+                "dssp_turn_fraction",
+                "dssp_bend_fraction",
+                "dssp_unassigned_percent",
+                "dssp_secondary_structure_percent",
+                "dssp_pdb_model_count",
+                "dssp_analyzed_model_count",
+            ]
+        )
+        csvfile.flush()
+        for record in records:
+            writer.writerow(
+                (
+                    record.entry_id,
+                    record.year,
+                    record.sequence_length,
+                    f"{record.secondary_structure_percent:.3f}",
+                    f"{record.helix_fraction:.6f}",
+                    f"{record.sheet_fraction:.6f}",
+                    record.deposited_model_count,
+                    f"{record.dssp_alpha_helix_fraction:.6f}",
+                    f"{record.dssp_isolated_beta_bridge_fraction:.6f}",
+                    f"{record.dssp_beta_strand_fraction:.6f}",
+                    f"{record.dssp_3_10_helix_fraction:.6f}",
+                    f"{record.dssp_pi_helix_fraction:.6f}",
+                    f"{record.dssp_turn_fraction:.6f}",
+                    f"{record.dssp_bend_fraction:.6f}",
+                    f"{record.dssp_unassigned_percent:.6f}",
+                    f"{record.dssp_secondary_structure_percent:.3f}",
+                    record.dssp_pdb_model_count,
+                    record.dssp_analyzed_model_count,
+                )
+            )
+            csvfile.flush()
+            count += 1
+    return count
+
+
+def write_solution_nmr_monomer_secondary_by_model_csv(
+    records: list[SolutionNMRMonomerSecondaryByModelRecord], output_path: Path
+) -> None:
     write_csv_rows(
         output_path=output_path,
         header=[
             "entry_id",
             "year",
+            "chain_id",
             "sequence_length",
+            "deposited_model_count",
+            "pdb_model_count",
+            "model_index",
+            "assigned_residue_count",
             "secondary_structure_percent",
             "helix_fraction",
             "sheet_fraction",
-            "deposited_model_count",
+            "dssp_alpha_helix_fraction",
+            "dssp_isolated_beta_bridge_fraction",
+            "dssp_beta_strand_fraction",
+            "dssp_3_10_helix_fraction",
+            "dssp_pi_helix_fraction",
+            "dssp_turn_fraction",
+            "dssp_bend_fraction",
+            "dssp_unassigned_percent",
+            "dssp_secondary_structure_percent",
         ],
         rows=(
             (
                 r.entry_id,
                 r.year,
+                r.chain_id,
                 r.sequence_length,
+                r.deposited_model_count,
+                r.pdb_model_count,
+                r.model_index,
+                r.assigned_residue_count,
                 f"{r.secondary_structure_percent:.3f}",
                 f"{r.helix_fraction:.6f}",
                 f"{r.sheet_fraction:.6f}",
-                r.deposited_model_count,
+                f"{r.dssp_alpha_helix_fraction:.6f}",
+                f"{r.dssp_isolated_beta_bridge_fraction:.6f}",
+                f"{r.dssp_beta_strand_fraction:.6f}",
+                f"{r.dssp_3_10_helix_fraction:.6f}",
+                f"{r.dssp_pi_helix_fraction:.6f}",
+                f"{r.dssp_turn_fraction:.6f}",
+                f"{r.dssp_bend_fraction:.6f}",
+                f"{r.dssp_unassigned_percent:.6f}",
+                f"{r.dssp_secondary_structure_percent:.3f}",
             )
             for r in records
         ),
     )
+
+
+def stream_solution_nmr_monomer_secondary_outputs_csv(
+    batches: Iterator[
+        tuple[
+            list[SolutionNMRMonomerSecondaryRecord],
+            list[SolutionNMRMonomerSecondaryByModelRecord],
+        ]
+    ],
+    secondary_output_path: Path,
+    secondary_by_model_output_path: Path,
+    append: bool = False,
+) -> tuple[int, int]:
+    secondary_output_path.parent.mkdir(parents=True, exist_ok=True)
+    secondary_by_model_output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    secondary_count = 0
+    secondary_by_model_count = 0
+    sec_mode = "a" if append else "w"
+    sec_model_mode = "a" if append else "w"
+    write_secondary_header = (
+        (not append)
+        or (not secondary_output_path.exists())
+        or secondary_output_path.stat().st_size == 0
+    )
+    write_secondary_by_model_header = (
+        (not append)
+        or (not secondary_by_model_output_path.exists())
+        or secondary_by_model_output_path.stat().st_size == 0
+    )
+    with secondary_output_path.open(sec_mode, newline="", encoding="utf-8") as sec_file:
+        with secondary_by_model_output_path.open(
+            sec_model_mode, newline="", encoding="utf-8"
+        ) as sec_model_file:
+            sec_writer = csv.writer(sec_file)
+            sec_model_writer = csv.writer(sec_model_file)
+            if write_secondary_header:
+                sec_writer.writerow(
+                    [
+                        "entry_id",
+                        "year",
+                        "sequence_length",
+                        "secondary_structure_percent",
+                        "helix_fraction",
+                        "sheet_fraction",
+                        "deposited_model_count",
+                        "dssp_alpha_helix_fraction",
+                        "dssp_isolated_beta_bridge_fraction",
+                        "dssp_beta_strand_fraction",
+                        "dssp_3_10_helix_fraction",
+                        "dssp_pi_helix_fraction",
+                        "dssp_turn_fraction",
+                        "dssp_bend_fraction",
+                        "dssp_unassigned_percent",
+                        "dssp_secondary_structure_percent",
+                        "dssp_pdb_model_count",
+                        "dssp_analyzed_model_count",
+                    ]
+                )
+            if write_secondary_by_model_header:
+                sec_model_writer.writerow(
+                    [
+                        "entry_id",
+                        "year",
+                        "chain_id",
+                        "sequence_length",
+                        "deposited_model_count",
+                        "pdb_model_count",
+                        "model_index",
+                        "assigned_residue_count",
+                        "secondary_structure_percent",
+                        "helix_fraction",
+                        "sheet_fraction",
+                        "dssp_alpha_helix_fraction",
+                        "dssp_isolated_beta_bridge_fraction",
+                        "dssp_beta_strand_fraction",
+                        "dssp_3_10_helix_fraction",
+                        "dssp_pi_helix_fraction",
+                        "dssp_turn_fraction",
+                        "dssp_bend_fraction",
+                        "dssp_unassigned_percent",
+                        "dssp_secondary_structure_percent",
+                    ]
+                )
+            sec_file.flush()
+            sec_model_file.flush()
+
+            for batch_records, batch_model_records in batches:
+                for record in batch_records:
+                    sec_writer.writerow(
+                        (
+                            record.entry_id,
+                            record.year,
+                            record.sequence_length,
+                            f"{record.secondary_structure_percent:.3f}",
+                            f"{record.helix_fraction:.6f}",
+                            f"{record.sheet_fraction:.6f}",
+                            record.deposited_model_count,
+                            f"{record.dssp_alpha_helix_fraction:.6f}",
+                            f"{record.dssp_isolated_beta_bridge_fraction:.6f}",
+                            f"{record.dssp_beta_strand_fraction:.6f}",
+                            f"{record.dssp_3_10_helix_fraction:.6f}",
+                            f"{record.dssp_pi_helix_fraction:.6f}",
+                            f"{record.dssp_turn_fraction:.6f}",
+                            f"{record.dssp_bend_fraction:.6f}",
+                            f"{record.dssp_unassigned_percent:.6f}",
+                            f"{record.dssp_secondary_structure_percent:.3f}",
+                            record.dssp_pdb_model_count,
+                            record.dssp_analyzed_model_count,
+                        )
+                    )
+                    secondary_count += 1
+                sec_file.flush()
+
+                for record in batch_model_records:
+                    sec_model_writer.writerow(
+                        (
+                            record.entry_id,
+                            record.year,
+                            record.chain_id,
+                            record.sequence_length,
+                            record.deposited_model_count,
+                            record.pdb_model_count,
+                            record.model_index,
+                            record.assigned_residue_count,
+                            f"{record.secondary_structure_percent:.3f}",
+                            f"{record.helix_fraction:.6f}",
+                            f"{record.sheet_fraction:.6f}",
+                            f"{record.dssp_alpha_helix_fraction:.6f}",
+                            f"{record.dssp_isolated_beta_bridge_fraction:.6f}",
+                            f"{record.dssp_beta_strand_fraction:.6f}",
+                            f"{record.dssp_3_10_helix_fraction:.6f}",
+                            f"{record.dssp_pi_helix_fraction:.6f}",
+                            f"{record.dssp_turn_fraction:.6f}",
+                            f"{record.dssp_bend_fraction:.6f}",
+                            f"{record.dssp_unassigned_percent:.6f}",
+                            f"{record.dssp_secondary_structure_percent:.3f}",
+                        )
+                    )
+                    secondary_by_model_count += 1
+                sec_model_file.flush()
+
+    return secondary_count, secondary_by_model_count
+
+
+def load_completed_solution_nmr_monomer_secondary_entry_ids(
+    secondary_output_path: Path,
+    secondary_by_model_output_path: Path,
+) -> tuple[set[str], int, int, set[str]]:
+    if not secondary_output_path.exists() or not secondary_by_model_output_path.exists():
+        return set(), 0, 0, set()
+
+    expected_model_rows_by_entry: dict[str, int] = {}
+    secondary_row_count = 0
+    with secondary_output_path.open("r", newline="", encoding="utf-8") as csvfile:
+        reader = csv.DictReader(csvfile)
+        for row in reader:
+            if not row:
+                continue
+            entry_id = str(row.get("entry_id") or "").strip().upper()
+            if not entry_id:
+                continue
+            secondary_row_count += 1
+            raw_model_count = str(row.get("dssp_pdb_model_count") or "").strip()
+            try:
+                expected_model_rows_by_entry[entry_id] = int(raw_model_count)
+            except ValueError:
+                expected_model_rows_by_entry[entry_id] = 0
+
+    model_row_count_by_entry: Counter[str] = Counter()
+    secondary_by_model_row_count = 0
+    with secondary_by_model_output_path.open(
+        "r", newline="", encoding="utf-8"
+    ) as csvfile:
+        reader = csv.DictReader(csvfile)
+        for row in reader:
+            if not row:
+                continue
+            entry_id = str(row.get("entry_id") or "").strip().upper()
+            if not entry_id:
+                continue
+            secondary_by_model_row_count += 1
+            model_row_count_by_entry[entry_id] += 1
+
+    completed_entry_ids = {
+        entry_id
+        for entry_id, expected_model_rows in expected_model_rows_by_entry.items()
+        if model_row_count_by_entry.get(entry_id, 0) >= max(0, expected_model_rows)
+    }
+    incomplete_entry_ids = {
+        entry_id
+        for entry_id, expected_model_rows in expected_model_rows_by_entry.items()
+        if model_row_count_by_entry.get(entry_id, 0) < max(0, expected_model_rows)
+    }
+    incomplete_entry_ids.update(
+        set(model_row_count_by_entry.keys()) - set(expected_model_rows_by_entry.keys())
+    )
+    return (
+        completed_entry_ids,
+        secondary_row_count,
+        secondary_by_model_row_count,
+        incomplete_entry_ids,
+    )
+
+
+def prune_solution_nmr_monomer_secondary_csv_to_entry_ids(
+    secondary_output_path: Path,
+    secondary_by_model_output_path: Path,
+    keep_entry_ids: set[str],
+) -> tuple[int, int]:
+    normalized_keep_ids = {entry_id.strip().upper() for entry_id in keep_entry_ids}
+
+    def _rewrite_with_filter(path: Path) -> int:
+        tmp_path = path.with_suffix(path.suffix + ".tmp")
+        kept_count = 0
+        with path.open("r", newline="", encoding="utf-8") as input_file:
+            reader = csv.DictReader(input_file)
+            fieldnames = list(reader.fieldnames or [])
+            with tmp_path.open("w", newline="", encoding="utf-8") as output_file:
+                writer = csv.DictWriter(output_file, fieldnames=fieldnames)
+                if fieldnames:
+                    writer.writeheader()
+                for row in reader:
+                    if not row:
+                        continue
+                    entry_id = str(row.get("entry_id") or "").strip().upper()
+                    if entry_id and entry_id in normalized_keep_ids:
+                        writer.writerow(row)
+                        kept_count += 1
+        tmp_path.replace(path)
+        return kept_count
+
+    kept_secondary_count = _rewrite_with_filter(secondary_output_path)
+    kept_secondary_by_model_count = _rewrite_with_filter(secondary_by_model_output_path)
+    return kept_secondary_count, kept_secondary_by_model_count
 
 
 def read_solution_nmr_monomer_precision_csv(
@@ -2494,6 +3225,35 @@ def parse_args() -> argparse.Namespace:
         help="Output CSV path for solution_nmr_monomer_secondary dataset.",
     )
     parser.add_argument(
+        "--solution-nmr-monomer-secondary-by-model-output",
+        type=Path,
+        default=Path("data/solution_nmr_monomer_secondary_by_model.csv"),
+        help="Output CSV path for per-model DSSP data in solution_nmr_monomer_secondary dataset.",
+    )
+    parser.add_argument(
+        "--solution-nmr-monomer-secondary-cache-dir",
+        type=Path,
+        default=Path("data/pdb_cache"),
+        help="Directory to cache downloaded PDB files for DSSP in monomer-secondary dataset.",
+    )
+    parser.add_argument(
+        "--solution-nmr-monomer-secondary-dssp-executable",
+        type=str,
+        default="",
+        help=(
+            "Path to DSSP executable (mkdssp/dssp) for monomer-secondary dataset. "
+            "If omitted, script tries mkdssp, dssp, and dssp/build/mkdssp."
+        ),
+    )
+    parser.add_argument(
+        "--solution-nmr-monomer-secondary-overwrite",
+        action="store_true",
+        help=(
+            "Recompute monomer-secondary CSVs from scratch (ignore existing rows and "
+            "disable resume skipping)."
+        ),
+    )
+    parser.add_argument(
         "--solution-nmr-monomer-precision-output",
         type=Path,
         default=Path("data/solution_nmr_monomer_precision.csv"),
@@ -2538,7 +3298,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--precision-workers",
         type=int,
-        default=4,
+        default=DEFAULT_MAX_WORKERS,
         help="Parallel workers for RMSD precision computation.",
     )
     parser.add_argument(
@@ -2561,7 +3321,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--xray-rmsd-workers",
         type=int,
-        default=4,
+        default=DEFAULT_MAX_WORKERS,
         help="Parallel workers for X-ray RMSD computation.",
     )
     parser.add_argument(
@@ -2583,7 +3343,10 @@ def parse_args() -> argparse.Namespace:
         "--batch-size", type=int, default=300, help="GraphQL batch size."
     )
     parser.add_argument(
-        "--workers", type=int, default=8, help="Parallel workers for GraphQL calls."
+        "--workers",
+        type=int,
+        default=DEFAULT_MAX_WORKERS,
+        help="Parallel workers for GraphQL calls.",
     )
     parser.add_argument(
         "--log-level", default="INFO", help="Logging level (DEBUG/INFO/WARNING/ERROR)."
@@ -2643,17 +3406,105 @@ def main() -> None:
         )
 
     if DatasetKind.SOLUTION_NMR_MONOMER_SECONDARY in args.datasets:
-        sec_collector = SolutionNMRMonomerSecondaryCollector(
-            client=client, config=config
+        secondary_dssp_executable = resolve_dssp_executable(
+            args.solution_nmr_monomer_secondary_dssp_executable
         )
-        sec_records = sec_collector.collect()
-        write_solution_nmr_monomer_secondary_csv(
-            records=sec_records, output_path=args.solution_nmr_monomer_secondary_output
+        if secondary_dssp_executable is None:
+            raise RuntimeError(
+                "DSSP executable not found for solution_nmr_monomer_secondary. "
+                "Provide --solution-nmr-monomer-secondary-dssp-executable or install mkdssp/dssp."
+            )
+        LOGGER.info(
+            "SOLUTION NMR monomer-secondary: using DSSP executable %s",
+            secondary_dssp_executable,
+        )
+        sec_collector = SolutionNMRMonomerSecondaryCollector(
+            client=client,
+            config=config,
+            dssp_executable=secondary_dssp_executable,
+            cache_dir=Path(args.solution_nmr_monomer_secondary_cache_dir),
+        )
+        resume_skip_ids: set[str] = set()
+        existing_sec_count = 0
+        existing_sec_model_count = 0
+        append_mode = False
+        secondary_output_path = Path(args.solution_nmr_monomer_secondary_output)
+        secondary_by_model_output_path = Path(
+            args.solution_nmr_monomer_secondary_by_model_output
+        )
+        if not args.solution_nmr_monomer_secondary_overwrite:
+            (
+                resume_skip_ids,
+                existing_sec_count,
+                existing_sec_model_count,
+                incomplete_sec_entry_ids,
+            ) = load_completed_solution_nmr_monomer_secondary_entry_ids(
+                secondary_output_path=secondary_output_path,
+                secondary_by_model_output_path=secondary_by_model_output_path,
+            )
+            if incomplete_sec_entry_ids:
+                LOGGER.warning(
+                    (
+                        "SOLUTION NMR monomer-secondary: found %d incomplete entries "
+                        "from previous run, pruning partial rows before resume"
+                    ),
+                    len(incomplete_sec_entry_ids),
+                )
+                (
+                    existing_sec_count,
+                    existing_sec_model_count,
+                ) = prune_solution_nmr_monomer_secondary_csv_to_entry_ids(
+                    secondary_output_path=secondary_output_path,
+                    secondary_by_model_output_path=secondary_by_model_output_path,
+                    keep_entry_ids=resume_skip_ids,
+                )
+                LOGGER.info(
+                    (
+                        "SOLUTION NMR monomer-secondary: retained %d completed rows and "
+                        "%d completed model rows after prune"
+                    ),
+                    existing_sec_count,
+                    existing_sec_model_count,
+                )
+            append_mode = bool(
+                secondary_output_path.exists() and secondary_by_model_output_path.exists()
+            )
+            if append_mode:
+                LOGGER.info(
+                    (
+                        "SOLUTION NMR monomer-secondary: resume enabled, "
+                        "loaded %d completed entries (%d secondary rows, %d model rows)"
+                    ),
+                    len(resume_skip_ids),
+                    existing_sec_count,
+                    existing_sec_model_count,
+                )
+
+        new_sec_count, new_sec_model_count = (
+            stream_solution_nmr_monomer_secondary_outputs_csv(
+                batches=sec_collector.iter_batches(skip_entry_ids=resume_skip_ids),
+                secondary_output_path=secondary_output_path,
+                secondary_by_model_output_path=secondary_by_model_output_path,
+                append=append_mode,
+            )
+        )
+        sec_count = existing_sec_count + new_sec_count if append_mode else new_sec_count
+        sec_model_count = (
+            existing_sec_model_count + new_sec_model_count
+            if append_mode
+            else new_sec_model_count
         )
         LOGGER.info(
-            "Saved %d records to %s",
-            len(sec_records),
+            "Saved %d records to %s (new: %d)",
+            sec_count,
             args.solution_nmr_monomer_secondary_output,
+            new_sec_count,
+        )
+        LOGGER.info(
+            "Saved %d model+chain records to %s (new: %d)",
+            sec_model_count,
+            args.solution_nmr_monomer_secondary_by_model_output,
+            new_sec_model_count,
         )
 
     if DatasetKind.SOLUTION_NMR_MONOMER_PRECISION in args.datasets:
