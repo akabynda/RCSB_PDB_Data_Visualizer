@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import argparse
+import warnings
 from dataclasses import dataclass
 from enum import Enum
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable
 
 import matplotlib.pyplot as plt
 import pandas as pd
+from matplotlib import font_manager
+from matplotlib.ticker import AutoMinorLocator, MultipleLocator
 
 
 class PlotKind(str, Enum):
@@ -33,68 +37,86 @@ class PlotConfig:
     height_inches: float = 5.0
     dpi: int = 600
     x_label: str = "Deposition year"
-    annual_title: str = "Annual Number of PDB Structures by Experimental Method"
+    annual_title: str = (
+        "Number of annually deposited PDB structures by experimental method"
+    )
     annual_y_label: str = "Number of deposited structures"
-    membrane_annual_title: str = "Annual Number of Membrane Protein Structures in PDB"
+    membrane_annual_title: str = (
+        "Number of annually deposited membrane protein structures in PDB"
+    )
     membrane_annual_y_label: str = "Number of deposited membrane protein structures"
     membrane_cumulative_title: str = (
-        "Cumulative Number of Membrane Protein Structures in PDB"
+        "Cumulative number of deposited membrane protein structures in PDB"
     )
     membrane_cumulative_y_label: str = (
         "Cumulative number of deposited membrane protein structures"
     )
-    cumulative_title: str = "Cumulative Number of PDB Structures by Experimental Method"
+    cumulative_title: str = (
+        "Cumulative number of deposited PDB structures by experimental method"
+    )
     cumulative_y_label: str = "Cumulative number of deposited structures"
-    nmr_avg_title: str = "SOLUTION NMR: Mean Structure Molecular Weight by Year"
+    nmr_avg_title: str = (
+        "Mean molecular weight of annually deposited solution NMR structures"
+    )
     nmr_avg_y_label: str = "Mean molecular weight (kDa)"
-    nmr_median_title: str = "SOLUTION NMR: Median Structure Molecular Weight by Year"
+    nmr_median_title: str = (
+        "Median molecular weight of annually deposited solution NMR structures"
+    )
     nmr_median_y_label: str = "Median molecular weight (kDa)"
-    nmr_max_title: str = "SOLUTION NMR: Maximum Structure Molecular Weight by Year"
+    nmr_max_title: str = (
+        "Maximum molecular weight of annually deposited solution NMR structures"
+    )
     nmr_max_y_label: str = "Maximum molecular weight (kDa)"
-    nmr_boxplot_title: str = "SOLUTION NMR: Molecular Weight by Period"
-    nmr_area_title: str = "SOLUTION NMR: Cumulative Structures by Weight Category"
+    nmr_boxplot_title: str = (
+        "Molecular weight distribution of solution NMR structures by period"
+    )
+    nmr_area_title: str = (
+        "Cumulative number of solution NMR structures by weight category"
+    )
     nmr_area_y_label: str = "Cumulative number of structures"
-    nmr_area_share_title: str = "SOLUTION NMR: Category Share by Year"
+    nmr_area_share_title: str = (
+        "Share of solution NMR structures by weight category and year"
+    )
     nmr_area_share_y_label: str = "Share of structures (%)"
     nmr_area_cumulative_share_title: str = (
-        "SOLUTION NMR: Category Share by Cumulative Sum"
+        "Share of cumulative solution NMR structures by weight category"
     )
     nmr_area_cumulative_share_y_label: str = "Share of cumulative structures (%)"
     nmr_monomer_secondary_title: str = (
-        "SOLUTION NMR Monomeric Proteins: Secondary Structure Content by Year"
+        "Secondary structure content of solution NMR monomeric proteins by year"
     )
     nmr_monomer_secondary_y_label: str = "Secondary structure content (%)"
     nmr_monomer_precision_title: str = (
-        "SOLUTION NMR Monomeric Proteins: Mean Ensemble RMSD by Year"
+        "Mean ensemble RMSD of solution NMR monomeric proteins by year"
     )
     nmr_monomer_precision_y_label: str = "Mean RMSD to average structure (Å)"
     nmr_monomer_quality_clash_title: str = (
-        "SOLUTION NMR Monomeric Proteins: Mean Clashscore by Year"
+        "Mean clashscore of solution NMR monomeric proteins by year"
     )
     nmr_monomer_quality_clash_y_label: str = "Mean clashscore"
     nmr_monomer_quality_rama_title: str = (
-        "SOLUTION NMR Monomeric Proteins: Mean Ramachandran Outliers by Year"
+        "Mean Ramachandran outliers of solution NMR monomeric proteins by year"
     )
     nmr_monomer_quality_rama_y_label: str = "Mean Ramachandran outliers (%)"
     nmr_monomer_quality_side_title: str = (
-        "SOLUTION NMR Monomeric Proteins: Mean Sidechain Outliers by Year"
+        "Mean sidechain outliers of solution NMR monomeric proteins by year"
     )
     nmr_monomer_quality_side_y_label: str = "Mean sidechain outliers (%)"
     nmr_monomer_xray_homolog_95_title: str = (
-        "SOLUTION NMR Monomeric Proteins: X-ray Analogs (95% Sequence Identity) by Year"
+        "Share of solution NMR monomeric proteins with X-ray analogs (95% sequence identity) by year"
     )
     nmr_monomer_xray_homolog_100_title: str = (
-        "SOLUTION NMR Monomeric Proteins: X-ray Analogs (100% Sequence Identity) by Year"
+        "Share of solution NMR monomeric proteins with X-ray analogs (100% sequence identity) by year"
     )
     nmr_monomer_xray_homolog_y_label: str = "Structures with X-ray analog (%)"
     nmr_monomer_xray_homolog_95_cumulative_title: str = (
-        "SOLUTION NMR Monomeric Proteins: Cumulative X-ray Analogs (95% Sequence Identity)"
+        "Cumulative share of solution NMR monomeric proteins with X-ray analogs (95% sequence identity)"
     )
     nmr_monomer_xray_homolog_100_cumulative_title: str = (
-        "SOLUTION NMR Monomeric Proteins: Cumulative X-ray Analogs (100% Sequence Identity)"
+        "Cumulative share of solution NMR monomeric proteins with X-ray analogs (100% sequence identity)"
     )
     nmr_monomer_xray_rmsd_title: str = (
-        "SOLUTION NMR Monomeric Proteins: Mean RMSD(CA) to Best-Resolution X-ray Analog by Year"
+        "Mean RMSD(CA) of solution NMR monomeric proteins to best-resolution X-ray analogs by year"
     )
     nmr_monomer_xray_rmsd_y_label: str = "Mean RMSD(CA) (Å)"
     xray_color: str = "#1f77b4"
@@ -111,7 +133,18 @@ class PlotConfig:
 
 NMR_WEIGHT_BINS: tuple[float, ...] = (0.0, 10.0, 20.0, float("inf"))
 NMR_WEIGHT_LABELS: tuple[str, ...] = ("<10 kDa", "10-20 kDa", ">20 kDa")
-MAX_PLOT_YEAR: int = 2024
+MAX_PLOT_YEAR: int = 2023
+YEAR_MAJOR_TICK_STEP: int = 5
+YEAR_MINOR_TICK_STEP: int = 1
+
+
+@lru_cache(maxsize=1)
+def _has_arial_font() -> bool:
+    target = "arial"
+    for font in font_manager.fontManager.ttflist:
+        if font.name.strip().casefold() == target:
+            return True
+    return False
 
 
 def parse_plot_kinds(raw_value: str) -> list[PlotKind]:
@@ -159,20 +192,156 @@ class PDBScientificPlotter:
 
     @staticmethod
     def _scientific_style() -> None:
+        if not _has_arial_font():
+            warnings.warn(
+                "Arial is not available in matplotlib font registry. "
+                "Matplotlib will fallback to another sans-serif font.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
         plt.style.use("seaborn-v0_8-whitegrid")
         plt.rcParams.update(
             {
-                "font.family": "serif",
-                "font.serif": ["Times New Roman", "Times", "DejaVu Serif"],
-                "axes.titlesize": 12,
-                "axes.labelsize": 11,
-                "xtick.labelsize": 10,
-                "ytick.labelsize": 10,
-                "legend.fontsize": 10,
+                "font.family": ["Arial"],
+                "font.sans-serif": ["Arial"],
+                "axes.titlesize": 14,
+                "axes.titleweight": "bold",
+                "axes.labelsize": 12,
+                "xtick.labelsize": 11,
+                "ytick.labelsize": 11,
+                "legend.fontsize": 11,
                 "axes.linewidth": 0.9,
                 "grid.alpha": 0.25,
             }
         )
+
+    @staticmethod
+    def _configure_year_axis_ticks(ax: plt.Axes) -> None:
+        ax.xaxis.set_major_locator(MultipleLocator(YEAR_MAJOR_TICK_STEP))
+        ax.xaxis.set_minor_locator(MultipleLocator(YEAR_MINOR_TICK_STEP))
+        ax.tick_params(axis="x", which="major", length=5)
+        ax.tick_params(axis="x", which="minor", length=3)
+
+    @staticmethod
+    def _visible_major_step(axis: plt.Axis) -> float | None:
+        tick_locs = axis.get_majorticklocs()
+        if len(tick_locs) < 2:
+            return None
+        view_min, view_max = sorted(axis.get_view_interval())
+        visible = [
+            float(tick)
+            for tick in tick_locs
+            if view_min - 1e-9 <= float(tick) <= view_max + 1e-9
+        ]
+        if len(visible) < 2:
+            return None
+        diffs = [
+            right - left
+            for left, right in zip(visible, visible[1:])
+            if (right - left) > 1e-9
+        ]
+        if not diffs:
+            return None
+        step = min(diffs)
+        if step <= 0.0:
+            return None
+        if max(diffs) - min(diffs) > step * 1e-6:
+            return None
+        return step
+
+    @staticmethod
+    def _integer_minor_subdivisions(step: float) -> int | None:
+        rounded_step = round(step)
+        if abs(step - rounded_step) > 1e-6:
+            return None
+        if rounded_step <= 1:
+            return None
+        for subdivisions in (10, 8, 5, 4, 2):
+            if rounded_step % subdivisions == 0:
+                return subdivisions
+        return None
+
+    @staticmethod
+    def _has_categorical_x_ticks(ax: plt.Axes) -> bool:
+        labels = [label.get_text().strip() for label in ax.get_xticklabels()]
+        nonempty = [label for label in labels if label]
+        if not nonempty:
+            return False
+        try:
+            for label in nonempty:
+                float(label)
+        except ValueError:
+            return True
+        return False
+
+    @classmethod
+    def _configure_minor_ticks(cls, ax: plt.Axes, use_year_x_ticks: bool) -> None:
+        y_step = cls._visible_major_step(ax.yaxis)
+        if y_step is not None:
+            y_subdivisions = cls._integer_minor_subdivisions(y_step)
+            if y_subdivisions is not None:
+                ax.yaxis.set_minor_locator(AutoMinorLocator(y_subdivisions))
+                ax.tick_params(axis="y", which="minor", length=3, labelleft=False)
+
+        if use_year_x_ticks or cls._has_categorical_x_ticks(ax):
+            return
+        x_step = cls._visible_major_step(ax.xaxis)
+        if x_step is None:
+            return
+        x_subdivisions = cls._integer_minor_subdivisions(x_step)
+        if x_subdivisions is not None:
+            ax.xaxis.set_minor_locator(AutoMinorLocator(x_subdivisions))
+            ax.tick_params(axis="x", which="minor", length=3)
+
+    @staticmethod
+    def _remove_zero_y_tick(ax: plt.Axes) -> None:
+        y_bottom, _ = ax.get_ylim()
+        if y_bottom >= 0.0:
+            filtered_ticks = [tick for tick in ax.get_yticks() if float(tick) > 0.0]
+        else:
+            filtered_ticks = [tick for tick in ax.get_yticks() if abs(float(tick)) > 1e-9]
+        if filtered_ticks:
+            ax.set_yticks(filtered_ticks)
+
+    @staticmethod
+    def _set_adaptive_title(
+        fig: plt.Figure,
+        ax: plt.Axes,
+        title: str,
+        max_fontsize: float = 16.0,
+        min_fontsize: float = 10.0,
+    ) -> None:
+        title_text = ax.set_title(
+            title,
+            pad=10,
+            fontsize=max_fontsize,
+            fontweight=800,
+        )
+        fig.canvas.draw()
+        renderer = fig.canvas.get_renderer()
+        axes_bbox = ax.get_window_extent(renderer=renderer)
+        while (
+            title_text.get_window_extent(renderer=renderer).width
+            > axes_bbox.width * 0.98
+            and title_text.get_fontsize() > min_fontsize
+        ):
+            title_text.set_fontsize(title_text.get_fontsize() - 0.5)
+            fig.canvas.draw()
+            renderer = fig.canvas.get_renderer()
+        title_text.set_fontweight("bold")
+
+    @staticmethod
+    def _add_legend(ax: plt.Axes, **kwargs: Any) -> None:
+        legend = ax.legend(
+            frameon=True,
+            fancybox=False,
+            framealpha=1.0,
+            facecolor="white",
+            edgecolor="black",
+            **kwargs,
+        )
+        if legend:
+            legend.get_frame().set_linewidth(0.8)
 
     def _render_figure(
         self,
@@ -182,15 +351,20 @@ class PDBScientificPlotter:
         y_label: str,
         draw_fn: Callable[[plt.Axes], None],
         x_label: str | None = None,
+        use_year_x_ticks: bool = True,
     ) -> None:
         fig, ax = plt.subplots(
             figsize=(self.config.width_inches, self.config.height_inches)
         )
         draw_fn(ax)
-        y_bottom, y_top = ax.get_ylim()
-        if y_bottom < 0.0 < y_top:
+        if use_year_x_ticks:
+            self._configure_year_axis_ticks(ax)
+        y_bottom, _ = ax.get_ylim()
+        if y_bottom < 0.0:
             ax.set_ylim(bottom=0.0)
-        ax.set_title(title, pad=10)
+        self._remove_zero_y_tick(ax)
+        self._configure_minor_ticks(ax=ax, use_year_x_ticks=use_year_x_ticks)
+        self._set_adaptive_title(fig=fig, ax=ax, title=title)
         ax.set_xlabel(x_label if x_label is not None else self.config.x_label)
         ax.set_ylabel(y_label)
         ax.spines["top"].set_visible(False)
@@ -260,7 +434,7 @@ class PDBScientificPlotter:
             if x_left is not None:
                 ax.set_xlim(left=x_left)
             if label:
-                ax.legend(loc="upper left", frameon=False)
+                self._add_legend(ax, loc="upper left")
 
         self._render_figure(
             output_png=output_png,
@@ -324,6 +498,7 @@ class PDBScientificPlotter:
         y_label: str,
         y_limits: tuple[float, float] | None = None,
         x_left: float | None = None,
+        x_right: float | None = None,
     ) -> None:
         def draw(ax: plt.Axes) -> None:
             ax.stackplot(
@@ -335,9 +510,13 @@ class PDBScientificPlotter:
             )
             if y_limits is not None:
                 ax.set_ylim(*y_limits)
-            if x_left is not None:
-                ax.set_xlim(left=x_left)
-            ax.legend(loc="upper left", frameon=False, title="Weight category")
+            if x_left is not None or x_right is not None:
+                current_left, current_right = ax.get_xlim()
+                ax.set_xlim(
+                    left=x_left if x_left is not None else current_left,
+                    right=x_right if x_right is not None else current_right,
+                )
+            self._add_legend(ax, loc="upper left", title="Weight category")
 
         self._render_figure(
             output_png=output_png,
@@ -427,14 +606,14 @@ class PDBScientificPlotter:
         def draw(ax: plt.Axes, source: pd.DataFrame) -> None:
             for col, color in [
                 ("X-ray", self.config.xray_color),
-                ("cryo-EM", self.config.cryoem_color),
                 ("NMR", self.config.nmr_color),
+                ("cryo-EM", self.config.cryoem_color),
             ]:
                 if col in source.columns:
                     ax.plot(
                         source.index, source[col], color=color, linewidth=2.0, label=col
                     )
-            ax.legend(loc="upper left", frameon=False)
+            self._add_legend(ax, loc="upper left")
 
         self._render_figure(
             annual_output_png,
@@ -559,6 +738,7 @@ class PDBScientificPlotter:
             y_label="Molecular weight (kDa)",
             draw_fn=draw,
             x_label="Period",
+            use_year_x_ticks=False,
         )
 
     def plot_solution_nmr_period_area(
@@ -593,6 +773,7 @@ class PDBScientificPlotter:
             y_label=self.config.nmr_area_share_y_label,
             y_limits=(0.0, 100.0),
             x_left=1979,
+            x_right=float(yearly_share.index.max()),
         )
 
     def plot_solution_nmr_period_area_cumulative_share(
@@ -614,6 +795,7 @@ class PDBScientificPlotter:
             y_label=self.config.nmr_area_cumulative_share_y_label,
             y_limits=(0.0, 100.0),
             x_left=1979,
+            x_right=float(cumulative_share.index.max()),
         )
 
     @staticmethod
@@ -654,7 +836,7 @@ class PDBScientificPlotter:
                 label="Yearly mean",
             )
             ax.set_ylim(0, 100)
-            ax.legend(loc="upper left", frameon=False)
+            self._add_legend(ax, loc="upper left")
 
         self._render_figure(
             output_png=output_png,
