@@ -819,9 +819,12 @@ class RCSBClient:
         )
 
     def fetch_entry_ids_for_method(
-        self, method_label: str, query_value: str
+        self,
+        method_label: str,
+        query_value: str,
+        require_protein_entities: bool = False,
     ) -> list[str]:
-        query = {
+        method_query: dict[str, Any] = {
             "type": "terminal",
             "service": "text",
             "parameters": {
@@ -830,6 +833,24 @@ class RCSBClient:
                 "value": query_value,
             },
         }
+        query: dict[str, Any] = method_query
+        if require_protein_entities:
+            query = {
+                "type": "group",
+                "logical_operator": "and",
+                "nodes": [
+                    method_query,
+                    {
+                        "type": "terminal",
+                        "service": "text",
+                        "parameters": {
+                            "attribute": "rcsb_entry_info.polymer_entity_count_protein",
+                            "operator": "greater_or_equal",
+                            "value": 1,
+                        },
+                    },
+                ],
+            }
         matched_entry_ids = self._fetch_paginated_identifiers(
             query=query,
             return_type="entry",
@@ -1740,6 +1761,7 @@ class PDBMethodYearlyCollector:
                 for entry_id in self.client.fetch_entry_ids_for_method(
                     method_label=method.label,
                     query_value=query_value,
+                    require_protein_entities=True,
                 )
             }
         )
