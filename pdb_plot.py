@@ -854,16 +854,20 @@ class PDBScientificPlotter:
     ) -> None:
         table = self._prepare_monomer_secondary_table(self._read_csv(data_path))
         self._scientific_style()
+        filtered = table.loc[
+            (table["secondary_structure_percent"] >= 0.0)
+            & (table["secondary_structure_percent"] <= 100.0)
+        ].copy()
         yearly_mean = (
-            table.groupby("year", as_index=True)["secondary_structure_percent"]
+            filtered.groupby("year", as_index=True)["secondary_structure_percent"]
             .mean()
             .sort_index()
         )
 
         def draw(ax: plt.Axes) -> None:
             ax.scatter(
-                table["year"],
-                table["secondary_structure_percent"],
+                filtered["year"],
+                filtered["secondary_structure_percent"],
                 s=10,
                 alpha=0.2,
                 color="#7f7f7f",
