@@ -25,6 +25,12 @@ class PlotKind(str, Enum):
         "solution_nmr_period_area_cumulative_share"
     )
     SOLUTION_NMR_MONOMER_SECONDARY = "solution_nmr_monomer_secondary"
+    SOLUTION_NMR_MONOMER_SECONDARY_COMPARISON = (
+        "solution_nmr_monomer_secondary_comparison"
+    )
+    SOLUTION_NMR_MONOMER_SECONDARY_COMPARISON_CUMULATIVE = (
+        "solution_nmr_monomer_secondary_comparison_cumulative"
+    )
     SOLUTION_NMR_MONOMER_PRECISION = "solution_nmr_monomer_precision"
     SOLUTION_NMR_MONOMER_QUALITY = "solution_nmr_monomer_quality"
     SOLUTION_NMR_MONOMER_XRAY_HOMOLOGS = "solution_nmr_monomer_xray_homologs"
@@ -86,6 +92,18 @@ class PlotConfig:
         "Secondary structure content of solution NMR monomeric proteins by year"
     )
     nmr_monomer_secondary_y_label: str = "Secondary structure content (%)"
+    nmr_monomer_secondary_comparison_title: str = (
+        "Comparison of deposited and DSSP-derived secondary structure content by year"
+    )
+    nmr_monomer_secondary_comparison_y_label: str = (
+        "Secondary structure content (%)"
+    )
+    nmr_monomer_secondary_comparison_cumulative_title: str = (
+        "Cumulative comparison of deposited and DSSP-derived secondary structure content"
+    )
+    nmr_monomer_secondary_comparison_cumulative_y_label: str = (
+        "Cumulative secondary structure content (%)"
+    )
     nmr_monomer_precision_title: str = (
         "Mean ensemble RMSD of solution NMR monomeric proteins by year"
     )
@@ -133,7 +151,7 @@ class PlotConfig:
 
 NMR_WEIGHT_BINS: tuple[float, ...] = (0.0, 10.0, 20.0, float("inf"))
 NMR_WEIGHT_LABELS: tuple[str, ...] = ("<10 kDa", "10-20 kDa", ">20 kDa")
-MAX_PLOT_YEAR: int = 2023
+MAX_PLOT_YEAR: int = 2024
 YEAR_MAJOR_TICK_STEP: int = 5
 YEAR_MINOR_TICK_STEP: int = 1
 
@@ -158,6 +176,8 @@ def parse_plot_kinds(raw_value: str) -> list[PlotKind]:
             PlotKind.SOLUTION_NMR_PERIOD_AREA_SHARE,
             PlotKind.SOLUTION_NMR_PERIOD_AREA_CUMULATIVE_SHARE,
             PlotKind.SOLUTION_NMR_MONOMER_SECONDARY,
+            PlotKind.SOLUTION_NMR_MONOMER_SECONDARY_COMPARISON,
+            PlotKind.SOLUTION_NMR_MONOMER_SECONDARY_COMPARISON_CUMULATIVE,
             PlotKind.SOLUTION_NMR_MONOMER_PRECISION,
             PlotKind.SOLUTION_NMR_MONOMER_QUALITY,
             PlotKind.SOLUTION_NMR_MONOMER_XRAY_HOMOLOGS,
@@ -808,6 +828,27 @@ class PDBScientificPlotter:
         )
         return PDBScientificPlotter._limit_year_column(prepared)
 
+    @staticmethod
+    def _prepare_monomer_secondary_comparison_table(df: pd.DataFrame) -> pd.DataFrame:
+        prepared = PDBScientificPlotter._prepare_typed_table(
+            df=df,
+            required_columns={
+                "entry_id",
+                "year",
+                "secondary_structure_percent",
+                "dssp_alpha_helix_fraction",
+                "dssp_beta_strand_fraction",
+            },
+            column_types={
+                "year": int,
+                "secondary_structure_percent": float,
+                "dssp_alpha_helix_fraction": float,
+                "dssp_beta_strand_fraction": float,
+            },
+            dataset_name="Monomer secondary CSV",
+        )
+        return PDBScientificPlotter._limit_year_column(prepared)
+
     def plot_solution_nmr_monomer_secondary(
         self, data_path: Path, output_png: Path, output_svg: Path
     ) -> None:
@@ -843,6 +884,121 @@ class PDBScientificPlotter:
             output_svg=output_svg,
             title=self.config.nmr_monomer_secondary_title,
             y_label=self.config.nmr_monomer_secondary_y_label,
+            draw_fn=draw,
+        )
+
+    def plot_solution_nmr_monomer_secondary_comparison(
+        self, data_path: Path, output_png: Path, output_svg: Path
+    ) -> None:
+        table = self._prepare_monomer_secondary_comparison_table(self._read_csv(data_path))
+        self._scientific_style()
+        filtered = table.loc[
+            (table["secondary_structure_percent"] >= 0.0)
+            & (table["secondary_structure_percent"] <= 100.0)
+            & (table["dssp_alpha_helix_fraction"] >= 0.0)
+            & (table["dssp_beta_strand_fraction"] >= 0.0)
+        ].copy()
+        filtered["dssp_helix_plus_beta_percent"] = (
+            (
+                filtered["dssp_alpha_helix_fraction"]
+                + filtered["dssp_beta_strand_fraction"]
+            )
+            * 100.0
+        )
+        yearly = (
+            filtered.groupby("year", as_index=True)[
+                ["secondary_structure_percent", "dssp_helix_plus_beta_percent"]
+            ]
+            .mean()
+            .sort_index()
+        )
+
+        def draw(ax: plt.Axes) -> None:
+            ax.plot(
+                yearly.index,
+                yearly["secondary_structure_percent"],
+                linewidth=2.2,
+                color=self.config.nmr_color,
+                label="PDB",
+            )
+            ax.plot(
+                yearly.index,
+                yearly["dssp_helix_plus_beta_percent"],
+                linewidth=2.2,
+                color=self.config.avg_color,
+                label="DSSP",
+            )
+            ax.set_ylim(0, 100)
+            self._add_legend(ax, loc="upper left")
+
+        self._render_figure(
+            output_png=output_png,
+            output_svg=output_svg,
+            title=self.config.nmr_monomer_secondary_comparison_title,
+            y_label=self.config.nmr_monomer_secondary_comparison_y_label,
+            draw_fn=draw,
+        )
+
+    def plot_solution_nmr_monomer_secondary_comparison_cumulative(
+        self, data_path: Path, output_png: Path, output_svg: Path
+    ) -> None:
+        table = self._prepare_monomer_secondary_comparison_table(self._read_csv(data_path))
+        self._scientific_style()
+        filtered = table.loc[
+            (table["secondary_structure_percent"] >= 0.0)
+            & (table["secondary_structure_percent"] <= 100.0)
+            & (table["dssp_alpha_helix_fraction"] >= 0.0)
+            & (table["dssp_beta_strand_fraction"] >= 0.0)
+        ].copy()
+        filtered["dssp_helix_plus_beta_percent"] = (
+            (
+                filtered["dssp_alpha_helix_fraction"]
+                + filtered["dssp_beta_strand_fraction"]
+            )
+            * 100.0
+        )
+        yearly = (
+            filtered.groupby("year", as_index=True)[
+                ["secondary_structure_percent", "dssp_helix_plus_beta_percent"]
+            ]
+            .agg(["sum", "count"])
+            .sort_index()
+        )
+        sec_sum = yearly[("secondary_structure_percent", "sum")].cumsum()
+        sec_cnt = yearly[("secondary_structure_percent", "count")].cumsum()
+        dssp_sum = yearly[("dssp_helix_plus_beta_percent", "sum")].cumsum()
+        dssp_cnt = yearly[("dssp_helix_plus_beta_percent", "count")].cumsum()
+        cumulative = pd.DataFrame(
+            {
+                "secondary_structure_percent": sec_sum.div(sec_cnt),
+                "dssp_helix_plus_beta_percent": dssp_sum.div(dssp_cnt),
+            },
+            index=yearly.index,
+        )
+
+        def draw(ax: plt.Axes) -> None:
+            ax.plot(
+                cumulative.index,
+                cumulative["secondary_structure_percent"],
+                linewidth=2.2,
+                color=self.config.nmr_color,
+                label="PDB",
+            )
+            ax.plot(
+                cumulative.index,
+                cumulative["dssp_helix_plus_beta_percent"],
+                linewidth=2.2,
+                color=self.config.avg_color,
+                label="DSSP",
+            )
+            ax.set_ylim(0, 100)
+            self._add_legend(ax, loc="upper left")
+
+        self._render_figure(
+            output_png=output_png,
+            output_svg=output_svg,
+            title=self.config.nmr_monomer_secondary_comparison_cumulative_title,
+            y_label=self.config.nmr_monomer_secondary_comparison_cumulative_y_label,
             draw_fn=draw,
         )
 
@@ -1067,12 +1223,14 @@ def parse_args() -> argparse.Namespace:
             PlotKind.SOLUTION_NMR_PERIOD_AREA_SHARE,
             PlotKind.SOLUTION_NMR_PERIOD_AREA_CUMULATIVE_SHARE,
             PlotKind.SOLUTION_NMR_MONOMER_SECONDARY,
+            PlotKind.SOLUTION_NMR_MONOMER_SECONDARY_COMPARISON,
+            PlotKind.SOLUTION_NMR_MONOMER_SECONDARY_COMPARISON_CUMULATIVE,
             PlotKind.SOLUTION_NMR_MONOMER_PRECISION,
             PlotKind.SOLUTION_NMR_MONOMER_QUALITY,
             PlotKind.SOLUTION_NMR_MONOMER_XRAY_HOMOLOGS,
             PlotKind.SOLUTION_NMR_MONOMER_XRAY_RMSD,
         ],
-        help="Comma-separated plot kinds or 'all'. Available: method_counts, membrane_protein_counts, solution_nmr_weight_stats, solution_nmr_period_boxplot, solution_nmr_period_area, solution_nmr_period_area_share, solution_nmr_period_area_cumulative_share, solution_nmr_monomer_secondary, solution_nmr_monomer_precision, solution_nmr_monomer_quality, solution_nmr_monomer_xray_homologs, solution_nmr_monomer_xray_rmsd (default: all).",
+        help="Comma-separated plot kinds or 'all'. Available: method_counts, membrane_protein_counts, solution_nmr_weight_stats, solution_nmr_period_boxplot, solution_nmr_period_area, solution_nmr_period_area_share, solution_nmr_period_area_cumulative_share, solution_nmr_monomer_secondary, solution_nmr_monomer_secondary_comparison, solution_nmr_monomer_secondary_comparison_cumulative, solution_nmr_monomer_precision, solution_nmr_monomer_quality, solution_nmr_monomer_xray_homologs, solution_nmr_monomer_xray_rmsd (default: all).",
     )
     parser.add_argument(
         "--counts-input",
@@ -1280,6 +1438,34 @@ def parse_args() -> argparse.Namespace:
         help="Output SVG for SOLUTION NMR monomer secondary-structure plot.",
     )
     parser.add_argument(
+        "--nmr-monomer-secondary-comparison-output-png",
+        type=Path,
+        default=Path("figures/solution_nmr_monomer_secondary_comparison_by_year.png"),
+        help="Output PNG for SOLUTION NMR monomer secondary comparison plot.",
+    )
+    parser.add_argument(
+        "--nmr-monomer-secondary-comparison-output-svg",
+        type=Path,
+        default=Path("figures/solution_nmr_monomer_secondary_comparison_by_year.svg"),
+        help="Output SVG for SOLUTION NMR monomer secondary comparison plot.",
+    )
+    parser.add_argument(
+        "--nmr-monomer-secondary-comparison-cumulative-output-png",
+        type=Path,
+        default=Path(
+            "figures/solution_nmr_monomer_secondary_comparison_cumulative_by_year.png"
+        ),
+        help="Output PNG for cumulative SOLUTION NMR monomer secondary comparison plot.",
+    )
+    parser.add_argument(
+        "--nmr-monomer-secondary-comparison-cumulative-output-svg",
+        type=Path,
+        default=Path(
+            "figures/solution_nmr_monomer_secondary_comparison_cumulative_by_year.svg"
+        ),
+        help="Output SVG for cumulative SOLUTION NMR monomer secondary comparison plot.",
+    )
+    parser.add_argument(
         "--nmr-monomer-precision-output-png",
         type=Path,
         default=Path("figures/solution_nmr_monomer_precision_rmsd_by_year.png"),
@@ -1478,6 +1664,20 @@ def main() -> None:
             data_path=args.nmr_monomer_secondary_input,
             output_png=args.nmr_monomer_secondary_output_png,
             output_svg=args.nmr_monomer_secondary_output_svg,
+        )
+
+    if PlotKind.SOLUTION_NMR_MONOMER_SECONDARY_COMPARISON in args.plots:
+        plotter.plot_solution_nmr_monomer_secondary_comparison(
+            data_path=args.nmr_monomer_secondary_input,
+            output_png=args.nmr_monomer_secondary_comparison_output_png,
+            output_svg=args.nmr_monomer_secondary_comparison_output_svg,
+        )
+
+    if PlotKind.SOLUTION_NMR_MONOMER_SECONDARY_COMPARISON_CUMULATIVE in args.plots:
+        plotter.plot_solution_nmr_monomer_secondary_comparison_cumulative(
+            data_path=args.nmr_monomer_secondary_input,
+            output_png=args.nmr_monomer_secondary_comparison_cumulative_output_png,
+            output_svg=args.nmr_monomer_secondary_comparison_cumulative_output_svg,
         )
 
     if PlotKind.SOLUTION_NMR_MONOMER_PRECISION in args.plots:
