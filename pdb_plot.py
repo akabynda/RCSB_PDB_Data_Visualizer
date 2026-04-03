@@ -31,6 +31,16 @@ class PlotKind(str, Enum):
     SOLUTION_NMR_MONOMER_SECONDARY_COMPARISON_CUMULATIVE = (
         "solution_nmr_monomer_secondary_comparison_cumulative"
     )
+    SOLUTION_NMR_MONOMER_STRIDE_COMPARISON = "solution_nmr_monomer_stride_comparison"
+    SOLUTION_NMR_MONOMER_STRIDE_COMPARISON_CUMULATIVE = (
+        "solution_nmr_monomer_stride_comparison_cumulative"
+    )
+    SOLUTION_NMR_MONOMER_THREE_WAY_COMPARISON = (
+        "solution_nmr_monomer_three_way_comparison"
+    )
+    SOLUTION_NMR_MONOMER_THREE_WAY_COMPARISON_CUMULATIVE = (
+        "solution_nmr_monomer_three_way_comparison_cumulative"
+    )
     SOLUTION_NMR_MONOMER_PRECISION = "solution_nmr_monomer_precision"
     SOLUTION_NMR_MONOMER_QUALITY = "solution_nmr_monomer_quality"
     SOLUTION_NMR_MONOMER_XRAY_HOMOLOGS = "solution_nmr_monomer_xray_homologs"
@@ -93,15 +103,35 @@ class PlotConfig:
     )
     nmr_monomer_secondary_y_label: str = "Secondary structure content (%)"
     nmr_monomer_secondary_comparison_title: str = (
-        "Comparison of deposited and DSSP-derived secondary structure content by year"
+        "Comparison of deposited and DSSP(H+G+I+E+B)-derived secondary structure content by year"
     )
     nmr_monomer_secondary_comparison_y_label: str = (
         "Secondary structure content (%)"
     )
     nmr_monomer_secondary_comparison_cumulative_title: str = (
-        "Cumulative comparison of deposited and DSSP-derived secondary structure content"
+        "Cumulative comparison of deposited and DSSP(H+G+I+E+B)-derived secondary structure content"
     )
     nmr_monomer_secondary_comparison_cumulative_y_label: str = (
+        "Cumulative secondary structure content (%)"
+    )
+    nmr_monomer_stride_comparison_title: str = (
+        "Comparison of deposited and STRIDE(H+G+I+E+B)-derived secondary structure content by year"
+    )
+    nmr_monomer_stride_comparison_y_label: str = "Secondary structure content (%)"
+    nmr_monomer_stride_comparison_cumulative_title: str = (
+        "Cumulative comparison of deposited and STRIDE(H+G+I+E+B)-derived secondary structure content"
+    )
+    nmr_monomer_stride_comparison_cumulative_y_label: str = (
+        "Cumulative secondary structure content (%)"
+    )
+    nmr_monomer_three_way_comparison_title: str = (
+        "Comparison of deposited, DSSP(H+G+I+E+B), and STRIDE(H+G+I+E+B) secondary structure content by year"
+    )
+    nmr_monomer_three_way_comparison_y_label: str = "Secondary structure content (%)"
+    nmr_monomer_three_way_comparison_cumulative_title: str = (
+        "Cumulative comparison of deposited, DSSP(H+G+I+E+B), and STRIDE(H+G+I+E+B) secondary structure content"
+    )
+    nmr_monomer_three_way_comparison_cumulative_y_label: str = (
         "Cumulative secondary structure content (%)"
     )
     nmr_monomer_precision_title: str = (
@@ -178,6 +208,10 @@ def parse_plot_kinds(raw_value: str) -> list[PlotKind]:
             PlotKind.SOLUTION_NMR_MONOMER_SECONDARY,
             PlotKind.SOLUTION_NMR_MONOMER_SECONDARY_COMPARISON,
             PlotKind.SOLUTION_NMR_MONOMER_SECONDARY_COMPARISON_CUMULATIVE,
+            PlotKind.SOLUTION_NMR_MONOMER_STRIDE_COMPARISON,
+            PlotKind.SOLUTION_NMR_MONOMER_STRIDE_COMPARISON_CUMULATIVE,
+            PlotKind.SOLUTION_NMR_MONOMER_THREE_WAY_COMPARISON,
+            PlotKind.SOLUTION_NMR_MONOMER_THREE_WAY_COMPARISON_CUMULATIVE,
             PlotKind.SOLUTION_NMR_MONOMER_PRECISION,
             PlotKind.SOLUTION_NMR_MONOMER_QUALITY,
             PlotKind.SOLUTION_NMR_MONOMER_XRAY_HOMOLOGS,
@@ -837,15 +871,48 @@ class PDBScientificPlotter:
                 "year",
                 "secondary_structure_percent",
                 "dssp_alpha_helix_fraction",
+                "dssp_3_10_helix_fraction",
+                "dssp_pi_helix_fraction",
                 "dssp_beta_strand_fraction",
+                "dssp_isolated_beta_bridge_fraction",
             },
             column_types={
                 "year": int,
                 "secondary_structure_percent": float,
                 "dssp_alpha_helix_fraction": float,
+                "dssp_3_10_helix_fraction": float,
+                "dssp_pi_helix_fraction": float,
                 "dssp_beta_strand_fraction": float,
+                "dssp_isolated_beta_bridge_fraction": float,
             },
             dataset_name="Monomer secondary CSV",
+        )
+        return PDBScientificPlotter._limit_year_column(prepared)
+
+    @staticmethod
+    def _prepare_monomer_stride_comparison_table(df: pd.DataFrame) -> pd.DataFrame:
+        prepared = PDBScientificPlotter._prepare_typed_table(
+            df=df,
+            required_columns={
+                "entry_id",
+                "year",
+                "secondary_structure_percent",
+                "stride_alpha_helix_fraction",
+                "stride_3_10_helix_fraction",
+                "stride_pi_helix_fraction",
+                "stride_beta_strand_fraction",
+                "stride_isolated_beta_bridge_fraction",
+            },
+            column_types={
+                "year": int,
+                "secondary_structure_percent": float,
+                "stride_alpha_helix_fraction": float,
+                "stride_3_10_helix_fraction": float,
+                "stride_pi_helix_fraction": float,
+                "stride_beta_strand_fraction": float,
+                "stride_isolated_beta_bridge_fraction": float,
+            },
+            dataset_name="Monomer STRIDE CSV",
         )
         return PDBScientificPlotter._limit_year_column(prepared)
 
@@ -896,22 +963,23 @@ class PDBScientificPlotter:
     ) -> None:
         table = self._prepare_monomer_secondary_comparison_table(self._read_csv(data_path))
         self._scientific_style()
+        table = table.copy()
+        table["dssp_hgieb_percent"] = (
+            table["dssp_alpha_helix_fraction"]
+            + table["dssp_3_10_helix_fraction"]
+            + table["dssp_pi_helix_fraction"]
+            + table["dssp_beta_strand_fraction"]
+            + table["dssp_isolated_beta_bridge_fraction"]
+        ) * 100.0
         filtered = table.loc[
             (table["secondary_structure_percent"] >= 0.0)
             & (table["secondary_structure_percent"] <= 100.0)
-            & (table["dssp_alpha_helix_fraction"] >= 0.0)
-            & (table["dssp_beta_strand_fraction"] >= 0.0)
+            & (table["dssp_hgieb_percent"] >= 0.0)
+            & (table["dssp_hgieb_percent"] <= 100.0)
         ].copy()
-        filtered["dssp_helix_plus_beta_percent"] = (
-            (
-                filtered["dssp_alpha_helix_fraction"]
-                + filtered["dssp_beta_strand_fraction"]
-            )
-            * 100.0
-        )
         yearly = (
             filtered.groupby("year", as_index=True)[
-                ["secondary_structure_percent", "dssp_helix_plus_beta_percent"]
+                ["secondary_structure_percent", "dssp_hgieb_percent"]
             ]
             .mean()
             .sort_index()
@@ -927,10 +995,10 @@ class PDBScientificPlotter:
             )
             ax.plot(
                 yearly.index,
-                yearly["dssp_helix_plus_beta_percent"],
+                yearly["dssp_hgieb_percent"],
                 linewidth=2.2,
                 color=self.config.avg_color,
-                label="DSSP",
+                label="DSSP H+G+I+E+B",
             )
             ax.set_ylim(0, 100)
             self._add_legend(ax, loc="upper left")
@@ -948,34 +1016,35 @@ class PDBScientificPlotter:
     ) -> None:
         table = self._prepare_monomer_secondary_comparison_table(self._read_csv(data_path))
         self._scientific_style()
+        table = table.copy()
+        table["dssp_hgieb_percent"] = (
+            table["dssp_alpha_helix_fraction"]
+            + table["dssp_3_10_helix_fraction"]
+            + table["dssp_pi_helix_fraction"]
+            + table["dssp_beta_strand_fraction"]
+            + table["dssp_isolated_beta_bridge_fraction"]
+        ) * 100.0
         filtered = table.loc[
             (table["secondary_structure_percent"] >= 0.0)
             & (table["secondary_structure_percent"] <= 100.0)
-            & (table["dssp_alpha_helix_fraction"] >= 0.0)
-            & (table["dssp_beta_strand_fraction"] >= 0.0)
+            & (table["dssp_hgieb_percent"] >= 0.0)
+            & (table["dssp_hgieb_percent"] <= 100.0)
         ].copy()
-        filtered["dssp_helix_plus_beta_percent"] = (
-            (
-                filtered["dssp_alpha_helix_fraction"]
-                + filtered["dssp_beta_strand_fraction"]
-            )
-            * 100.0
-        )
         yearly = (
             filtered.groupby("year", as_index=True)[
-                ["secondary_structure_percent", "dssp_helix_plus_beta_percent"]
+                ["secondary_structure_percent", "dssp_hgieb_percent"]
             ]
             .agg(["sum", "count"])
             .sort_index()
         )
-        sec_sum = yearly[("secondary_structure_percent", "sum")].cumsum()
-        sec_cnt = yearly[("secondary_structure_percent", "count")].cumsum()
-        dssp_sum = yearly[("dssp_helix_plus_beta_percent", "sum")].cumsum()
-        dssp_cnt = yearly[("dssp_helix_plus_beta_percent", "count")].cumsum()
+        pdb_sum = yearly[("secondary_structure_percent", "sum")].cumsum()
+        pdb_cnt = yearly[("secondary_structure_percent", "count")].cumsum()
+        dssp_sum = yearly[("dssp_hgieb_percent", "sum")].cumsum()
+        dssp_cnt = yearly[("dssp_hgieb_percent", "count")].cumsum()
         cumulative = pd.DataFrame(
             {
-                "secondary_structure_percent": sec_sum.div(sec_cnt),
-                "dssp_helix_plus_beta_percent": dssp_sum.div(dssp_cnt),
+                "secondary_structure_percent": pdb_sum.div(pdb_cnt),
+                "dssp_hgieb_percent": dssp_sum.div(dssp_cnt),
             },
             index=yearly.index,
         )
@@ -990,10 +1059,10 @@ class PDBScientificPlotter:
             )
             ax.plot(
                 cumulative.index,
-                cumulative["dssp_helix_plus_beta_percent"],
+                cumulative["dssp_hgieb_percent"],
                 linewidth=2.2,
                 color=self.config.avg_color,
-                label="DSSP",
+                label="DSSP H+G+I+E+B",
             )
             ax.set_ylim(0, 100)
             self._add_legend(ax, loc="upper left")
@@ -1003,6 +1072,312 @@ class PDBScientificPlotter:
             output_svg=output_svg,
             title=self.config.nmr_monomer_secondary_comparison_cumulative_title,
             y_label=self.config.nmr_monomer_secondary_comparison_cumulative_y_label,
+            draw_fn=draw,
+        )
+
+    def plot_solution_nmr_monomer_stride_comparison(
+        self, data_path: Path, output_png: Path, output_svg: Path
+    ) -> None:
+        table = self._prepare_monomer_stride_comparison_table(self._read_csv(data_path))
+        self._scientific_style()
+        table = table.copy()
+        table["stride_hgieb_percent"] = (
+            table["stride_alpha_helix_fraction"]
+            + table["stride_3_10_helix_fraction"]
+            + table["stride_pi_helix_fraction"]
+            + table["stride_beta_strand_fraction"]
+            + table["stride_isolated_beta_bridge_fraction"]
+        ) * 100.0
+
+        filtered = table.loc[
+            (table["secondary_structure_percent"] >= 0.0)
+            & (table["secondary_structure_percent"] <= 100.0)
+            & (table["stride_hgieb_percent"] >= 0.0)
+            & (table["stride_hgieb_percent"] <= 100.0)
+        ].copy()
+        yearly = (
+            filtered.groupby("year", as_index=True)[
+                ["secondary_structure_percent", "stride_hgieb_percent"]
+            ]
+            .mean()
+            .sort_index()
+        )
+
+        def draw(ax: plt.Axes) -> None:
+            ax.plot(
+                yearly.index,
+                yearly["secondary_structure_percent"],
+                linewidth=2.2,
+                color=self.config.nmr_color,
+                label="PDB",
+            )
+            ax.plot(
+                yearly.index,
+                yearly["stride_hgieb_percent"],
+                linewidth=2.2,
+                color=self.config.avg_color,
+                label="STRIDE H+G+I+E+B",
+            )
+            ax.set_ylim(0, 100)
+            self._add_legend(ax, loc="upper left")
+
+        self._render_figure(
+            output_png=output_png,
+            output_svg=output_svg,
+            title=self.config.nmr_monomer_stride_comparison_title,
+            y_label=self.config.nmr_monomer_stride_comparison_y_label,
+            draw_fn=draw,
+        )
+
+    def plot_solution_nmr_monomer_stride_comparison_cumulative(
+        self, data_path: Path, output_png: Path, output_svg: Path
+    ) -> None:
+        table = self._prepare_monomer_stride_comparison_table(self._read_csv(data_path))
+        self._scientific_style()
+        table = table.copy()
+        table["stride_hgieb_percent"] = (
+            table["stride_alpha_helix_fraction"]
+            + table["stride_3_10_helix_fraction"]
+            + table["stride_pi_helix_fraction"]
+            + table["stride_beta_strand_fraction"]
+            + table["stride_isolated_beta_bridge_fraction"]
+        ) * 100.0
+
+        filtered = table.loc[
+            (table["secondary_structure_percent"] >= 0.0)
+            & (table["secondary_structure_percent"] <= 100.0)
+            & (table["stride_hgieb_percent"] >= 0.0)
+            & (table["stride_hgieb_percent"] <= 100.0)
+        ].copy()
+        yearly = (
+            filtered.groupby("year", as_index=True)[
+                ["secondary_structure_percent", "stride_hgieb_percent"]
+            ]
+            .agg(["sum", "count"])
+            .sort_index()
+        )
+        pdb_sum = yearly[("secondary_structure_percent", "sum")].cumsum()
+        pdb_cnt = yearly[("secondary_structure_percent", "count")].cumsum()
+        stride_sum = yearly[("stride_hgieb_percent", "sum")].cumsum()
+        stride_cnt = yearly[("stride_hgieb_percent", "count")].cumsum()
+        cumulative = pd.DataFrame(
+            {
+                "secondary_structure_percent": pdb_sum.div(pdb_cnt),
+                "stride_hgieb_percent": stride_sum.div(stride_cnt),
+            },
+            index=yearly.index,
+        )
+
+        def draw(ax: plt.Axes) -> None:
+            ax.plot(
+                cumulative.index,
+                cumulative["secondary_structure_percent"],
+                linewidth=2.2,
+                color=self.config.nmr_color,
+                label="PDB",
+            )
+            ax.plot(
+                cumulative.index,
+                cumulative["stride_hgieb_percent"],
+                linewidth=2.2,
+                color=self.config.avg_color,
+                label="STRIDE H+G+I+E+B",
+            )
+            ax.set_ylim(0, 100)
+            self._add_legend(ax, loc="upper left")
+
+        self._render_figure(
+            output_png=output_png,
+            output_svg=output_svg,
+            title=self.config.nmr_monomer_stride_comparison_cumulative_title,
+            y_label=self.config.nmr_monomer_stride_comparison_cumulative_y_label,
+            draw_fn=draw,
+        )
+
+    @staticmethod
+    def _cumulative_mean_by_year(
+        table: pd.DataFrame, value_column: str
+    ) -> pd.Series:
+        yearly = (
+            table.groupby("year", as_index=True)[value_column]
+            .agg(["sum", "count"])
+            .sort_index()
+        )
+        return yearly["sum"].cumsum().div(yearly["count"].cumsum())
+
+    def plot_solution_nmr_monomer_three_way_comparison(
+        self,
+        secondary_data_path: Path,
+        stride_data_path: Path,
+        output_png: Path,
+        output_svg: Path,
+    ) -> None:
+        secondary_table = self._prepare_monomer_secondary_comparison_table(
+            self._read_csv(secondary_data_path)
+        ).copy()
+        stride_table = self._prepare_monomer_stride_comparison_table(
+            self._read_csv(stride_data_path)
+        ).copy()
+        self._scientific_style()
+
+        secondary_table["dssp_hgieb_percent"] = (
+            secondary_table["dssp_alpha_helix_fraction"]
+            + secondary_table["dssp_3_10_helix_fraction"]
+            + secondary_table["dssp_pi_helix_fraction"]
+            + secondary_table["dssp_beta_strand_fraction"]
+            + secondary_table["dssp_isolated_beta_bridge_fraction"]
+        ) * 100.0
+        stride_table["stride_hgieb_percent"] = (
+            stride_table["stride_alpha_helix_fraction"]
+            + stride_table["stride_3_10_helix_fraction"]
+            + stride_table["stride_pi_helix_fraction"]
+            + stride_table["stride_beta_strand_fraction"]
+            + stride_table["stride_isolated_beta_bridge_fraction"]
+        ) * 100.0
+
+        pdb_yearly = (
+            secondary_table.loc[
+                (secondary_table["secondary_structure_percent"] >= 0.0)
+                & (secondary_table["secondary_structure_percent"] <= 100.0)
+            ]
+            .groupby("year", as_index=True)["secondary_structure_percent"]
+            .mean()
+            .sort_index()
+        )
+        dssp_yearly = (
+            secondary_table.loc[
+                (secondary_table["dssp_hgieb_percent"] >= 0.0)
+                & (secondary_table["dssp_hgieb_percent"] <= 100.0)
+            ]
+            .groupby("year", as_index=True)["dssp_hgieb_percent"]
+            .mean()
+            .sort_index()
+        )
+        stride_yearly = (
+            stride_table.loc[
+                (stride_table["stride_hgieb_percent"] >= 0.0)
+                & (stride_table["stride_hgieb_percent"] <= 100.0)
+            ]
+            .groupby("year", as_index=True)["stride_hgieb_percent"]
+            .mean()
+            .sort_index()
+        )
+
+        def draw(ax: plt.Axes) -> None:
+            ax.plot(
+                pdb_yearly.index,
+                pdb_yearly.values,
+                linewidth=2.2,
+                color=self.config.nmr_color,
+                label="PDB",
+            )
+            ax.plot(
+                dssp_yearly.index,
+                dssp_yearly.values,
+                linewidth=2.2,
+                color=self.config.avg_color,
+                label="DSSP H+G+I+E+B",
+            )
+            ax.plot(
+                stride_yearly.index,
+                stride_yearly.values,
+                linewidth=2.2,
+                color=self.config.max_color,
+                label="STRIDE H+G+I+E+B",
+            )
+            ax.set_ylim(0, 100)
+            self._add_legend(ax, loc="upper left")
+
+        self._render_figure(
+            output_png=output_png,
+            output_svg=output_svg,
+            title=self.config.nmr_monomer_three_way_comparison_title,
+            y_label=self.config.nmr_monomer_three_way_comparison_y_label,
+            draw_fn=draw,
+        )
+
+    def plot_solution_nmr_monomer_three_way_comparison_cumulative(
+        self,
+        secondary_data_path: Path,
+        stride_data_path: Path,
+        output_png: Path,
+        output_svg: Path,
+    ) -> None:
+        secondary_table = self._prepare_monomer_secondary_comparison_table(
+            self._read_csv(secondary_data_path)
+        ).copy()
+        stride_table = self._prepare_monomer_stride_comparison_table(
+            self._read_csv(stride_data_path)
+        ).copy()
+        self._scientific_style()
+
+        secondary_table["dssp_hgieb_percent"] = (
+            secondary_table["dssp_alpha_helix_fraction"]
+            + secondary_table["dssp_3_10_helix_fraction"]
+            + secondary_table["dssp_pi_helix_fraction"]
+            + secondary_table["dssp_beta_strand_fraction"]
+            + secondary_table["dssp_isolated_beta_bridge_fraction"]
+        ) * 100.0
+        stride_table["stride_hgieb_percent"] = (
+            stride_table["stride_alpha_helix_fraction"]
+            + stride_table["stride_3_10_helix_fraction"]
+            + stride_table["stride_pi_helix_fraction"]
+            + stride_table["stride_beta_strand_fraction"]
+            + stride_table["stride_isolated_beta_bridge_fraction"]
+        ) * 100.0
+
+        pdb_cumulative = self._cumulative_mean_by_year(
+            secondary_table.loc[
+                (secondary_table["secondary_structure_percent"] >= 0.0)
+                & (secondary_table["secondary_structure_percent"] <= 100.0)
+            ],
+            "secondary_structure_percent",
+        )
+        dssp_cumulative = self._cumulative_mean_by_year(
+            secondary_table.loc[
+                (secondary_table["dssp_hgieb_percent"] >= 0.0)
+                & (secondary_table["dssp_hgieb_percent"] <= 100.0)
+            ],
+            "dssp_hgieb_percent",
+        )
+        stride_cumulative = self._cumulative_mean_by_year(
+            stride_table.loc[
+                (stride_table["stride_hgieb_percent"] >= 0.0)
+                & (stride_table["stride_hgieb_percent"] <= 100.0)
+            ],
+            "stride_hgieb_percent",
+        )
+
+        def draw(ax: plt.Axes) -> None:
+            ax.plot(
+                pdb_cumulative.index,
+                pdb_cumulative.values,
+                linewidth=2.2,
+                color=self.config.nmr_color,
+                label="PDB",
+            )
+            ax.plot(
+                dssp_cumulative.index,
+                dssp_cumulative.values,
+                linewidth=2.2,
+                color=self.config.avg_color,
+                label="DSSP H+G+I+E+B",
+            )
+            ax.plot(
+                stride_cumulative.index,
+                stride_cumulative.values,
+                linewidth=2.2,
+                color=self.config.max_color,
+                label="STRIDE H+G+I+E+B",
+            )
+            ax.set_ylim(0, 100)
+            self._add_legend(ax, loc="upper left")
+
+        self._render_figure(
+            output_png=output_png,
+            output_svg=output_svg,
+            title=self.config.nmr_monomer_three_way_comparison_cumulative_title,
+            y_label=self.config.nmr_monomer_three_way_comparison_cumulative_y_label,
             draw_fn=draw,
         )
 
@@ -1229,12 +1604,16 @@ def parse_args() -> argparse.Namespace:
             PlotKind.SOLUTION_NMR_MONOMER_SECONDARY,
             PlotKind.SOLUTION_NMR_MONOMER_SECONDARY_COMPARISON,
             PlotKind.SOLUTION_NMR_MONOMER_SECONDARY_COMPARISON_CUMULATIVE,
+            PlotKind.SOLUTION_NMR_MONOMER_STRIDE_COMPARISON,
+            PlotKind.SOLUTION_NMR_MONOMER_STRIDE_COMPARISON_CUMULATIVE,
+            PlotKind.SOLUTION_NMR_MONOMER_THREE_WAY_COMPARISON,
+            PlotKind.SOLUTION_NMR_MONOMER_THREE_WAY_COMPARISON_CUMULATIVE,
             PlotKind.SOLUTION_NMR_MONOMER_PRECISION,
             PlotKind.SOLUTION_NMR_MONOMER_QUALITY,
             PlotKind.SOLUTION_NMR_MONOMER_XRAY_HOMOLOGS,
             PlotKind.SOLUTION_NMR_MONOMER_XRAY_RMSD,
         ],
-        help="Comma-separated plot kinds or 'all'. Available: method_counts, membrane_protein_counts, solution_nmr_weight_stats, solution_nmr_period_boxplot, solution_nmr_period_area, solution_nmr_period_area_share, solution_nmr_period_area_cumulative_share, solution_nmr_monomer_secondary, solution_nmr_monomer_secondary_comparison, solution_nmr_monomer_secondary_comparison_cumulative, solution_nmr_monomer_precision, solution_nmr_monomer_quality, solution_nmr_monomer_xray_homologs, solution_nmr_monomer_xray_rmsd (default: all).",
+        help="Comma-separated plot kinds or 'all'. Available: method_counts, membrane_protein_counts, solution_nmr_weight_stats, solution_nmr_period_boxplot, solution_nmr_period_area, solution_nmr_period_area_share, solution_nmr_period_area_cumulative_share, solution_nmr_monomer_secondary, solution_nmr_monomer_secondary_comparison, solution_nmr_monomer_secondary_comparison_cumulative, solution_nmr_monomer_stride_comparison, solution_nmr_monomer_stride_comparison_cumulative, solution_nmr_monomer_three_way_comparison, solution_nmr_monomer_three_way_comparison_cumulative, solution_nmr_monomer_precision, solution_nmr_monomer_quality, solution_nmr_monomer_xray_homologs, solution_nmr_monomer_xray_rmsd (default: all).",
     )
     parser.add_argument(
         "--counts-input",
@@ -1259,6 +1638,12 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("data/solution_nmr_monomer_secondary_structure.csv"),
         help="Input CSV for SOLUTION NMR monomer secondary-structure plot.",
+    )
+    parser.add_argument(
+        "--nmr-monomer-stride-input",
+        type=Path,
+        default=Path("data/solution_nmr_monomer_stride_structure.csv"),
+        help="Input CSV for SOLUTION NMR monomer STRIDE comparison plots.",
     )
     parser.add_argument(
         "--nmr-monomer-precision-input",
@@ -1468,6 +1853,62 @@ def parse_args() -> argparse.Namespace:
             "figures/solution_nmr_monomer_secondary_comparison_cumulative_by_year.svg"
         ),
         help="Output SVG for cumulative SOLUTION NMR monomer secondary comparison plot.",
+    )
+    parser.add_argument(
+        "--nmr-monomer-stride-comparison-output-png",
+        type=Path,
+        default=Path("figures/solution_nmr_monomer_stride_comparison_by_year.png"),
+        help="Output PNG for SOLUTION NMR monomer STRIDE comparison plot.",
+    )
+    parser.add_argument(
+        "--nmr-monomer-stride-comparison-output-svg",
+        type=Path,
+        default=Path("figures/solution_nmr_monomer_stride_comparison_by_year.svg"),
+        help="Output SVG for SOLUTION NMR monomer STRIDE comparison plot.",
+    )
+    parser.add_argument(
+        "--nmr-monomer-stride-comparison-cumulative-output-png",
+        type=Path,
+        default=Path(
+            "figures/solution_nmr_monomer_stride_comparison_cumulative_by_year.png"
+        ),
+        help="Output PNG for cumulative SOLUTION NMR monomer STRIDE comparison plot.",
+    )
+    parser.add_argument(
+        "--nmr-monomer-stride-comparison-cumulative-output-svg",
+        type=Path,
+        default=Path(
+            "figures/solution_nmr_monomer_stride_comparison_cumulative_by_year.svg"
+        ),
+        help="Output SVG for cumulative SOLUTION NMR monomer STRIDE comparison plot.",
+    )
+    parser.add_argument(
+        "--nmr-monomer-three-way-comparison-output-png",
+        type=Path,
+        default=Path("figures/solution_nmr_monomer_three_way_comparison_by_year.png"),
+        help="Output PNG for SOLUTION NMR monomer three-way comparison plot.",
+    )
+    parser.add_argument(
+        "--nmr-monomer-three-way-comparison-output-svg",
+        type=Path,
+        default=Path("figures/solution_nmr_monomer_three_way_comparison_by_year.svg"),
+        help="Output SVG for SOLUTION NMR monomer three-way comparison plot.",
+    )
+    parser.add_argument(
+        "--nmr-monomer-three-way-comparison-cumulative-output-png",
+        type=Path,
+        default=Path(
+            "figures/solution_nmr_monomer_three_way_comparison_cumulative_by_year.png"
+        ),
+        help="Output PNG for cumulative SOLUTION NMR monomer three-way comparison plot.",
+    )
+    parser.add_argument(
+        "--nmr-monomer-three-way-comparison-cumulative-output-svg",
+        type=Path,
+        default=Path(
+            "figures/solution_nmr_monomer_three_way_comparison_cumulative_by_year.svg"
+        ),
+        help="Output SVG for cumulative SOLUTION NMR monomer three-way comparison plot.",
     )
     parser.add_argument(
         "--nmr-monomer-precision-output-png",
@@ -1682,6 +2123,36 @@ def main() -> None:
             data_path=args.nmr_monomer_secondary_input,
             output_png=args.nmr_monomer_secondary_comparison_cumulative_output_png,
             output_svg=args.nmr_monomer_secondary_comparison_cumulative_output_svg,
+        )
+
+    if PlotKind.SOLUTION_NMR_MONOMER_STRIDE_COMPARISON in args.plots:
+        plotter.plot_solution_nmr_monomer_stride_comparison(
+            data_path=args.nmr_monomer_stride_input,
+            output_png=args.nmr_monomer_stride_comparison_output_png,
+            output_svg=args.nmr_monomer_stride_comparison_output_svg,
+        )
+
+    if PlotKind.SOLUTION_NMR_MONOMER_STRIDE_COMPARISON_CUMULATIVE in args.plots:
+        plotter.plot_solution_nmr_monomer_stride_comparison_cumulative(
+            data_path=args.nmr_monomer_stride_input,
+            output_png=args.nmr_monomer_stride_comparison_cumulative_output_png,
+            output_svg=args.nmr_monomer_stride_comparison_cumulative_output_svg,
+        )
+
+    if PlotKind.SOLUTION_NMR_MONOMER_THREE_WAY_COMPARISON in args.plots:
+        plotter.plot_solution_nmr_monomer_three_way_comparison(
+            secondary_data_path=args.nmr_monomer_secondary_input,
+            stride_data_path=args.nmr_monomer_stride_input,
+            output_png=args.nmr_monomer_three_way_comparison_output_png,
+            output_svg=args.nmr_monomer_three_way_comparison_output_svg,
+        )
+
+    if PlotKind.SOLUTION_NMR_MONOMER_THREE_WAY_COMPARISON_CUMULATIVE in args.plots:
+        plotter.plot_solution_nmr_monomer_three_way_comparison_cumulative(
+            secondary_data_path=args.nmr_monomer_secondary_input,
+            stride_data_path=args.nmr_monomer_stride_input,
+            output_png=args.nmr_monomer_three_way_comparison_cumulative_output_png,
+            output_svg=args.nmr_monomer_three_way_comparison_cumulative_output_svg,
         )
 
     if PlotKind.SOLUTION_NMR_MONOMER_PRECISION in args.plots:

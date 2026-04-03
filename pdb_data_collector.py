@@ -5,6 +5,7 @@ import csv
 import logging
 import os
 import shutil
+import subprocess
 import tempfile
 import time
 import requests
@@ -39,7 +40,9 @@ UNMODELED_INSTANCE_FEATURE_TYPES: frozenset[str] = frozenset(
 )
 DEFAULT_PDB_CACHE_DIR = Path("data/pdb_cache")
 LOCAL_DSSP_CANDIDATE = Path("dssp/build/mkdssp")
+LOCAL_STRIDE_CANDIDATE = Path("/tmp/stride_src/src/stride")
 DSSP_STATE_CODES: tuple[str, ...] = ("H", "B", "E", "G", "I", "T", "S", "-")
+STRIDE_STATE_CODES: tuple[str, ...] = ("H", "G", "I", "E", "B", "T", "C")
 DEFAULT_MAX_WORKERS = max(1, os.cpu_count() or 1)
 print(f"Using up to {DEFAULT_MAX_WORKERS} worker threads for concurrent tasks")
 
@@ -63,6 +66,7 @@ class DatasetKind(str, Enum):
     MEMBRANE_PROTEIN_COUNTS = "membrane_protein_counts"
     SOLUTION_NMR_WEIGHTS = "solution_nmr_weights"
     SOLUTION_NMR_MONOMER_SECONDARY = "solution_nmr_monomer_secondary"
+    SOLUTION_NMR_MONOMER_STRIDE = "solution_nmr_monomer_stride"
     SOLUTION_NMR_MONOMER_PRECISION = "solution_nmr_monomer_precision"
     SOLUTION_NMR_MONOMER_QUALITY = "solution_nmr_monomer_quality"
     SOLUTION_NMR_MONOMER_XRAY_HOMOLOGS = "solution_nmr_monomer_xray_homologs"
@@ -148,6 +152,27 @@ class SolutionNMRMonomerSecondaryByModelRecord:
     dssp_bend_fraction: float
     dssp_unassigned_percent: float
     dssp_secondary_structure_percent: float
+
+
+@dataclass(frozen=True)
+class SolutionNMRMonomerStrideRecord:
+    entry_id: str
+    year: int
+    sequence_length: int
+    secondary_structure_percent: float
+    helix_fraction: float
+    sheet_fraction: float
+    deposited_model_count: int
+    stride_alpha_helix_fraction: float
+    stride_3_10_helix_fraction: float
+    stride_pi_helix_fraction: float
+    stride_beta_strand_fraction: float
+    stride_isolated_beta_bridge_fraction: float
+    stride_turn_fraction: float
+    stride_coil_fraction: float
+    stride_secondary_structure_percent: float
+    stride_pdb_model_count: int
+    stride_analyzed_model_count: int
 
 
 @dataclass(frozen=True)
@@ -291,6 +316,24 @@ def resolve_dssp_executable(explicit_value: str) -> str | None:
 
     if LOCAL_DSSP_CANDIDATE.exists():
         return str(LOCAL_DSSP_CANDIDATE.resolve())
+
+    return None
+
+
+def resolve_stride_executable(explicit_value: str) -> str | None:
+    explicit_path = explicit_value.strip()
+    if explicit_path:
+        path = Path(explicit_path).expanduser()
+        if path.exists():
+            return str(path)
+        return None
+
+    resolved = shutil.which("stride")
+    if resolved:
+        return resolved
+
+    if LOCAL_STRIDE_CANDIDATE.exists():
+        return str(LOCAL_STRIDE_CANDIDATE.resolve())
 
     return None
 
@@ -471,6 +514,89 @@ def compute_dssp_state_coverages_for_chain(
         for state in DSSP_STATE_CODES
     }
     return coverages, len(model_texts), analyzed_model_count, per_model_coverages
+
+
+def compute_stride_state_coverages_for_chain(
+    session: requests.Session,
+    config: CollectorConfig,
+    cache_dir: Path,
+    entry_id: str,
+    chain_id: str,
+    sequence_length: int,
+    stride_executable: str,
+) -> tuple[dict[str, float], int, int]:
+    default_coverages = {state: -1.0 for state in STRIDE_STATE_CODES}
+    if sequence_length <= 0:
+        return default_coverages, 0, 0
+
+    try:
+        pdb_path = download_pdb_if_needed(
+            session=session,
+            config=config,
+            cache_dir=cache_dir,
+            entry_id=entry_id,
+        )
+    except Exception:
+        return default_coverages, 0, 0
+
+    model_texts = extract_model_pdb_texts(pdb_path)
+    if not model_texts:
+        return default_coverages, 0, 0
+
+    state_counts: Counter[str] = Counter()
+    analyzed_model_count = 0
+
+    for model_text in model_texts:
+        try:
+            with tempfile.NamedTemporaryFile(
+                "w", suffix=".pdb", encoding="utf-8", delete=True
+            ) as handle:
+                handle.write(model_text)
+                handle.flush()
+
+                process = subprocess.run(
+                    [stride_executable, handle.name],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+                if process.returncode != 0:
+                    continue
+
+                state_by_chain: dict[str, list[str]] = {}
+                for line in process.stdout.splitlines():
+                    if not line.startswith("ASG"):
+                        continue
+                    parts = line.split()
+                    if len(parts) < 6:
+                        continue
+                    chain_label = str(parts[2]).strip()
+                    state_raw = str(parts[5]).strip()
+                    if len(state_raw) != 1:
+                        continue
+                    state = state_raw if state_raw in STRIDE_STATE_CODES else "C"
+                    state_by_chain.setdefault(chain_label, []).append(state)
+
+                states = state_by_chain.get(chain_id, [])
+                if not states and len(state_by_chain) == 1:
+                    states = next(iter(state_by_chain.values()))
+                if not states:
+                    continue
+
+                analyzed_model_count += 1
+                state_counts.update(states)
+        except Exception:
+            continue
+
+    if analyzed_model_count <= 0:
+        return default_coverages, len(model_texts), 0
+
+    denominator = float(sequence_length * analyzed_model_count)
+    coverages = {
+        state: min(1.0, max(0.0, state_counts.get(state, 0) / denominator))
+        for state in STRIDE_STATE_CODES
+    }
+    return coverages, len(model_texts), analyzed_model_count
 
 
 def parse_models_ca_coords(
@@ -1508,6 +1634,146 @@ class RCSBClient:
             by_model_records.extend(secondary_by_model_records)
         return records, by_model_records
 
+    def iter_solution_nmr_monomer_stride_records_for_ids(
+        self,
+        entry_ids: list[str],
+        stride_executable: str,
+        pdb_cache_dir: Path,
+    ) -> Iterator[SolutionNMRMonomerStrideRecord]:
+        query = """
+        query($ids:[String!]!) {
+          entries(entry_ids:$ids) {
+            rcsb_id
+            rcsb_entry_info {
+              deposited_model_count
+            }
+            rcsb_accession_info {
+              deposit_date
+            }
+            polymer_entities {
+              entity_poly {
+                type
+                rcsb_entity_polymer_type
+                pdbx_strand_id
+                rcsb_sample_sequence_length
+              }
+              polymer_entity_instances {
+                rcsb_id
+                rcsb_polymer_instance_feature_summary {
+                  type
+                  coverage
+                }
+              }
+            }
+          }
+        }
+        """
+        payload = {"query": query, "variables": {"ids": entry_ids}}
+        data = self._post_json(self.config.graphql_url, payload)
+        entries = data.get("data", {}).get("entries", [])
+
+        with ThreadPoolExecutor(max_workers=self.config.max_workers) as executor:
+            future_map = {
+                executor.submit(
+                    self._compute_solution_nmr_monomer_stride_for_entry,
+                    entry=entry,
+                    stride_executable=stride_executable,
+                    pdb_cache_dir=pdb_cache_dir,
+                ): idx
+                for idx, entry in enumerate(entries, start=1)
+            }
+            for future in as_completed(future_map):
+                record = future.result()
+                if record is None:
+                    continue
+                yield record
+
+    def _compute_solution_nmr_monomer_stride_for_entry(
+        self,
+        entry: dict[str, Any] | None,
+        stride_executable: str,
+        pdb_cache_dir: Path,
+    ) -> SolutionNMRMonomerStrideRecord | None:
+        if not entry:
+            return None
+        context = self._extract_solution_nmr_monomer_context(entry)
+        if context is None:
+            return None
+        entry_id, year, model_count, polymer_entity, chain_id = context
+        entity_poly = polymer_entity.get("entity_poly") or {}
+
+        sequence_length_raw = entity_poly.get("rcsb_sample_sequence_length")
+        if sequence_length_raw is None or int(sequence_length_raw) <= 0:
+            return None
+        sequence_length = int(sequence_length_raw)
+
+        instances = polymer_entity.get("polymer_entity_instances") or []
+        if len(instances) != 1:
+            return None
+        feature_summary = instances[0].get("rcsb_polymer_instance_feature_summary") or []
+        coverage_by_type: dict[str, float] = {}
+        for item in feature_summary:
+            if not item:
+                continue
+            feature_type = item.get("type")
+            coverage = item.get("coverage")
+            if feature_type and coverage is not None:
+                coverage_by_type[str(feature_type)] = float(coverage)
+
+        helix_fraction = coverage_by_type.get("HELIX_P", -1.0)
+        sheet_fraction = coverage_by_type.get("SHEET", -1.0)
+        unassigned_fraction = coverage_by_type.get("UNASSIGNED_SEC_STRUCT", -1.0)
+        secondary_fraction = 1.0 - unassigned_fraction
+        (
+            stride_coverages,
+            stride_pdb_model_count,
+            stride_analyzed_model_count,
+        ) = compute_stride_state_coverages_for_chain(
+            session=self.session,
+            config=self.config,
+            cache_dir=pdb_cache_dir,
+            entry_id=entry_id,
+            chain_id=chain_id,
+            sequence_length=sequence_length,
+            stride_executable=stride_executable,
+        )
+        stride_coil_fraction = stride_coverages["C"]
+        stride_secondary_percent = (1.0 - stride_coil_fraction) * 100.0
+
+        return SolutionNMRMonomerStrideRecord(
+            entry_id=entry_id,
+            year=year,
+            sequence_length=sequence_length,
+            secondary_structure_percent=secondary_fraction * 100.0,
+            helix_fraction=helix_fraction,
+            sheet_fraction=sheet_fraction,
+            deposited_model_count=model_count,
+            stride_alpha_helix_fraction=stride_coverages["H"],
+            stride_3_10_helix_fraction=stride_coverages["G"],
+            stride_pi_helix_fraction=stride_coverages["I"],
+            stride_beta_strand_fraction=stride_coverages["E"],
+            stride_isolated_beta_bridge_fraction=stride_coverages["B"],
+            stride_turn_fraction=stride_coverages["T"],
+            stride_coil_fraction=stride_coil_fraction,
+            stride_secondary_structure_percent=stride_secondary_percent,
+            stride_pdb_model_count=stride_pdb_model_count,
+            stride_analyzed_model_count=stride_analyzed_model_count,
+        )
+
+    def fetch_solution_nmr_monomer_stride_records_for_ids(
+        self,
+        entry_ids: list[str],
+        stride_executable: str,
+        pdb_cache_dir: Path,
+    ) -> list[SolutionNMRMonomerStrideRecord]:
+        return list(
+            self.iter_solution_nmr_monomer_stride_records_for_ids(
+                entry_ids=entry_ids,
+                stride_executable=stride_executable,
+                pdb_cache_dir=pdb_cache_dir,
+            )
+        )
+
     def fetch_solution_nmr_monomer_core_region_records_for_ids(
         self, entry_ids: list[str]
     ) -> list[SolutionNMRMonomerCoreRegionRecord]:
@@ -1924,6 +2190,53 @@ class SolutionNMRMonomerSecondaryCollector:
                 yield record
 
     def collect(self) -> list[SolutionNMRMonomerSecondaryRecord]:
+        records = list(self.iter_records())
+        return sorted(records, key=lambda record: (record.year, record.entry_id))
+
+
+class SolutionNMRMonomerStrideCollector:
+    def __init__(
+        self,
+        client: RCSBClient,
+        config: CollectorConfig,
+        stride_executable: str,
+        cache_dir: Path,
+    ) -> None:
+        self.client = client
+        self.config = config
+        self.stride_executable = stride_executable
+        self.cache_dir = cache_dir
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+
+    def iter_batches(self) -> Iterator[list[SolutionNMRMonomerStrideRecord]]:
+        entry_ids = fetch_solution_nmr_entry_ids(
+            client=self.client,
+            log_label="SOLUTION NMR monomer-stride",
+        )
+        batches = list(chunked(entry_ids, self.config.graphql_batch_size))
+        if not batches:
+            return
+
+        for batch_idx, batch in enumerate(batches, start=1):
+            batch_records = self.client.fetch_solution_nmr_monomer_stride_records_for_ids(
+                entry_ids=batch,
+                stride_executable=self.stride_executable,
+                pdb_cache_dir=self.cache_dir,
+            )
+            LOGGER.info(
+                "SOLUTION NMR monomer-stride: processed batch %d/%d (entries: %d)",
+                batch_idx,
+                len(batches),
+                len(batch_records),
+            )
+            yield batch_records
+
+    def iter_records(self) -> Iterator[SolutionNMRMonomerStrideRecord]:
+        for batch_records in self.iter_batches():
+            for record in batch_records:
+                yield record
+
+    def collect(self) -> list[SolutionNMRMonomerStrideRecord]:
         records = list(self.iter_records())
         return sorted(records, key=lambda record: (record.year, record.entry_id))
 
@@ -2648,6 +2961,112 @@ def write_solution_nmr_monomer_secondary_csv(
     )
 
 
+def write_solution_nmr_monomer_stride_csv(
+    records: list[SolutionNMRMonomerStrideRecord], output_path: Path
+) -> None:
+    write_csv_rows(
+        output_path=output_path,
+        header=[
+            "entry_id",
+            "year",
+            "sequence_length",
+            "secondary_structure_percent",
+            "helix_fraction",
+            "sheet_fraction",
+            "deposited_model_count",
+            "stride_alpha_helix_fraction",
+            "stride_3_10_helix_fraction",
+            "stride_pi_helix_fraction",
+            "stride_beta_strand_fraction",
+            "stride_isolated_beta_bridge_fraction",
+            "stride_turn_fraction",
+            "stride_coil_fraction",
+            "stride_secondary_structure_percent",
+            "stride_pdb_model_count",
+            "stride_analyzed_model_count",
+        ],
+        rows=(
+            (
+                r.entry_id,
+                r.year,
+                r.sequence_length,
+                f"{r.secondary_structure_percent:.3f}",
+                f"{r.helix_fraction:.6f}",
+                f"{r.sheet_fraction:.6f}",
+                r.deposited_model_count,
+                f"{r.stride_alpha_helix_fraction:.6f}",
+                f"{r.stride_3_10_helix_fraction:.6f}",
+                f"{r.stride_pi_helix_fraction:.6f}",
+                f"{r.stride_beta_strand_fraction:.6f}",
+                f"{r.stride_isolated_beta_bridge_fraction:.6f}",
+                f"{r.stride_turn_fraction:.6f}",
+                f"{r.stride_coil_fraction:.6f}",
+                f"{r.stride_secondary_structure_percent:.3f}",
+                r.stride_pdb_model_count,
+                r.stride_analyzed_model_count,
+            )
+            for r in records
+        ),
+    )
+
+
+def stream_solution_nmr_monomer_stride_csv(
+    records: Iterator[SolutionNMRMonomerStrideRecord],
+    output_path: Path,
+) -> int:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    count = 0
+    with output_path.open("w", newline="", encoding="utf-8") as csvfile:
+        writer = csv.writer(csvfile)
+        writer.writerow(
+            [
+                "entry_id",
+                "year",
+                "sequence_length",
+                "secondary_structure_percent",
+                "helix_fraction",
+                "sheet_fraction",
+                "deposited_model_count",
+                "stride_alpha_helix_fraction",
+                "stride_3_10_helix_fraction",
+                "stride_pi_helix_fraction",
+                "stride_beta_strand_fraction",
+                "stride_isolated_beta_bridge_fraction",
+                "stride_turn_fraction",
+                "stride_coil_fraction",
+                "stride_secondary_structure_percent",
+                "stride_pdb_model_count",
+                "stride_analyzed_model_count",
+            ]
+        )
+        csvfile.flush()
+        for record in records:
+            writer.writerow(
+                (
+                    record.entry_id,
+                    record.year,
+                    record.sequence_length,
+                    f"{record.secondary_structure_percent:.3f}",
+                    f"{record.helix_fraction:.6f}",
+                    f"{record.sheet_fraction:.6f}",
+                    record.deposited_model_count,
+                    f"{record.stride_alpha_helix_fraction:.6f}",
+                    f"{record.stride_3_10_helix_fraction:.6f}",
+                    f"{record.stride_pi_helix_fraction:.6f}",
+                    f"{record.stride_beta_strand_fraction:.6f}",
+                    f"{record.stride_isolated_beta_bridge_fraction:.6f}",
+                    f"{record.stride_turn_fraction:.6f}",
+                    f"{record.stride_coil_fraction:.6f}",
+                    f"{record.stride_secondary_structure_percent:.3f}",
+                    record.stride_pdb_model_count,
+                    record.stride_analyzed_model_count,
+                )
+            )
+            csvfile.flush()
+            count += 1
+    return count
+
+
 def stream_solution_nmr_monomer_secondary_csv(
     records: Iterator[SolutionNMRMonomerSecondaryRecord],
     output_path: Path,
@@ -3207,6 +3626,7 @@ def parse_dataset_kinds(raw_value: str) -> list[DatasetKind]:
             DatasetKind.MEMBRANE_PROTEIN_COUNTS,
             DatasetKind.SOLUTION_NMR_WEIGHTS,
             DatasetKind.SOLUTION_NMR_MONOMER_SECONDARY,
+            DatasetKind.SOLUTION_NMR_MONOMER_STRIDE,
             DatasetKind.SOLUTION_NMR_MONOMER_PRECISION,
             DatasetKind.SOLUTION_NMR_MONOMER_QUALITY,
             DatasetKind.SOLUTION_NMR_MONOMER_XRAY_HOMOLOGS,
@@ -3240,7 +3660,7 @@ def parse_args() -> argparse.Namespace:
             DatasetKind.SOLUTION_NMR_MONOMER_SECONDARY,
         ],
         help="Comma-separated dataset kinds or 'all'. "
-        "Available: method_counts, membrane_protein_counts, solution_nmr_weights, solution_nmr_monomer_secondary, solution_nmr_monomer_precision, solution_nmr_monomer_quality, solution_nmr_monomer_xray_homologs, solution_nmr_monomer_xray_rmsd (default: the first three).",
+        "Available: method_counts, membrane_protein_counts, solution_nmr_weights, solution_nmr_monomer_secondary, solution_nmr_monomer_stride, solution_nmr_monomer_precision, solution_nmr_monomer_quality, solution_nmr_monomer_xray_homologs, solution_nmr_monomer_xray_rmsd (default: the first three).",
     )
     parser.add_argument(
         "--counts-output",
@@ -3293,6 +3713,27 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Recompute monomer-secondary CSVs from scratch (ignore existing rows and "
             "disable resume skipping)."
+        ),
+    )
+    parser.add_argument(
+        "--solution-nmr-monomer-stride-output",
+        type=Path,
+        default=Path("data/solution_nmr_monomer_stride_structure.csv"),
+        help="Output CSV path for solution_nmr_monomer_stride dataset.",
+    )
+    parser.add_argument(
+        "--solution-nmr-monomer-stride-cache-dir",
+        type=Path,
+        default=Path("data/pdb_cache"),
+        help="Directory to cache downloaded PDB files for STRIDE in monomer-stride dataset.",
+    )
+    parser.add_argument(
+        "--solution-nmr-monomer-stride-executable",
+        type=str,
+        default="",
+        help=(
+            "Path to STRIDE executable for monomer-stride dataset. "
+            "If omitted, script tries stride and /tmp/stride_src/src/stride."
         ),
     )
     parser.add_argument(
@@ -3547,6 +3988,35 @@ def main() -> None:
             sec_model_count,
             args.solution_nmr_monomer_secondary_by_model_output,
             new_sec_model_count,
+        )
+
+    if DatasetKind.SOLUTION_NMR_MONOMER_STRIDE in args.datasets:
+        stride_executable = resolve_stride_executable(
+            args.solution_nmr_monomer_stride_executable
+        )
+        if stride_executable is None:
+            raise RuntimeError(
+                "STRIDE executable not found for solution_nmr_monomer_stride. "
+                "Provide --solution-nmr-monomer-stride-executable or install stride."
+            )
+        LOGGER.info(
+            "SOLUTION NMR monomer-stride: using STRIDE executable %s",
+            stride_executable,
+        )
+        stride_collector = SolutionNMRMonomerStrideCollector(
+            client=client,
+            config=config,
+            stride_executable=stride_executable,
+            cache_dir=Path(args.solution_nmr_monomer_stride_cache_dir),
+        )
+        stride_count = stream_solution_nmr_monomer_stride_csv(
+            records=stride_collector.iter_records(),
+            output_path=Path(args.solution_nmr_monomer_stride_output),
+        )
+        LOGGER.info(
+            "Saved %d records to %s",
+            stride_count,
+            args.solution_nmr_monomer_stride_output,
         )
 
     if DatasetKind.SOLUTION_NMR_MONOMER_PRECISION in args.datasets:
