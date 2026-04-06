@@ -66,7 +66,13 @@ class DatasetKind(str, Enum):
     MEMBRANE_PROTEIN_COUNTS = "membrane_protein_counts"
     SOLUTION_NMR_WEIGHTS = "solution_nmr_weights"
     SOLUTION_NMR_MONOMER_SECONDARY = "solution_nmr_monomer_secondary"
+    SOLUTION_NMR_MONOMER_SECONDARY_MODELED_FIRST_MODEL = (
+        "solution_nmr_monomer_secondary_modeled_first_model"
+    )
     SOLUTION_NMR_MONOMER_STRIDE = "solution_nmr_monomer_stride"
+    SOLUTION_NMR_MONOMER_STRIDE_MODELED_FIRST_MODEL = (
+        "solution_nmr_monomer_stride_modeled_first_model"
+    )
     SOLUTION_NMR_MONOMER_PRECISION = "solution_nmr_monomer_precision"
     SOLUTION_NMR_MONOMER_QUALITY = "solution_nmr_monomer_quality"
     SOLUTION_NMR_MONOMER_XRAY_HOMOLOGS = "solution_nmr_monomer_xray_homologs"
@@ -131,6 +137,28 @@ class SolutionNMRMonomerSecondaryRecord:
 
 
 @dataclass(frozen=True)
+class SolutionNMRMonomerSecondaryModeledFirstModelRecord:
+    entry_id: str
+    year: int
+    chain_id: str
+    modeled_start_seq_id: int
+    modeled_end_seq_id: int
+    modeled_sequence_length: int
+    secondary_structure_percent: float
+    helix_fraction: float
+    sheet_fraction: float
+    dssp_alpha_helix_fraction: float
+    dssp_isolated_beta_bridge_fraction: float
+    dssp_beta_strand_fraction: float
+    dssp_3_10_helix_fraction: float
+    dssp_pi_helix_fraction: float
+    dssp_turn_fraction: float
+    dssp_bend_fraction: float
+    dssp_unassigned_percent: float
+    dssp_secondary_structure_percent: float
+
+
+@dataclass(frozen=True)
 class SolutionNMRMonomerSecondaryByModelRecord:
     entry_id: str
     year: int
@@ -173,6 +201,27 @@ class SolutionNMRMonomerStrideRecord:
     stride_secondary_structure_percent: float
     stride_pdb_model_count: int
     stride_analyzed_model_count: int
+
+
+@dataclass(frozen=True)
+class SolutionNMRMonomerStrideModeledFirstModelRecord:
+    entry_id: str
+    year: int
+    chain_id: str
+    modeled_start_seq_id: int
+    modeled_end_seq_id: int
+    modeled_sequence_length: int
+    secondary_structure_percent: float
+    helix_fraction: float
+    sheet_fraction: float
+    stride_alpha_helix_fraction: float
+    stride_3_10_helix_fraction: float
+    stride_pi_helix_fraction: float
+    stride_beta_strand_fraction: float
+    stride_isolated_beta_bridge_fraction: float
+    stride_turn_fraction: float
+    stride_coil_fraction: float
+    stride_secondary_structure_percent: float
 
 
 @dataclass(frozen=True)
@@ -599,6 +648,189 @@ def compute_stride_state_coverages_for_chain(
     return coverages, len(model_texts), analyzed_model_count
 
 
+def compute_dssp_state_coverages_for_chain_modeled_first_model(
+    session: requests.Session,
+    config: CollectorConfig,
+    cache_dir: Path,
+    entry_id: str,
+    chain_id: str,
+    modeled_sequence_length: int,
+    modeled_auth_seq_ids: set[int],
+    dssp_executable: str,
+) -> tuple[dict[str, float], int, int]:
+    default_coverages = {state: -1.0 for state in DSSP_STATE_CODES}
+    if modeled_sequence_length <= 0 or not modeled_auth_seq_ids:
+        return default_coverages, 0, 0
+
+    try:
+        pdb_path = download_pdb_if_needed(
+            session=session,
+            config=config,
+            cache_dir=cache_dir,
+            entry_id=entry_id,
+        )
+    except Exception:
+        return default_coverages, 0, 0
+
+    model_texts = extract_model_pdb_texts(pdb_path)
+    if not model_texts:
+        return default_coverages, 0, 0
+
+    parser = PDBParser(QUIET=True)
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w", suffix=".pdb", encoding="utf-8", delete=True
+        ) as handle:
+            handle.write(model_texts[0])
+            handle.flush()
+
+            structure = parser.get_structure(entry_id, handle.name)
+            model = next(structure.get_models(), None)
+            if model is None:
+                return default_coverages, len(model_texts), 0
+
+            dssp_result = BioDSSP(
+                model,
+                handle.name,
+                dssp=dssp_executable,
+                file_type="PDB",
+            )
+
+            state_by_chain: dict[str, dict[int, str]] = {}
+            for key in dssp_result.keys():
+                chain_label = str(key[0]).strip()
+                residue_key = key[1]
+                try:
+                    auth_seq_id = int(residue_key[1])
+                except (TypeError, ValueError, IndexError):
+                    continue
+                state_raw = str(dssp_result[key][2]).strip() or "-"
+                state = state_raw if state_raw in DSSP_STATE_CODES else "-"
+                chain_states = state_by_chain.setdefault(chain_label, {})
+                chain_states.setdefault(auth_seq_id, state)
+
+            chain_states = state_by_chain.get(chain_id)
+            if not chain_states and len(state_by_chain) == 1:
+                chain_states = next(iter(state_by_chain.values()))
+            if not chain_states:
+                return default_coverages, len(model_texts), 0
+
+            filtered_states = [
+                chain_states.get(auth_seq_id, "-")
+                for auth_seq_id in sorted(modeled_auth_seq_ids)
+            ]
+            missing_count = max(0, modeled_sequence_length - len(filtered_states))
+            if missing_count > 0:
+                filtered_states.extend(["-"] * missing_count)
+            if not filtered_states:
+                return default_coverages, len(model_texts), 0
+
+            state_counts = Counter(filtered_states)
+            denominator = float(modeled_sequence_length)
+            coverages = {
+                state: min(1.0, max(0.0, state_counts.get(state, 0) / denominator))
+                for state in DSSP_STATE_CODES
+            }
+            return coverages, len(model_texts), 1
+    except Exception:
+        return default_coverages, len(model_texts), 0
+
+
+def compute_stride_state_coverages_for_chain_modeled_first_model(
+    session: requests.Session,
+    config: CollectorConfig,
+    cache_dir: Path,
+    entry_id: str,
+    chain_id: str,
+    modeled_sequence_length: int,
+    modeled_auth_seq_ids: set[int],
+    stride_executable: str,
+) -> tuple[dict[str, float], int, int]:
+    default_coverages = {state: -1.0 for state in STRIDE_STATE_CODES}
+    if modeled_sequence_length <= 0 or not modeled_auth_seq_ids:
+        return default_coverages, 0, 0
+
+    try:
+        pdb_path = download_pdb_if_needed(
+            session=session,
+            config=config,
+            cache_dir=cache_dir,
+            entry_id=entry_id,
+        )
+    except Exception:
+        return default_coverages, 0, 0
+
+    model_texts = extract_model_pdb_texts(pdb_path)
+    if not model_texts:
+        return default_coverages, 0, 0
+
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w", suffix=".pdb", encoding="utf-8", delete=True
+        ) as handle:
+            handle.write(model_texts[0])
+            handle.flush()
+
+            process = subprocess.run(
+                [stride_executable, handle.name],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if process.returncode != 0:
+                return default_coverages, len(model_texts), 0
+
+            state_by_chain: dict[str, dict[int, str]] = {}
+            for line in process.stdout.splitlines():
+                if not line.startswith("ASG"):
+                    continue
+                parts = line.split()
+                if len(parts) < 6:
+                    continue
+                chain_label = str(parts[2]).strip()
+                seq_id_raw = str(parts[3]).strip()
+                if not seq_id_raw:
+                    continue
+                if seq_id_raw[-1:].isalpha():
+                    seq_id_raw = seq_id_raw[:-1]
+                try:
+                    auth_seq_id = int(seq_id_raw)
+                except ValueError:
+                    continue
+                state_raw = str(parts[5]).strip()
+                if len(state_raw) != 1:
+                    continue
+                state = state_raw if state_raw in STRIDE_STATE_CODES else "C"
+                chain_states = state_by_chain.setdefault(chain_label, {})
+                chain_states.setdefault(auth_seq_id, state)
+
+            chain_states = state_by_chain.get(chain_id)
+            if not chain_states and len(state_by_chain) == 1:
+                chain_states = next(iter(state_by_chain.values()))
+            if not chain_states:
+                return default_coverages, len(model_texts), 0
+
+            filtered_states = [
+                chain_states.get(auth_seq_id, "C")
+                for auth_seq_id in sorted(modeled_auth_seq_ids)
+            ]
+            missing_count = max(0, modeled_sequence_length - len(filtered_states))
+            if missing_count > 0:
+                filtered_states.extend(["C"] * missing_count)
+            if not filtered_states:
+                return default_coverages, len(model_texts), 0
+
+            state_counts = Counter(filtered_states)
+            denominator = float(modeled_sequence_length)
+            coverages = {
+                state: min(1.0, max(0.0, state_counts.get(state, 0) / denominator))
+                for state in STRIDE_STATE_CODES
+            }
+            return coverages, len(model_texts), 1
+    except Exception:
+        return default_coverages, len(model_texts), 0
+
+
 def parse_models_ca_coords(
     pdb_path: Path,
     chain_id: str,
@@ -740,6 +972,62 @@ def _modeled_sequence_from_instance_features(
     )
 
 
+def _modeled_label_seq_ids_from_instance_features(
+    sequence_length: int, instance_features: list[dict[str, Any] | None]
+) -> set[int]:
+    if sequence_length <= 0:
+        return set()
+    modeled_seq_ids = set(range(1, sequence_length + 1))
+    for feature in instance_features:
+        if not feature:
+            continue
+        feature_type = str(feature.get("type") or "")
+        if feature_type not in UNMODELED_INSTANCE_FEATURE_TYPES:
+            continue
+        for pos in feature.get("feature_positions") or []:
+            if not pos:
+                continue
+            beg = pos.get("beg_seq_id")
+            end = pos.get("end_seq_id")
+            if beg is None:
+                continue
+            try:
+                beg_i = int(beg)
+                end_i = int(end) if end is not None else beg_i
+            except (TypeError, ValueError):
+                continue
+            start = max(1, min(beg_i, end_i))
+            stop = min(sequence_length, max(beg_i, end_i))
+            if start > stop:
+                continue
+            for seq_id in range(start, stop + 1):
+                modeled_seq_ids.discard(seq_id)
+    return modeled_seq_ids
+
+
+def _map_label_seq_ids_to_auth_seq_ids(
+    label_seq_ids: set[int], auth_mapping_raw: Any
+) -> set[int]:
+    if not label_seq_ids:
+        return set()
+
+    mapped_auth_seq_ids: set[int] = set()
+    if isinstance(auth_mapping_raw, list) and auth_mapping_raw:
+        for label_seq_id in sorted(label_seq_ids):
+            if label_seq_id <= 0 or label_seq_id > len(auth_mapping_raw):
+                continue
+            auth_seq_raw = auth_mapping_raw[label_seq_id - 1]
+            try:
+                mapped_auth_seq_ids.add(int(str(auth_seq_raw).strip()))
+            except (TypeError, ValueError):
+                continue
+    if mapped_auth_seq_ids:
+        return mapped_auth_seq_ids
+
+    # Fallback for entries without mapping: treat label ids as auth ids.
+    return {int(seq_id) for seq_id in label_seq_ids}
+
+
 def _sequence_weight_kda(sequence: str, seq_type: str) -> float | None:
     if sequence_molecular_weight is None:
         return None
@@ -844,6 +1132,26 @@ class RCSBClient:
             return None
 
         return str(entry_id), year, model_count, polymer_entity, chain_id
+
+    @staticmethod
+    def _extract_modeled_residue_sets_for_instance(
+        sequence_length: int,
+        instance: dict[str, Any],
+    ) -> tuple[set[int], set[int]]:
+        instance_features = instance.get("rcsb_polymer_instance_feature") or []
+        modeled_label_seq_ids = _modeled_label_seq_ids_from_instance_features(
+            sequence_length=sequence_length,
+            instance_features=instance_features,
+        )
+        identifiers = (
+            instance.get("rcsb_polymer_entity_instance_container_identifiers") or {}
+        )
+        auth_mapping_raw = identifiers.get("auth_to_entity_poly_seq_mapping") or []
+        modeled_auth_seq_ids = _map_label_seq_ids_to_auth_seq_ids(
+            label_seq_ids=modeled_label_seq_ids,
+            auth_mapping_raw=auth_mapping_raw,
+        )
+        return modeled_label_seq_ids, modeled_auth_seq_ids
 
     @staticmethod
     def _extract_secondary_label_ranges(
@@ -1552,7 +1860,7 @@ class RCSBClient:
         context = self._extract_solution_nmr_monomer_context(entry)
         if context is None:
             return None, []
-        entry_id, year, model_count, polymer_entity, chain_id = context
+        entry_id, year, _model_count, polymer_entity, chain_id = context
         entity_poly = polymer_entity.get("entity_poly") or {}
 
         sequence_length = entity_poly.get("rcsb_sample_sequence_length")
@@ -1668,6 +1976,168 @@ class RCSBClient:
             records.append(secondary_record)
             by_model_records.extend(secondary_by_model_records)
         return records, by_model_records
+
+    def iter_solution_nmr_monomer_secondary_modeled_first_model_records_for_ids(
+        self,
+        entry_ids: list[str],
+        dssp_executable: str,
+        pdb_cache_dir: Path,
+    ) -> Iterator[SolutionNMRMonomerSecondaryModeledFirstModelRecord]:
+        query = """
+        query($ids:[String!]!) {
+          entries(entry_ids:$ids) {
+            rcsb_id
+            rcsb_entry_info {
+              deposited_model_count
+            }
+            rcsb_accession_info {
+              deposit_date
+            }
+            polymer_entities {
+              entity_poly {
+                type
+                rcsb_entity_polymer_type
+                pdbx_strand_id
+                rcsb_sample_sequence_length
+              }
+              polymer_entity_instances {
+                rcsb_id
+                rcsb_polymer_entity_instance_container_identifiers {
+                  auth_to_entity_poly_seq_mapping
+                }
+                rcsb_polymer_instance_feature_summary {
+                  type
+                  coverage
+                }
+                rcsb_polymer_instance_feature {
+                  type
+                  feature_positions {
+                    beg_seq_id
+                    end_seq_id
+                  }
+                }
+              }
+            }
+          }
+        }
+        """
+        payload = {"query": query, "variables": {"ids": entry_ids}}
+        data = self._post_json(self.config.graphql_url, payload)
+        entries = data.get("data", {}).get("entries", [])
+
+        with ThreadPoolExecutor(max_workers=self.config.max_workers) as executor:
+            future_map = {
+                executor.submit(
+                    self._compute_solution_nmr_monomer_secondary_modeled_first_model_for_entry,
+                    entry=entry,
+                    dssp_executable=dssp_executable,
+                    pdb_cache_dir=pdb_cache_dir,
+                ): idx
+                for idx, entry in enumerate(entries, start=1)
+            }
+            for future in as_completed(future_map):
+                record = future.result()
+                if record is None:
+                    continue
+                yield record
+
+    def _compute_solution_nmr_monomer_secondary_modeled_first_model_for_entry(
+        self,
+        entry: dict[str, Any] | None,
+        dssp_executable: str,
+        pdb_cache_dir: Path,
+    ) -> SolutionNMRMonomerSecondaryModeledFirstModelRecord | None:
+        if not entry:
+            return None
+        context = self._extract_solution_nmr_monomer_context(entry)
+        if context is None:
+            return None
+        entry_id, year, _model_count, polymer_entity, chain_id = context
+        entity_poly = polymer_entity.get("entity_poly") or {}
+
+        sequence_length_raw = entity_poly.get("rcsb_sample_sequence_length")
+        if sequence_length_raw is None or int(sequence_length_raw) <= 0:
+            return None
+        sequence_length = int(sequence_length_raw)
+
+        instances = polymer_entity.get("polymer_entity_instances") or []
+        if len(instances) != 1:
+            return None
+        instance = instances[0] or {}
+        (
+            modeled_label_seq_ids,
+            modeled_auth_seq_ids,
+        ) = self._extract_modeled_residue_sets_for_instance(
+            sequence_length=sequence_length,
+            instance=instance,
+        )
+        modeled_sequence_length = len(modeled_label_seq_ids)
+        if modeled_sequence_length <= 0:
+            return None
+        modeled_start_seq_id = min(modeled_auth_seq_ids)
+        modeled_end_seq_id = max(modeled_auth_seq_ids)
+
+        feature_summary = instance.get("rcsb_polymer_instance_feature_summary") or []
+        coverage_by_type: dict[str, float] = {}
+        for item in feature_summary:
+            if not item:
+                continue
+            feature_type = item.get("type")
+            coverage = item.get("coverage")
+            if feature_type and coverage is not None:
+                coverage_by_type[str(feature_type)] = float(coverage)
+
+        helix_fraction = coverage_by_type.get("HELIX_P", -1.0)
+        sheet_fraction = coverage_by_type.get("SHEET", -1.0)
+        unassigned_fraction = coverage_by_type.get("UNASSIGNED_SEC_STRUCT", -1.0)
+        secondary_fraction = 1.0 - unassigned_fraction
+        dssp_coverages, _, _ = compute_dssp_state_coverages_for_chain_modeled_first_model(
+            session=self.session,
+            config=self.config,
+            cache_dir=pdb_cache_dir,
+            entry_id=entry_id,
+            chain_id=chain_id,
+            modeled_sequence_length=modeled_sequence_length,
+            modeled_auth_seq_ids=modeled_auth_seq_ids,
+            dssp_executable=dssp_executable,
+        )
+        dssp_unassigned_percent = dssp_coverages["-"]
+        dssp_secondary_structure_percent = (1.0 - dssp_unassigned_percent) * 100.0
+
+        return SolutionNMRMonomerSecondaryModeledFirstModelRecord(
+            entry_id=entry_id,
+            year=year,
+            chain_id=chain_id,
+            modeled_start_seq_id=modeled_start_seq_id,
+            modeled_end_seq_id=modeled_end_seq_id,
+            modeled_sequence_length=modeled_sequence_length,
+            secondary_structure_percent=secondary_fraction * 100.0,
+            helix_fraction=helix_fraction,
+            sheet_fraction=sheet_fraction,
+            dssp_alpha_helix_fraction=dssp_coverages["H"],
+            dssp_isolated_beta_bridge_fraction=dssp_coverages["B"],
+            dssp_beta_strand_fraction=dssp_coverages["E"],
+            dssp_3_10_helix_fraction=dssp_coverages["G"],
+            dssp_pi_helix_fraction=dssp_coverages["I"],
+            dssp_turn_fraction=dssp_coverages["T"],
+            dssp_bend_fraction=dssp_coverages["S"],
+            dssp_unassigned_percent=dssp_unassigned_percent,
+            dssp_secondary_structure_percent=dssp_secondary_structure_percent,
+        )
+
+    def fetch_solution_nmr_monomer_secondary_modeled_first_model_records_for_ids(
+        self,
+        entry_ids: list[str],
+        dssp_executable: str,
+        pdb_cache_dir: Path,
+    ) -> list[SolutionNMRMonomerSecondaryModeledFirstModelRecord]:
+        return list(
+            self.iter_solution_nmr_monomer_secondary_modeled_first_model_records_for_ids(
+                entry_ids=entry_ids,
+                dssp_executable=dssp_executable,
+                pdb_cache_dir=pdb_cache_dir,
+            )
+        )
 
     def iter_solution_nmr_monomer_stride_records_for_ids(
         self,
@@ -1803,6 +2273,167 @@ class RCSBClient:
     ) -> list[SolutionNMRMonomerStrideRecord]:
         return list(
             self.iter_solution_nmr_monomer_stride_records_for_ids(
+                entry_ids=entry_ids,
+                stride_executable=stride_executable,
+                pdb_cache_dir=pdb_cache_dir,
+            )
+        )
+
+    def iter_solution_nmr_monomer_stride_modeled_first_model_records_for_ids(
+        self,
+        entry_ids: list[str],
+        stride_executable: str,
+        pdb_cache_dir: Path,
+    ) -> Iterator[SolutionNMRMonomerStrideModeledFirstModelRecord]:
+        query = """
+        query($ids:[String!]!) {
+          entries(entry_ids:$ids) {
+            rcsb_id
+            rcsb_entry_info {
+              deposited_model_count
+            }
+            rcsb_accession_info {
+              deposit_date
+            }
+            polymer_entities {
+              entity_poly {
+                type
+                rcsb_entity_polymer_type
+                pdbx_strand_id
+                rcsb_sample_sequence_length
+              }
+              polymer_entity_instances {
+                rcsb_id
+                rcsb_polymer_entity_instance_container_identifiers {
+                  auth_to_entity_poly_seq_mapping
+                }
+                rcsb_polymer_instance_feature_summary {
+                  type
+                  coverage
+                }
+                rcsb_polymer_instance_feature {
+                  type
+                  feature_positions {
+                    beg_seq_id
+                    end_seq_id
+                  }
+                }
+              }
+            }
+          }
+        }
+        """
+        payload = {"query": query, "variables": {"ids": entry_ids}}
+        data = self._post_json(self.config.graphql_url, payload)
+        entries = data.get("data", {}).get("entries", [])
+
+        with ThreadPoolExecutor(max_workers=self.config.max_workers) as executor:
+            future_map = {
+                executor.submit(
+                    self._compute_solution_nmr_monomer_stride_modeled_first_model_for_entry,
+                    entry=entry,
+                    stride_executable=stride_executable,
+                    pdb_cache_dir=pdb_cache_dir,
+                ): idx
+                for idx, entry in enumerate(entries, start=1)
+            }
+            for future in as_completed(future_map):
+                record = future.result()
+                if record is None:
+                    continue
+                yield record
+
+    def _compute_solution_nmr_monomer_stride_modeled_first_model_for_entry(
+        self,
+        entry: dict[str, Any] | None,
+        stride_executable: str,
+        pdb_cache_dir: Path,
+    ) -> SolutionNMRMonomerStrideModeledFirstModelRecord | None:
+        if not entry:
+            return None
+        context = self._extract_solution_nmr_monomer_context(entry)
+        if context is None:
+            return None
+        entry_id, year, model_count, polymer_entity, chain_id = context
+        entity_poly = polymer_entity.get("entity_poly") or {}
+
+        sequence_length_raw = entity_poly.get("rcsb_sample_sequence_length")
+        if sequence_length_raw is None or int(sequence_length_raw) <= 0:
+            return None
+        sequence_length = int(sequence_length_raw)
+
+        instances = polymer_entity.get("polymer_entity_instances") or []
+        if len(instances) != 1:
+            return None
+        instance = instances[0] or {}
+        (
+            modeled_label_seq_ids,
+            modeled_auth_seq_ids,
+        ) = self._extract_modeled_residue_sets_for_instance(
+            sequence_length=sequence_length,
+            instance=instance,
+        )
+        modeled_sequence_length = len(modeled_label_seq_ids)
+        if modeled_sequence_length <= 0:
+            return None
+        modeled_start_seq_id = min(modeled_auth_seq_ids)
+        modeled_end_seq_id = max(modeled_auth_seq_ids)
+
+        feature_summary = instance.get("rcsb_polymer_instance_feature_summary") or []
+        coverage_by_type: dict[str, float] = {}
+        for item in feature_summary:
+            if not item:
+                continue
+            feature_type = item.get("type")
+            coverage = item.get("coverage")
+            if feature_type and coverage is not None:
+                coverage_by_type[str(feature_type)] = float(coverage)
+
+        helix_fraction = coverage_by_type.get("HELIX_P", -1.0)
+        sheet_fraction = coverage_by_type.get("SHEET", -1.0)
+        unassigned_fraction = coverage_by_type.get("UNASSIGNED_SEC_STRUCT", -1.0)
+        secondary_fraction = 1.0 - unassigned_fraction
+        stride_coverages, _, _ = compute_stride_state_coverages_for_chain_modeled_first_model(
+            session=self.session,
+            config=self.config,
+            cache_dir=pdb_cache_dir,
+            entry_id=entry_id,
+            chain_id=chain_id,
+            modeled_sequence_length=modeled_sequence_length,
+            modeled_auth_seq_ids=modeled_auth_seq_ids,
+            stride_executable=stride_executable,
+        )
+        stride_coil_fraction = stride_coverages["C"]
+        stride_secondary_percent = (1.0 - stride_coil_fraction) * 100.0
+
+        return SolutionNMRMonomerStrideModeledFirstModelRecord(
+            entry_id=entry_id,
+            year=year,
+            chain_id=chain_id,
+            modeled_start_seq_id=modeled_start_seq_id,
+            modeled_end_seq_id=modeled_end_seq_id,
+            modeled_sequence_length=modeled_sequence_length,
+            secondary_structure_percent=secondary_fraction * 100.0,
+            helix_fraction=helix_fraction,
+            sheet_fraction=sheet_fraction,
+            stride_alpha_helix_fraction=stride_coverages["H"],
+            stride_3_10_helix_fraction=stride_coverages["G"],
+            stride_pi_helix_fraction=stride_coverages["I"],
+            stride_beta_strand_fraction=stride_coverages["E"],
+            stride_isolated_beta_bridge_fraction=stride_coverages["B"],
+            stride_turn_fraction=stride_coverages["T"],
+            stride_coil_fraction=stride_coil_fraction,
+            stride_secondary_structure_percent=stride_secondary_percent,
+        )
+
+    def fetch_solution_nmr_monomer_stride_modeled_first_model_records_for_ids(
+        self,
+        entry_ids: list[str],
+        stride_executable: str,
+        pdb_cache_dir: Path,
+    ) -> list[SolutionNMRMonomerStrideModeledFirstModelRecord]:
+        return list(
+            self.iter_solution_nmr_monomer_stride_modeled_first_model_records_for_ids(
                 entry_ids=entry_ids,
                 stride_executable=stride_executable,
                 pdb_cache_dir=pdb_cache_dir,
@@ -2278,6 +2909,114 @@ class SolutionNMRMonomerStrideCollector:
                 yield record
 
     def collect(self) -> list[SolutionNMRMonomerStrideRecord]:
+        records = list(self.iter_records())
+        return sorted(records, key=lambda record: (record.year, record.entry_id))
+
+
+class SolutionNMRMonomerSecondaryModeledFirstModelCollector:
+    def __init__(
+        self,
+        client: RCSBClient,
+        config: CollectorConfig,
+        dssp_executable: str,
+        cache_dir: Path,
+    ) -> None:
+        self.client = client
+        self.config = config
+        self.dssp_executable = dssp_executable
+        self.cache_dir = cache_dir
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+
+    def iter_batches(
+        self,
+    ) -> Iterator[list[SolutionNMRMonomerSecondaryModeledFirstModelRecord]]:
+        entry_ids = fetch_solution_nmr_entry_ids(
+            client=self.client,
+            log_label="SOLUTION NMR monomer-secondary-modeled-first-model",
+        )
+        batches = list(chunked(entry_ids, self.config.graphql_batch_size))
+        if not batches:
+            return
+
+        for batch_idx, batch in enumerate(batches, start=1):
+            batch_records = (
+                self.client.fetch_solution_nmr_monomer_secondary_modeled_first_model_records_for_ids(
+                    entry_ids=batch,
+                    dssp_executable=self.dssp_executable,
+                    pdb_cache_dir=self.cache_dir,
+                )
+            )
+            LOGGER.info(
+                (
+                    "SOLUTION NMR monomer-secondary-modeled-first-model: "
+                    "processed batch %d/%d (entries: %d)"
+                ),
+                batch_idx,
+                len(batches),
+                len(batch_records),
+            )
+            yield batch_records
+
+    def iter_records(self) -> Iterator[SolutionNMRMonomerSecondaryModeledFirstModelRecord]:
+        for batch_records in self.iter_batches():
+            for record in batch_records:
+                yield record
+
+    def collect(self) -> list[SolutionNMRMonomerSecondaryModeledFirstModelRecord]:
+        records = list(self.iter_records())
+        return sorted(records, key=lambda record: (record.year, record.entry_id))
+
+
+class SolutionNMRMonomerStrideModeledFirstModelCollector:
+    def __init__(
+        self,
+        client: RCSBClient,
+        config: CollectorConfig,
+        stride_executable: str,
+        cache_dir: Path,
+    ) -> None:
+        self.client = client
+        self.config = config
+        self.stride_executable = stride_executable
+        self.cache_dir = cache_dir
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+
+    def iter_batches(
+        self,
+    ) -> Iterator[list[SolutionNMRMonomerStrideModeledFirstModelRecord]]:
+        entry_ids = fetch_solution_nmr_entry_ids(
+            client=self.client,
+            log_label="SOLUTION NMR monomer-stride-modeled-first-model",
+        )
+        batches = list(chunked(entry_ids, self.config.graphql_batch_size))
+        if not batches:
+            return
+
+        for batch_idx, batch in enumerate(batches, start=1):
+            batch_records = (
+                self.client.fetch_solution_nmr_monomer_stride_modeled_first_model_records_for_ids(
+                    entry_ids=batch,
+                    stride_executable=self.stride_executable,
+                    pdb_cache_dir=self.cache_dir,
+                )
+            )
+            LOGGER.info(
+                (
+                    "SOLUTION NMR monomer-stride-modeled-first-model: "
+                    "processed batch %d/%d (entries: %d)"
+                ),
+                batch_idx,
+                len(batches),
+                len(batch_records),
+            )
+            yield batch_records
+
+    def iter_records(self) -> Iterator[SolutionNMRMonomerStrideModeledFirstModelRecord]:
+        for batch_records in self.iter_batches():
+            for record in batch_records:
+                yield record
+
+    def collect(self) -> list[SolutionNMRMonomerStrideModeledFirstModelRecord]:
         records = list(self.iter_records())
         return sorted(records, key=lambda record: (record.year, record.entry_id))
 
@@ -3173,6 +3912,122 @@ def stream_solution_nmr_monomer_secondary_csv(
     return count
 
 
+def stream_solution_nmr_monomer_secondary_modeled_first_model_csv(
+    records: Iterator[SolutionNMRMonomerSecondaryModeledFirstModelRecord],
+    output_path: Path,
+) -> int:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    count = 0
+    with output_path.open("w", newline="", encoding="utf-8") as csvfile:
+        writer = csv.writer(csvfile)
+        writer.writerow(
+            [
+                "entry_id",
+                "year",
+                "chain_id",
+                "modeled_start_seq_id",
+                "modeled_end_seq_id",
+                "modeled_sequence_length",
+                "secondary_structure_percent",
+                "helix_fraction",
+                "sheet_fraction",
+                "dssp_alpha_helix_fraction",
+                "dssp_isolated_beta_bridge_fraction",
+                "dssp_beta_strand_fraction",
+                "dssp_3_10_helix_fraction",
+                "dssp_pi_helix_fraction",
+                "dssp_turn_fraction",
+                "dssp_bend_fraction",
+                "dssp_unassigned_percent",
+                "dssp_secondary_structure_percent",
+            ]
+        )
+        csvfile.flush()
+        for record in records:
+            writer.writerow(
+                (
+                    record.entry_id,
+                    record.year,
+                    record.chain_id,
+                    record.modeled_start_seq_id,
+                    record.modeled_end_seq_id,
+                    record.modeled_sequence_length,
+                    f"{record.secondary_structure_percent:.3f}",
+                    f"{record.helix_fraction:.6f}",
+                    f"{record.sheet_fraction:.6f}",
+                    f"{record.dssp_alpha_helix_fraction:.6f}",
+                    f"{record.dssp_isolated_beta_bridge_fraction:.6f}",
+                    f"{record.dssp_beta_strand_fraction:.6f}",
+                    f"{record.dssp_3_10_helix_fraction:.6f}",
+                    f"{record.dssp_pi_helix_fraction:.6f}",
+                    f"{record.dssp_turn_fraction:.6f}",
+                    f"{record.dssp_bend_fraction:.6f}",
+                    f"{record.dssp_unassigned_percent:.6f}",
+                    f"{record.dssp_secondary_structure_percent:.3f}",
+                )
+            )
+            csvfile.flush()
+            count += 1
+    return count
+
+
+def stream_solution_nmr_monomer_stride_modeled_first_model_csv(
+    records: Iterator[SolutionNMRMonomerStrideModeledFirstModelRecord],
+    output_path: Path,
+) -> int:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    count = 0
+    with output_path.open("w", newline="", encoding="utf-8") as csvfile:
+        writer = csv.writer(csvfile)
+        writer.writerow(
+            [
+                "entry_id",
+                "year",
+                "chain_id",
+                "modeled_start_seq_id",
+                "modeled_end_seq_id",
+                "modeled_sequence_length",
+                "secondary_structure_percent",
+                "helix_fraction",
+                "sheet_fraction",
+                "stride_alpha_helix_fraction",
+                "stride_3_10_helix_fraction",
+                "stride_pi_helix_fraction",
+                "stride_beta_strand_fraction",
+                "stride_isolated_beta_bridge_fraction",
+                "stride_turn_fraction",
+                "stride_coil_fraction",
+                "stride_secondary_structure_percent",
+            ]
+        )
+        csvfile.flush()
+        for record in records:
+            writer.writerow(
+                (
+                    record.entry_id,
+                    record.year,
+                    record.chain_id,
+                    record.modeled_start_seq_id,
+                    record.modeled_end_seq_id,
+                    record.modeled_sequence_length,
+                    f"{record.secondary_structure_percent:.3f}",
+                    f"{record.helix_fraction:.6f}",
+                    f"{record.sheet_fraction:.6f}",
+                    f"{record.stride_alpha_helix_fraction:.6f}",
+                    f"{record.stride_3_10_helix_fraction:.6f}",
+                    f"{record.stride_pi_helix_fraction:.6f}",
+                    f"{record.stride_beta_strand_fraction:.6f}",
+                    f"{record.stride_isolated_beta_bridge_fraction:.6f}",
+                    f"{record.stride_turn_fraction:.6f}",
+                    f"{record.stride_coil_fraction:.6f}",
+                    f"{record.stride_secondary_structure_percent:.3f}",
+                )
+            )
+            csvfile.flush()
+            count += 1
+    return count
+
+
 def write_solution_nmr_monomer_secondary_by_model_csv(
     records: list[SolutionNMRMonomerSecondaryByModelRecord], output_path: Path
 ) -> None:
@@ -3685,7 +4540,9 @@ def parse_dataset_kinds(raw_value: str) -> list[DatasetKind]:
             DatasetKind.MEMBRANE_PROTEIN_COUNTS,
             DatasetKind.SOLUTION_NMR_WEIGHTS,
             DatasetKind.SOLUTION_NMR_MONOMER_SECONDARY,
+            DatasetKind.SOLUTION_NMR_MONOMER_SECONDARY_MODELED_FIRST_MODEL,
             DatasetKind.SOLUTION_NMR_MONOMER_STRIDE,
+            DatasetKind.SOLUTION_NMR_MONOMER_STRIDE_MODELED_FIRST_MODEL,
             DatasetKind.SOLUTION_NMR_MONOMER_PRECISION,
             DatasetKind.SOLUTION_NMR_MONOMER_QUALITY,
             DatasetKind.SOLUTION_NMR_MONOMER_XRAY_HOMOLOGS,
@@ -3719,7 +4576,7 @@ def parse_args() -> argparse.Namespace:
             DatasetKind.SOLUTION_NMR_MONOMER_SECONDARY,
         ],
         help="Comma-separated dataset kinds or 'all'. "
-        "Available: method_counts, membrane_protein_counts, solution_nmr_weights, solution_nmr_monomer_secondary, solution_nmr_monomer_stride, solution_nmr_monomer_precision, solution_nmr_monomer_quality, solution_nmr_monomer_xray_homologs, solution_nmr_monomer_xray_rmsd (default: the first three).",
+        "Available: method_counts, membrane_protein_counts, solution_nmr_weights, solution_nmr_monomer_secondary, solution_nmr_monomer_secondary_modeled_first_model, solution_nmr_monomer_stride, solution_nmr_monomer_stride_modeled_first_model, solution_nmr_monomer_precision, solution_nmr_monomer_quality, solution_nmr_monomer_xray_homologs, solution_nmr_monomer_xray_rmsd (default: the first three).",
     )
     parser.add_argument(
         "--counts-output",
@@ -3752,6 +4609,15 @@ def parse_args() -> argparse.Namespace:
         help="Output CSV path for per-model DSSP data in solution_nmr_monomer_secondary dataset.",
     )
     parser.add_argument(
+        "--solution-nmr-monomer-secondary-modeled-first-model-output",
+        type=Path,
+        default=Path("data/solution_nmr_monomer_secondary_modeled_first_model.csv"),
+        help=(
+            "Output CSV path for solution_nmr_monomer_secondary_modeled_first_model "
+            "dataset (DSSP for modeled residues of the first model only)."
+        ),
+    )
+    parser.add_argument(
         "--solution-nmr-monomer-secondary-cache-dir",
         type=Path,
         default=Path("data/pdb_cache"),
@@ -3779,6 +4645,15 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("data/solution_nmr_monomer_stride_structure.csv"),
         help="Output CSV path for solution_nmr_monomer_stride dataset.",
+    )
+    parser.add_argument(
+        "--solution-nmr-monomer-stride-modeled-first-model-output",
+        type=Path,
+        default=Path("data/solution_nmr_monomer_stride_modeled_first_model.csv"),
+        help=(
+            "Output CSV path for solution_nmr_monomer_stride_modeled_first_model "
+            "dataset (STRIDE for modeled residues of the first model only)."
+        ),
     )
     parser.add_argument(
         "--solution-nmr-monomer-stride-cache-dir",
@@ -4049,6 +4924,44 @@ def main() -> None:
             new_sec_model_count,
         )
 
+    if DatasetKind.SOLUTION_NMR_MONOMER_SECONDARY_MODELED_FIRST_MODEL in args.datasets:
+        modeled_first_dssp_executable = resolve_dssp_executable(
+            args.solution_nmr_monomer_secondary_dssp_executable
+        )
+        if modeled_first_dssp_executable is None:
+            raise RuntimeError(
+                "DSSP executable not found for solution_nmr_monomer_secondary_modeled_first_model. "
+                "Provide --solution-nmr-monomer-secondary-dssp-executable or install mkdssp/dssp."
+            )
+        LOGGER.info(
+            (
+                "SOLUTION NMR monomer-secondary-modeled-first-model: "
+                "using DSSP executable %s"
+            ),
+            modeled_first_dssp_executable,
+        )
+        modeled_secondary_collector = (
+            SolutionNMRMonomerSecondaryModeledFirstModelCollector(
+                client=client,
+                config=config,
+                dssp_executable=modeled_first_dssp_executable,
+                cache_dir=Path(args.solution_nmr_monomer_secondary_cache_dir),
+            )
+        )
+        modeled_secondary_count = (
+            stream_solution_nmr_monomer_secondary_modeled_first_model_csv(
+                records=modeled_secondary_collector.iter_records(),
+                output_path=Path(
+                    args.solution_nmr_monomer_secondary_modeled_first_model_output
+                ),
+            )
+        )
+        LOGGER.info(
+            "Saved %d records to %s",
+            modeled_secondary_count,
+            args.solution_nmr_monomer_secondary_modeled_first_model_output,
+        )
+
     if DatasetKind.SOLUTION_NMR_MONOMER_STRIDE in args.datasets:
         stride_executable = resolve_stride_executable(
             args.solution_nmr_monomer_stride_executable
@@ -4076,6 +4989,42 @@ def main() -> None:
             "Saved %d records to %s",
             stride_count,
             args.solution_nmr_monomer_stride_output,
+        )
+
+    if DatasetKind.SOLUTION_NMR_MONOMER_STRIDE_MODELED_FIRST_MODEL in args.datasets:
+        modeled_first_stride_executable = resolve_stride_executable(
+            args.solution_nmr_monomer_stride_executable
+        )
+        if modeled_first_stride_executable is None:
+            raise RuntimeError(
+                "STRIDE executable not found for solution_nmr_monomer_stride_modeled_first_model. "
+                "Provide --solution-nmr-monomer-stride-executable or install stride."
+            )
+        LOGGER.info(
+            (
+                "SOLUTION NMR monomer-stride-modeled-first-model: "
+                "using STRIDE executable %s"
+            ),
+            modeled_first_stride_executable,
+        )
+        modeled_stride_collector = SolutionNMRMonomerStrideModeledFirstModelCollector(
+            client=client,
+            config=config,
+            stride_executable=modeled_first_stride_executable,
+            cache_dir=Path(args.solution_nmr_monomer_stride_cache_dir),
+        )
+        modeled_stride_count = (
+            stream_solution_nmr_monomer_stride_modeled_first_model_csv(
+                records=modeled_stride_collector.iter_records(),
+                output_path=Path(
+                    args.solution_nmr_monomer_stride_modeled_first_model_output
+                ),
+            )
+        )
+        LOGGER.info(
+            "Saved %d records to %s",
+            modeled_stride_count,
+            args.solution_nmr_monomer_stride_modeled_first_model_output,
         )
 
     if DatasetKind.SOLUTION_NMR_MONOMER_PRECISION in args.datasets:
