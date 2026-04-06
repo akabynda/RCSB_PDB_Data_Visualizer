@@ -846,16 +846,11 @@ class RCSBClient:
         return str(entry_id), year, model_count, polymer_entity, chain_id
 
     @staticmethod
-    def _extract_secondary_core_range(
-        polymer_entity: dict[str, Any],
-    ) -> tuple[int, int] | None:
-        instances = polymer_entity.get("polymer_entity_instances") or []
-        if len(instances) != 1:
-            return None
-
-        features = instances[0].get("rcsb_polymer_instance_feature") or []
+    def _extract_secondary_label_ranges(
+        instance_features: list[dict[str, Any] | None],
+    ) -> list[tuple[int, int]]:
         sec_ranges: list[tuple[int, int]] = []
-        for feature in features:
+        for feature in instance_features:
             if not feature:
                 continue
             feature_type = feature.get("type")
@@ -874,9 +869,49 @@ class RCSBClient:
                 except (TypeError, ValueError):
                     continue
                 sec_ranges.append((beg_i, end_i))
+        return sec_ranges
+
+    @staticmethod
+    def _extract_secondary_core_range(
+        polymer_entity: dict[str, Any],
+    ) -> tuple[int, int] | None:
+        instances = polymer_entity.get("polymer_entity_instances") or []
+        if len(instances) != 1:
+            return None
+
+        instance = instances[0] or {}
+        features = instance.get("rcsb_polymer_instance_feature") or []
+        sec_ranges = RCSBClient._extract_secondary_label_ranges(features)
 
         if not sec_ranges:
             return None
+
+        instance_identifiers = (
+            instance.get("rcsb_polymer_entity_instance_container_identifiers") or {}
+        )
+        auth_mapping_raw = (
+            instance_identifiers.get("auth_to_entity_poly_seq_mapping") or []
+        )
+
+        mapped_auth_positions: list[int] = []
+        if isinstance(auth_mapping_raw, list) and auth_mapping_raw:
+            for beg_i, end_i in sec_ranges:
+                start = min(beg_i, end_i)
+                stop = max(beg_i, end_i)
+                for label_seq_id in range(start, stop + 1):
+                    if label_seq_id <= 0 or label_seq_id > len(auth_mapping_raw):
+                        continue
+                    auth_seq_id_raw = auth_mapping_raw[label_seq_id - 1]
+                    try:
+                        mapped_auth_positions.append(int(str(auth_seq_id_raw).strip()))
+                    except (TypeError, ValueError):
+                        continue
+
+        if mapped_auth_positions:
+            core_start = min(mapped_auth_positions)
+            core_end = max(mapped_auth_positions)
+            if core_end >= core_start:
+                return core_start, core_end
 
         core_start = min(beg for beg, _ in sec_ranges)
         core_end = max(end for _, end in sec_ranges)
@@ -1794,6 +1829,9 @@ class RCSBClient:
                 pdbx_strand_id
               }
               polymer_entity_instances {
+                rcsb_polymer_entity_instance_container_identifiers {
+                  auth_to_entity_poly_seq_mapping
+                }
                 rcsb_polymer_instance_feature {
                   type
                   feature_positions {
@@ -1969,6 +2007,9 @@ class RCSBClient:
                 pdbx_strand_id
               }
               polymer_entity_instances {
+                rcsb_polymer_entity_instance_container_identifiers {
+                  auth_to_entity_poly_seq_mapping
+                }
                 rcsb_polymer_instance_feature {
                   type
                   feature_positions {
@@ -2290,7 +2331,7 @@ class SolutionNMRMonomerPrecisionCollector:
             [[model_map[resid] for resid in sorted_resids] for model_map in model_maps],
             dtype=float,
         )
-        reference_coords = coords[0]
+        reference_coords = np.mean(coords, axis=0)
         per_model_rmsd = [
             _superposed_rmsd(model_coord, reference_coords) for model_coord in coords
         ]
@@ -2331,6 +2372,7 @@ class SolutionNMRMonomerPrecisionCollector:
         self,
         max_entries: int | None = None,
         skip_entry_ids: set[str] | None = None,
+        on_record: Callable[[SolutionNMRMonomerPrecisionRecord], None] | None = None,
     ) -> list[SolutionNMRMonomerPrecisionRecord]:
         skip_entry_ids = skip_entry_ids or set()
         entry_ids = fetch_solution_nmr_entry_ids(
@@ -2370,6 +2412,8 @@ class SolutionNMRMonomerPrecisionCollector:
                 record = future.result()
                 if record is not None:
                     precision_records.append(record)
+                    if on_record is not None:
+                        on_record(record)
                 idx = future_map[future]
                 if total > 0 and (idx % 50 == 0 or idx == total):
                     LOGGER.info(
@@ -2773,6 +2817,7 @@ class SolutionNMRMonomerXrayRmsdCollector:
         self,
         max_entries: int | None = None,
         skip_entry_ids: set[str] | None = None,
+        on_record: Callable[[SolutionNMRMonomerXrayRmsdRecord], None] | None = None,
     ) -> list[SolutionNMRMonomerXrayRmsdRecord]:
         skip_entry_ids = skip_entry_ids or set()
         entry_ids = fetch_solution_nmr_entry_ids(
@@ -2837,6 +2882,8 @@ class SolutionNMRMonomerXrayRmsdCollector:
                 record = future.result()
                 if record is not None:
                     records.append(record)
+                    if on_record is not None:
+                        on_record(record)
                 idx = future_map[future]
                 if total > 0 and (idx % 50 == 0 or idx == total):
                     LOGGER.info(
@@ -3442,34 +3489,40 @@ def read_solution_nmr_monomer_precision_csv(
     return records
 
 
+SOLUTION_NMR_MONOMER_PRECISION_HEADER: tuple[str, ...] = (
+    "entry_id",
+    "year",
+    "chain_id",
+    "core_start_seq_id",
+    "core_end_seq_id",
+    "n_models",
+    "n_ca_core",
+    "mean_rmsd_angstrom",
+)
+
+
+def _solution_nmr_monomer_precision_csv_row(
+    record: SolutionNMRMonomerPrecisionRecord,
+) -> tuple[Any, ...]:
+    return (
+        record.entry_id,
+        record.year,
+        record.chain_id,
+        record.core_start_seq_id,
+        record.core_end_seq_id,
+        record.n_models,
+        record.n_ca_core,
+        f"{record.mean_rmsd_angstrom:.6f}",
+    )
+
+
 def write_solution_nmr_monomer_precision_csv(
     records: list[SolutionNMRMonomerPrecisionRecord], output_path: Path
 ) -> None:
     write_csv_rows(
         output_path=output_path,
-        header=[
-            "entry_id",
-            "year",
-            "chain_id",
-            "core_start_seq_id",
-            "core_end_seq_id",
-            "n_models",
-            "n_ca_core",
-            "mean_rmsd_angstrom",
-        ],
-        rows=(
-            (
-                r.entry_id,
-                r.year,
-                r.chain_id,
-                r.core_start_seq_id,
-                r.core_end_seq_id,
-                r.n_models,
-                r.n_ca_core,
-                f"{r.mean_rmsd_angstrom:.4f}",
-            )
-            for r in records
-        ),
+        header=list(SOLUTION_NMR_MONOMER_PRECISION_HEADER),
+        rows=(_solution_nmr_monomer_precision_csv_row(r) for r in records),
     )
 
 
@@ -3574,48 +3627,54 @@ def read_solution_nmr_monomer_xray_rmsd_csv(
     return records
 
 
+SOLUTION_NMR_MONOMER_XRAY_RMSD_HEADER: tuple[str, ...] = (
+    "entry_id",
+    "year",
+    "sequence_identity_percent",
+    "nmr_chain_id",
+    "nmr_core_start_seq_id",
+    "nmr_core_end_seq_id",
+    "xray_entry_id",
+    "xray_chain_id",
+    "xray_core_start_seq_id",
+    "xray_core_end_seq_id",
+    "xray_resolution_angstrom",
+    "n_common_ca",
+    "rmsd_ca_angstrom",
+)
+
+
+def _solution_nmr_monomer_xray_rmsd_csv_row(
+    record: SolutionNMRMonomerXrayRmsdRecord,
+) -> tuple[Any, ...]:
+    return (
+        record.entry_id,
+        record.year,
+        record.sequence_identity_percent,
+        record.nmr_chain_id,
+        record.nmr_core_start_seq_id if record.nmr_core_start_seq_id is not None else "",
+        record.nmr_core_end_seq_id if record.nmr_core_end_seq_id is not None else "",
+        record.xray_entry_id,
+        record.xray_chain_id,
+        (
+            record.xray_core_start_seq_id
+            if record.xray_core_start_seq_id is not None
+            else ""
+        ),
+        record.xray_core_end_seq_id if record.xray_core_end_seq_id is not None else "",
+        f"{record.xray_resolution_angstrom:.4f}",
+        record.n_common_ca,
+        f"{record.rmsd_ca_angstrom:.4f}",
+    )
+
+
 def write_solution_nmr_monomer_xray_rmsd_csv(
     records: list[SolutionNMRMonomerXrayRmsdRecord], output_path: Path
 ) -> None:
     write_csv_rows(
         output_path=output_path,
-        header=[
-            "entry_id",
-            "year",
-            "sequence_identity_percent",
-            "nmr_chain_id",
-            "nmr_core_start_seq_id",
-            "nmr_core_end_seq_id",
-            "xray_entry_id",
-            "xray_chain_id",
-            "xray_core_start_seq_id",
-            "xray_core_end_seq_id",
-            "xray_resolution_angstrom",
-            "n_common_ca",
-            "rmsd_ca_angstrom",
-        ],
-        rows=(
-            (
-                r.entry_id,
-                r.year,
-                r.sequence_identity_percent,
-                r.nmr_chain_id,
-                r.nmr_core_start_seq_id if r.nmr_core_start_seq_id is not None else "",
-                r.nmr_core_end_seq_id if r.nmr_core_end_seq_id is not None else "",
-                r.xray_entry_id,
-                r.xray_chain_id,
-                (
-                    r.xray_core_start_seq_id
-                    if r.xray_core_start_seq_id is not None
-                    else ""
-                ),
-                r.xray_core_end_seq_id if r.xray_core_end_seq_id is not None else "",
-                f"{r.xray_resolution_angstrom:.4f}",
-                r.n_common_ca,
-                f"{r.rmsd_ca_angstrom:.4f}",
-            )
-            for r in records
-        ),
+        header=list(SOLUTION_NMR_MONOMER_XRAY_RMSD_HEADER),
+        rows=(_solution_nmr_monomer_xray_rmsd_csv_row(r) for r in records),
     )
 
 
@@ -4022,13 +4081,12 @@ def main() -> None:
     if DatasetKind.SOLUTION_NMR_MONOMER_PRECISION in args.datasets:
         existing_records: list[SolutionNMRMonomerPrecisionRecord] = []
         skip_entry_ids: set[str] = set()
+        precision_output_path = Path(args.solution_nmr_monomer_precision_output)
         if (
             not args.precision_overwrite
-            and Path(args.solution_nmr_monomer_precision_output).exists()
+            and precision_output_path.exists()
         ):
-            existing_records = read_solution_nmr_monomer_precision_csv(
-                Path(args.solution_nmr_monomer_precision_output)
-            )
+            existing_records = read_solution_nmr_monomer_precision_csv(precision_output_path)
             skip_entry_ids = {record.entry_id for record in existing_records}
             LOGGER.info(
                 "SOLUTION NMR precision: loaded %d existing records for resume",
@@ -4041,21 +4099,30 @@ def main() -> None:
             cache_dir=Path(args.precision_cache_dir),
             precision_workers=args.precision_workers,
         )
-        new_records = precision_collector.collect(
-            max_entries=args.precision_max_entries,
-            skip_entry_ids=skip_entry_ids,
-        )
-        combined_records = sorted(
-            existing_records + new_records,
-            key=lambda record: (record.year, record.entry_id),
-        )
-        write_solution_nmr_monomer_precision_csv(
-            records=combined_records,
-            output_path=args.solution_nmr_monomer_precision_output,
-        )
+        existing_records = sorted(existing_records, key=lambda r: (r.year, r.entry_id))
+        precision_output_path.parent.mkdir(parents=True, exist_ok=True)
+        with precision_output_path.open("w", newline="", encoding="utf-8") as csvfile:
+            writer = csv.writer(csvfile)
+            writer.writerow(SOLUTION_NMR_MONOMER_PRECISION_HEADER)
+            for record in existing_records:
+                writer.writerow(_solution_nmr_monomer_precision_csv_row(record))
+            csvfile.flush()
+
+            def _on_precision_record(
+                record: SolutionNMRMonomerPrecisionRecord,
+            ) -> None:
+                writer.writerow(_solution_nmr_monomer_precision_csv_row(record))
+                csvfile.flush()
+
+            new_records = precision_collector.collect(
+                max_entries=args.precision_max_entries,
+                skip_entry_ids=skip_entry_ids,
+                on_record=_on_precision_record,
+            )
+
         LOGGER.info(
             "Saved %d records to %s (new: %d)",
-            len(combined_records),
+            len(existing_records) + len(new_records),
             args.solution_nmr_monomer_precision_output,
             len(new_records),
         )
@@ -4101,13 +4168,15 @@ def main() -> None:
 
     if DatasetKind.SOLUTION_NMR_MONOMER_XRAY_RMSD in args.datasets:
         existing_records: list[SolutionNMRMonomerXrayRmsdRecord] = []
+        valid_existing_records: list[SolutionNMRMonomerXrayRmsdRecord] = []
         skip_entry_ids: set[str] = set()
+        xray_rmsd_output_path = Path(args.solution_nmr_monomer_xray_rmsd_output)
         if (
             not args.xray_rmsd_overwrite
-            and Path(args.solution_nmr_monomer_xray_rmsd_output).exists()
+            and xray_rmsd_output_path.exists()
         ):
             existing_records = read_solution_nmr_monomer_xray_rmsd_csv(
-                Path(args.solution_nmr_monomer_xray_rmsd_output)
+                xray_rmsd_output_path
             )
             existing_records = [
                 record
@@ -4138,26 +4207,30 @@ def main() -> None:
             rmsd_workers=args.xray_rmsd_workers,
             sequence_identity_percent=args.xray_rmsd_sequence_identity,
         )
-        new_records = rmsd_collector.collect(
-            max_entries=args.xray_rmsd_max_entries,
-            skip_entry_ids=skip_entry_ids,
+        valid_existing_records = sorted(
+            valid_existing_records, key=lambda r: (r.year, r.entry_id)
         )
-        combined_by_entry: dict[str, SolutionNMRMonomerXrayRmsdRecord] = {
-            record.entry_id: record for record in existing_records
-        }
-        for record in new_records:
-            combined_by_entry[record.entry_id] = record
-        combined_records = sorted(
-            combined_by_entry.values(),
-            key=lambda record: (record.year, record.entry_id),
-        )
-        write_solution_nmr_monomer_xray_rmsd_csv(
-            records=combined_records,
-            output_path=args.solution_nmr_monomer_xray_rmsd_output,
-        )
+        xray_rmsd_output_path.parent.mkdir(parents=True, exist_ok=True)
+        with xray_rmsd_output_path.open("w", newline="", encoding="utf-8") as csvfile:
+            writer = csv.writer(csvfile)
+            writer.writerow(SOLUTION_NMR_MONOMER_XRAY_RMSD_HEADER)
+            for record in valid_existing_records:
+                writer.writerow(_solution_nmr_monomer_xray_rmsd_csv_row(record))
+            csvfile.flush()
+
+            def _on_xray_rmsd_record(record: SolutionNMRMonomerXrayRmsdRecord) -> None:
+                writer.writerow(_solution_nmr_monomer_xray_rmsd_csv_row(record))
+                csvfile.flush()
+
+            new_records = rmsd_collector.collect(
+                max_entries=args.xray_rmsd_max_entries,
+                skip_entry_ids=skip_entry_ids,
+                on_record=_on_xray_rmsd_record,
+            )
+
         LOGGER.info(
             "Saved %d records to %s (new: %d, identity=%d%%)",
-            len(combined_records),
+            len(valid_existing_records) + len(new_records),
             args.solution_nmr_monomer_xray_rmsd_output,
             len(new_records),
             args.xray_rmsd_sequence_identity,
