@@ -31,6 +31,9 @@ class PlotKind(str, Enum):
     SOLUTION_NMR_MONOMER_SECONDARY_COMPARISON_CUMULATIVE = (
         "solution_nmr_monomer_secondary_comparison_cumulative"
     )
+    SOLUTION_NMR_MONOMER_STRIDE_MODELED_FIRST_MODEL = (
+        "solution_nmr_monomer_stride_modeled_first_model"
+    )
     SOLUTION_NMR_MONOMER_SECONDARY_MODELED_FIRST_MODEL_COMPARISON = (
         "solution_nmr_monomer_secondary_modeled_first_model_comparison"
     )
@@ -114,6 +117,12 @@ class PlotConfig:
         "Secondary structure content of solution NMR monomeric proteins by year"
     )
     nmr_monomer_secondary_y_label: str = "Secondary structure content (%)"
+    nmr_monomer_stride_modeled_first_model_title: str = (
+        "Secondary structure content of modeled residues in first model (STRIDE dataset) by year"
+    )
+    nmr_monomer_stride_modeled_first_model_y_label: str = (
+        "Secondary structure content (%)"
+    )
     nmr_monomer_secondary_comparison_title: str = (
         "Comparison of deposited and DSSP(H+G+I+E+B)-derived secondary structure content by year"
     )
@@ -244,6 +253,7 @@ def parse_plot_kinds(raw_value: str) -> list[PlotKind]:
             PlotKind.SOLUTION_NMR_MONOMER_SECONDARY,
             PlotKind.SOLUTION_NMR_MONOMER_SECONDARY_COMPARISON,
             PlotKind.SOLUTION_NMR_MONOMER_SECONDARY_COMPARISON_CUMULATIVE,
+            PlotKind.SOLUTION_NMR_MONOMER_STRIDE_MODELED_FIRST_MODEL,
             PlotKind.SOLUTION_NMR_MONOMER_SECONDARY_MODELED_FIRST_MODEL_COMPARISON,
             PlotKind.SOLUTION_NMR_MONOMER_SECONDARY_MODELED_FIRST_MODEL_COMPARISON_CUMULATIVE,
             PlotKind.SOLUTION_NMR_MONOMER_STRIDE_COMPARISON,
@@ -995,6 +1005,56 @@ class PDBScientificPlotter:
             output_svg=output_svg,
             title=self.config.nmr_monomer_secondary_title,
             y_label=self.config.nmr_monomer_secondary_y_label,
+            draw_fn=draw,
+        )
+
+    def plot_solution_nmr_monomer_stride_modeled_first_model(
+        self, data_path: Path, output_png: Path, output_svg: Path
+    ) -> None:
+        table = self._prepare_monomer_stride_comparison_table(self._read_csv(data_path))
+        self._scientific_style()
+        table = table.copy()
+        table["stride_hgieb_percent"] = (
+            table["stride_alpha_helix_fraction"]
+            + table["stride_3_10_helix_fraction"]
+            + table["stride_pi_helix_fraction"]
+            + table["stride_beta_strand_fraction"]
+            + table["stride_isolated_beta_bridge_fraction"]
+        ) * 100.0
+        filtered = table.loc[
+            (table["stride_hgieb_percent"] >= 0.0)
+            & (table["stride_hgieb_percent"] <= 100.0)
+        ].copy()
+        yearly_mean = (
+            filtered.groupby("year", as_index=True)["stride_hgieb_percent"]
+            .mean()
+            .sort_index()
+        )
+
+        def draw(ax: plt.Axes) -> None:
+            ax.scatter(
+                filtered["year"],
+                filtered["stride_hgieb_percent"],
+                s=10,
+                alpha=0.2,
+                color="#7f7f7f",
+                label="Individual structures",
+            )
+            ax.plot(
+                yearly_mean.index,
+                yearly_mean.values,
+                linewidth=2.2,
+                color=self.config.nmr_color,
+                label="Yearly mean",
+            )
+            ax.set_ylim(0, 100)
+            self._add_legend(ax, loc="upper left")
+
+        self._render_figure(
+            output_png=output_png,
+            output_svg=output_svg,
+            title=self.config.nmr_monomer_stride_modeled_first_model_title,
+            y_label=self.config.nmr_monomer_stride_modeled_first_model_y_label,
             draw_fn=draw,
         )
 
@@ -1880,6 +1940,7 @@ def parse_args() -> argparse.Namespace:
             PlotKind.SOLUTION_NMR_MONOMER_SECONDARY,
             PlotKind.SOLUTION_NMR_MONOMER_SECONDARY_COMPARISON,
             PlotKind.SOLUTION_NMR_MONOMER_SECONDARY_COMPARISON_CUMULATIVE,
+            PlotKind.SOLUTION_NMR_MONOMER_STRIDE_MODELED_FIRST_MODEL,
             PlotKind.SOLUTION_NMR_MONOMER_SECONDARY_MODELED_FIRST_MODEL_COMPARISON,
             PlotKind.SOLUTION_NMR_MONOMER_SECONDARY_MODELED_FIRST_MODEL_COMPARISON_CUMULATIVE,
             PlotKind.SOLUTION_NMR_MONOMER_STRIDE_COMPARISON,
@@ -1893,7 +1954,7 @@ def parse_args() -> argparse.Namespace:
             PlotKind.SOLUTION_NMR_MONOMER_XRAY_HOMOLOGS,
             PlotKind.SOLUTION_NMR_MONOMER_XRAY_RMSD,
         ],
-        help="Comma-separated plot kinds or 'all'. Available: method_counts, membrane_protein_counts, solution_nmr_weight_stats, solution_nmr_period_boxplot, solution_nmr_period_area, solution_nmr_period_area_share, solution_nmr_period_area_cumulative_share, solution_nmr_monomer_secondary, solution_nmr_monomer_secondary_comparison, solution_nmr_monomer_secondary_comparison_cumulative, solution_nmr_monomer_secondary_modeled_first_model_comparison, solution_nmr_monomer_secondary_modeled_first_model_comparison_cumulative, solution_nmr_monomer_stride_comparison, solution_nmr_monomer_stride_comparison_cumulative, solution_nmr_monomer_stride_modeled_first_model_comparison, solution_nmr_monomer_stride_modeled_first_model_comparison_cumulative, solution_nmr_monomer_three_way_comparison, solution_nmr_monomer_three_way_comparison_cumulative, solution_nmr_monomer_precision, solution_nmr_monomer_quality, solution_nmr_monomer_xray_homologs, solution_nmr_monomer_xray_rmsd (default: all).",
+        help="Comma-separated plot kinds or 'all'. Available: method_counts, membrane_protein_counts, solution_nmr_weight_stats, solution_nmr_period_boxplot, solution_nmr_period_area, solution_nmr_period_area_share, solution_nmr_period_area_cumulative_share, solution_nmr_monomer_secondary, solution_nmr_monomer_secondary_comparison, solution_nmr_monomer_secondary_comparison_cumulative, solution_nmr_monomer_stride_modeled_first_model, solution_nmr_monomer_secondary_modeled_first_model_comparison, solution_nmr_monomer_secondary_modeled_first_model_comparison_cumulative, solution_nmr_monomer_stride_comparison, solution_nmr_monomer_stride_comparison_cumulative, solution_nmr_monomer_stride_modeled_first_model_comparison, solution_nmr_monomer_stride_modeled_first_model_comparison_cumulative, solution_nmr_monomer_three_way_comparison, solution_nmr_monomer_three_way_comparison_cumulative, solution_nmr_monomer_precision, solution_nmr_monomer_quality, solution_nmr_monomer_xray_homologs, solution_nmr_monomer_xray_rmsd (default: all).",
     )
     parser.add_argument(
         "--counts-input",
@@ -2123,6 +2184,18 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("figures/solution_nmr_monomer_secondary_by_year.svg"),
         help="Output SVG for SOLUTION NMR monomer secondary-structure plot.",
+    )
+    parser.add_argument(
+        "--nmr-monomer-stride-modeled-first-model-output-png",
+        type=Path,
+        default=Path("figures/solution_nmr_monomer_stride_modeled_first_model_by_year.png"),
+        help="Output PNG for SOLUTION NMR monomer STRIDE modeled-first-model secondary-structure plot.",
+    )
+    parser.add_argument(
+        "--nmr-monomer-stride-modeled-first-model-output-svg",
+        type=Path,
+        default=Path("figures/solution_nmr_monomer_stride_modeled_first_model_by_year.svg"),
+        help="Output SVG for SOLUTION NMR monomer STRIDE modeled-first-model secondary-structure plot.",
     )
     parser.add_argument(
         "--nmr-monomer-secondary-comparison-output-png",
@@ -2471,6 +2544,13 @@ def main() -> None:
             data_path=args.nmr_monomer_secondary_input,
             output_png=args.nmr_monomer_secondary_output_png,
             output_svg=args.nmr_monomer_secondary_output_svg,
+        )
+
+    if PlotKind.SOLUTION_NMR_MONOMER_STRIDE_MODELED_FIRST_MODEL in args.plots:
+        plotter.plot_solution_nmr_monomer_stride_modeled_first_model(
+            data_path=args.nmr_monomer_stride_modeled_first_model_input,
+            output_png=args.nmr_monomer_stride_modeled_first_model_output_png,
+            output_svg=args.nmr_monomer_stride_modeled_first_model_output_svg,
         )
 
     if PlotKind.SOLUTION_NMR_MONOMER_SECONDARY_COMPARISON in args.plots:
