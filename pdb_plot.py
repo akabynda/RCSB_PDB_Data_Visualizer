@@ -118,7 +118,7 @@ class PlotConfig:
     )
     nmr_monomer_secondary_y_label: str = "Secondary structure content (%)"
     nmr_monomer_stride_modeled_first_model_title: str = (
-        "Secondary structure content of modeled residues in first model (STRIDE dataset) by year"
+        "STRIDE(H+G+I+E+B)-derived secondary structure content of modeled residues in first model by year"
     )
     nmr_monomer_stride_modeled_first_model_y_label: str = (
         "Secondary structure content (%)"
