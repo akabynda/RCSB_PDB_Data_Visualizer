@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Sequence, TypeVar
+from MDAnalysis.analysis.align import rotation_matrix as mda_rotation_matrix
 from MDAnalysis.analysis.rms import rmsd as mda_rmsd
 
 LOGGER = logging.getLogger(__name__)
@@ -1004,42 +1005,30 @@ def _superposed_rmsd(a: np.ndarray, b: np.ndarray) -> float:
     return float(mda_rmsd(a, b, center=True, superposition=True))
 
 
-def _kabsch_aligned_coordinates(mobile: np.ndarray, target: np.ndarray) -> np.ndarray:
-    mobile_center = np.mean(mobile, axis=0)
-    target_center = np.mean(target, axis=0)
-    mobile_centered = mobile - mobile_center
-    target_centered = target - target_center
-
-    covariance = mobile_centered.T @ target_centered
-    u, _, vt = np.linalg.svd(covariance)
-    rotation = u @ vt
-    if np.linalg.det(rotation) < 0:
-        vt[-1, :] *= -1
-        rotation = u @ vt
-    return mobile_centered @ rotation + target_center
-
-
-def _iterative_superposed_average_structure(
-    coords: np.ndarray,
-    max_iter: int = 20,
-    tol: float = 1e-6,
+def _aligned_coordinates_to_reference(
+    mobile: np.ndarray, reference: np.ndarray
 ) -> np.ndarray:
+    mobile_center = np.mean(mobile, axis=0)
+    reference_center = np.mean(reference, axis=0)
+    mobile_centered = mobile - mobile_center
+    reference_centered = reference - reference_center
+
+    rotation, _ = mda_rotation_matrix(mobile_centered, reference_centered)
+    return mobile_centered @ rotation.T + reference_center
+
+
+def _average_structure_aligned_to_first_model(coords: np.ndarray) -> np.ndarray:
     if coords.ndim != 3 or coords.shape[0] == 0:
         raise ValueError("coords must have shape (n_models, n_atoms, 3)")
-    reference = np.asarray(coords[0], dtype=float).copy()
-    for _ in range(max_iter):
-        aligned = np.asarray(
-            [_kabsch_aligned_coordinates(model, reference) for model in coords],
-            dtype=float,
-        )
-        new_reference = np.mean(aligned, axis=0)
-        delta = float(
-            np.sqrt(np.mean(np.sum((new_reference - reference) ** 2, axis=1)))
-        )
-        reference = new_reference
-        if delta <= tol:
-            break
-    return reference
+    reference = np.asarray(coords[0], dtype=float)
+    aligned = np.asarray(
+        [
+            _aligned_coordinates_to_reference(model, reference)
+            for model in coords
+        ],
+        dtype=float,
+    )
+    return np.mean(aligned, axis=0)
 
 
 def _normalize_polymer_sequence(
@@ -3210,7 +3199,7 @@ class SolutionNMRMonomerPrecisionCollector:
             [[model_map[resid] for resid in sorted_resids] for model_map in model_maps],
             dtype=float,
         )
-        reference_coords = _iterative_superposed_average_structure(coords)
+        reference_coords = _average_structure_aligned_to_first_model(coords)
         per_model_rmsd = [
             _superposed_rmsd(model_coord, reference_coords) for model_coord in coords
         ]
