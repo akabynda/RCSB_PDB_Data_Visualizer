@@ -242,7 +242,8 @@ class SolutionNMRMonomerPrecisionRecord:
     core_start_seq_id: int
     core_end_seq_id: int
     n_models: int
-    n_ca_core: int
+    n_ca_core_used: int
+    n_ca_core_raw: int
     mean_rmsd_angstrom: float
 
 
@@ -837,26 +838,106 @@ def parse_models_ca_coords(
     start_seq_id: int | None = None,
     end_seq_id: int | None = None,
 ) -> list[dict[int, np.ndarray]]:
+    model_maps, _ = parse_models_ca_coords_with_stats(
+        pdb_path=pdb_path,
+        chain_id=chain_id,
+        start_seq_id=start_seq_id,
+        end_seq_id=end_seq_id,
+    )
+    return model_maps
 
+
+def _alt_loc_tiebreak_key(alt_loc: str) -> tuple[int, str]:
+    # Prefer blank altLoc, then A, then 1; keep deterministic order for others.
+    if alt_loc == "":
+        return (0, "")
+    if alt_loc == "A":
+        return (1, "")
+    if alt_loc == "1":
+        return (2, "")
+    return (3, alt_loc)
+
+
+def _insertion_code_tiebreak_key(insertion_code: str) -> tuple[int, str]:
+    # Prefer residue numbers without insertion codes (e.g., 102 over 102A).
+    if insertion_code == "":
+        return (0, "")
+    return (1, insertion_code)
+
+
+def _parse_pdb_occupancy(line: str) -> float:
+    occ_text = line[54:60].strip()
+    if not occ_text:
+        return float("-inf")
+    try:
+        return float(occ_text)
+    except ValueError:
+        return float("-inf")
+
+
+def _is_better_ca_candidate(
+    new_insertion_code: str,
+    new_occupancy: float,
+    new_alt_loc: str,
+    current_insertion_code: str,
+    current_occupancy: float,
+    current_alt_loc: str,
+) -> bool:
+    new_i_code_key = _insertion_code_tiebreak_key(new_insertion_code)
+    current_i_code_key = _insertion_code_tiebreak_key(current_insertion_code)
+    if new_i_code_key < current_i_code_key:
+        return True
+    if new_i_code_key > current_i_code_key:
+        return False
+
+    if new_occupancy > current_occupancy + 1e-9:
+        return True
+    if current_occupancy > new_occupancy + 1e-9:
+        return False
+    return _alt_loc_tiebreak_key(new_alt_loc) < _alt_loc_tiebreak_key(current_alt_loc)
+
+
+def parse_models_ca_coords_with_stats(
+    pdb_path: Path,
+    chain_id: str,
+    start_seq_id: int | None = None,
+    end_seq_id: int | None = None,
+) -> tuple[list[dict[int, np.ndarray]], list[dict[int, int]]]:
+    # Select one CA per residue by max occupancy (altLoc-aware) and keep raw
+    # per-residue counts so callers can report how many CA atoms were present
+    # before altLoc collapsing.
     models: list[dict[int, np.ndarray]] = []
-    current_model: dict[int, np.ndarray] = {}
+    raw_ca_counts_per_model: list[dict[int, int]] = []
+    current_candidates: dict[int, tuple[str, float, str, np.ndarray]] = {}
+    current_raw_counts: Counter[int] = Counter()
     has_model_records = False
     in_model = False
+
+    def finalize_model() -> None:
+        models.append(
+            {
+                resid: candidate[3]
+                for resid, candidate in current_candidates.items()
+            }
+        )
+        raw_ca_counts_per_model.append(dict(current_raw_counts))
 
     with pdb_path.open("r", encoding="utf-8", errors="ignore") as handle:
         for line in handle:
             record = line[:6]
             if record.startswith("MODEL"):
                 if in_model:
-                    models.append(current_model)
-                    current_model = {}
+                    finalize_model()
+                    current_candidates = {}
+                    current_raw_counts = Counter()
                 has_model_records = True
                 in_model = True
                 continue
             if record.startswith("ENDMDL"):
                 if in_model:
-                    models.append(current_model)
-                    current_model = {}
+                    finalize_model()
+                    current_candidates = {}
+                    current_raw_counts = Counter()
                     in_model = False
                 continue
             if not record.startswith("ATOM"):
@@ -864,9 +945,6 @@ def parse_models_ca_coords(
 
             atom_name = line[12:16].strip()
             if atom_name != "CA":
-                continue
-            alt_loc = line[16].strip()
-            if alt_loc not in {"", "A", "1"}:
                 continue
             atom_chain = line[21].strip()
             if atom_chain != chain_id:
@@ -880,22 +958,46 @@ def parse_models_ca_coords(
                 continue
             if end_seq_id is not None and resid > end_seq_id:
                 continue
-            if resid in current_model:
-                continue
+
+            current_raw_counts[resid] += 1
+
+            insertion_code = line[26].strip()
+            alt_loc = line[16].strip()
+            occupancy = _parse_pdb_occupancy(line)
             try:
                 x = float(line[30:38].strip())
                 y = float(line[38:46].strip())
                 z = float(line[46:54].strip())
             except ValueError:
                 continue
-            current_model[resid] = np.array([x, y, z], dtype=float)
+            coords = np.array([x, y, z], dtype=float)
+            existing = current_candidates.get(resid)
+            if existing is None:
+                current_candidates[resid] = (insertion_code, occupancy, alt_loc, coords)
+                continue
+
+            (
+                existing_insertion_code,
+                existing_occupancy,
+                existing_alt_loc,
+                _,
+            ) = existing
+            if _is_better_ca_candidate(
+                new_insertion_code=insertion_code,
+                new_occupancy=occupancy,
+                new_alt_loc=alt_loc,
+                current_insertion_code=existing_insertion_code,
+                current_occupancy=existing_occupancy,
+                current_alt_loc=existing_alt_loc,
+            ):
+                current_candidates[resid] = (insertion_code, occupancy, alt_loc, coords)
 
     if has_model_records:
-        if in_model or current_model:
-            models.append(current_model)
-    elif current_model:
-        models.append(current_model)
-    return models
+        if in_model or current_candidates or current_raw_counts:
+            finalize_model()
+    elif current_candidates or current_raw_counts:
+        finalize_model()
+    return models, raw_ca_counts_per_model
 
 
 def _superposed_rmsd(a: np.ndarray, b: np.ndarray) -> float:
@@ -3049,8 +3151,8 @@ class SolutionNMRMonomerPrecisionCollector:
         chain_id: str,
         start_seq_id: int,
         end_seq_id: int,
-    ) -> tuple[int, int, float] | None:
-        model_maps = parse_models_ca_coords(
+    ) -> tuple[int, int, int, float] | None:
+        model_maps, raw_ca_counts_per_model = parse_models_ca_coords_with_stats(
             pdb_path=pdb_path,
             chain_id=chain_id,
             start_seq_id=start_seq_id,
@@ -3075,7 +3177,21 @@ class SolutionNMRMonomerPrecisionCollector:
             _superposed_rmsd(model_coord, reference_coords) for model_coord in coords
         ]
 
-        return len(model_maps), len(sorted_resids), float(np.mean(per_model_rmsd))
+        raw_ca_counts_common = [
+            sum(raw_counts.get(resid, 0) for resid in sorted_resids)
+            for raw_counts in raw_ca_counts_per_model
+        ]
+        n_ca_core_raw = (
+            min(raw_ca_counts_common)
+            if raw_ca_counts_common
+            else len(sorted_resids)
+        )
+        return (
+            len(model_maps),
+            len(sorted_resids),
+            int(n_ca_core_raw),
+            float(np.mean(per_model_rmsd)),
+        )
 
     def _compute_record(
         self, core: SolutionNMRMonomerCoreRegionRecord
@@ -3090,7 +3206,7 @@ class SolutionNMRMonomerPrecisionCollector:
             )
             if result is None:
                 return None
-            n_models, n_ca_core, mean_rmsd = result
+            n_models, n_ca_core_used, n_ca_core_raw, mean_rmsd = result
             return SolutionNMRMonomerPrecisionRecord(
                 entry_id=core.entry_id,
                 year=core.year,
@@ -3098,7 +3214,8 @@ class SolutionNMRMonomerPrecisionCollector:
                 core_start_seq_id=core.core_start_seq_id,
                 core_end_seq_id=core.core_end_seq_id,
                 n_models=n_models,
-                n_ca_core=n_ca_core,
+                n_ca_core_used=n_ca_core_used,
+                n_ca_core_raw=n_ca_core_raw,
                 mean_rmsd_angstrom=mean_rmsd,
             )
         except Exception as exc:
@@ -4329,6 +4446,14 @@ def read_solution_nmr_monomer_precision_csv(
         for row in reader:
             if not row:
                 continue
+            n_ca_core_used_raw = row.get("n_ca_core_used")
+            if n_ca_core_used_raw in {None, ""}:
+                n_ca_core_used_raw = row.get("n_ca_core")
+            if n_ca_core_used_raw in {None, ""}:
+                continue
+            n_ca_core_raw_raw = row.get("n_ca_core_raw")
+            if n_ca_core_raw_raw in {None, ""}:
+                n_ca_core_raw_raw = n_ca_core_used_raw
             records.append(
                 SolutionNMRMonomerPrecisionRecord(
                     entry_id=str(row["entry_id"]),
@@ -4337,7 +4462,8 @@ def read_solution_nmr_monomer_precision_csv(
                     core_start_seq_id=int(row["core_start_seq_id"]),
                     core_end_seq_id=int(row["core_end_seq_id"]),
                     n_models=int(row["n_models"]),
-                    n_ca_core=int(row["n_ca_core"]),
+                    n_ca_core_used=int(str(n_ca_core_used_raw)),
+                    n_ca_core_raw=int(str(n_ca_core_raw_raw)),
                     mean_rmsd_angstrom=float(row["mean_rmsd_angstrom"]),
                 )
             )
@@ -4351,7 +4477,8 @@ SOLUTION_NMR_MONOMER_PRECISION_HEADER: tuple[str, ...] = (
     "core_start_seq_id",
     "core_end_seq_id",
     "n_models",
-    "n_ca_core",
+    "n_ca_core_used",
+    "n_ca_core_raw",
     "mean_rmsd_angstrom",
 )
 
@@ -4366,7 +4493,8 @@ def _solution_nmr_monomer_precision_csv_row(
         record.core_start_seq_id,
         record.core_end_seq_id,
         record.n_models,
-        record.n_ca_core,
+        record.n_ca_core_used,
+        record.n_ca_core_raw,
         f"{record.mean_rmsd_angstrom:.6f}",
     )
 
