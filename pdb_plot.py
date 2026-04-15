@@ -1926,17 +1926,38 @@ class PDBScientificPlotter:
     ) -> None:
         table = self._prepare_monomer_xray_rmsd_table(self._read_csv(data_path))
         self._scientific_style()
+        filtered = table.loc[table["rmsd_ca_angstrom"] >= 0.0].copy()
         yearly_mean_rmsd = (
-            table.groupby("year", as_index=True)["rmsd_ca_angstrom"].mean().sort_index()
+            filtered.groupby("year", as_index=True)["rmsd_ca_angstrom"]
+            .mean()
+            .sort_index()
         )
-        self._render_bar_series(
+
+        def draw(ax: plt.Axes) -> None:
+            ax.scatter(
+                filtered["year"],
+                filtered["rmsd_ca_angstrom"],
+                s=10,
+                alpha=0.2,
+                color="#7f7f7f",
+                label="Individual structures",
+            )
+            ax.plot(
+                yearly_mean_rmsd.index,
+                yearly_mean_rmsd.values,
+                linewidth=2.2,
+                color=self.config.nmr_color,
+                label="Yearly mean",
+            )
+            ax.set_ylim(bottom=0)
+            self._add_legend(ax, loc="upper left")
+
+        self._render_figure(
             output_png=output_png,
             output_svg=output_svg,
             title=self.config.nmr_monomer_xray_rmsd_title,
             y_label=self.config.nmr_monomer_xray_rmsd_y_label,
-            x_values=yearly_mean_rmsd.index,
-            y_values=yearly_mean_rmsd,
-            color="#9467bd",
+            draw_fn=draw,
         )
 
 
