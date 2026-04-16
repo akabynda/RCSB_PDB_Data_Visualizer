@@ -17,6 +17,7 @@ from matplotlib.ticker import AutoMinorLocator, MultipleLocator
 class PlotKind(str, Enum):
     METHOD_COUNTS = "method_counts"
     MEMBRANE_PROTEIN_COUNTS = "membrane_protein_counts"
+    SOLUTION_NMR_PROGRAM_COUNTS = "solution_nmr_program_counts"
     SOLUTION_NMR_WEIGHT_STATS = "solution_nmr_weight_stats"
     SOLUTION_NMR_PERIOD_BOXPLOT = "solution_nmr_period_boxplot"
     SOLUTION_NMR_PERIOD_AREA = "solution_nmr_period_area"
@@ -82,6 +83,10 @@ class PlotConfig:
     membrane_cumulative_y_label: str = (
         "Cumulative number of deposited membrane protein structures"
     )
+    nmr_program_annual_title: str = (
+        "Number of annually deposited solution NMR structures by refinement program"
+    )
+    nmr_program_annual_y_label: str = "Number of deposited structures"
     cumulative_title: str = (
         "Cumulative number of deposited PDB structures by experimental method"
     )
@@ -227,6 +232,7 @@ class PlotConfig:
 NMR_WEIGHT_BINS: tuple[float, ...] = (0.0, 10.0, 20.0, float("inf"))
 NMR_WEIGHT_LABELS: tuple[str, ...] = ("<10 kDa", "10-20 kDa", ">20 kDa")
 MAX_PLOT_YEAR: int = 2024
+NMR_PROGRAM_TOP_N: int = 8
 YEAR_MAJOR_TICK_STEP: int = 5
 YEAR_MINOR_TICK_STEP: int = 1
 
@@ -245,6 +251,7 @@ def parse_plot_kinds(raw_value: str) -> list[PlotKind]:
         return [
             PlotKind.METHOD_COUNTS,
             PlotKind.MEMBRANE_PROTEIN_COUNTS,
+            PlotKind.SOLUTION_NMR_PROGRAM_COUNTS,
             PlotKind.SOLUTION_NMR_WEIGHT_STATS,
             PlotKind.SOLUTION_NMR_PERIOD_BOXPLOT,
             PlotKind.SOLUTION_NMR_PERIOD_AREA,
@@ -562,7 +569,15 @@ class PDBScientificPlotter:
         x_left: float | None = None,
     ) -> None:
         def draw(ax: plt.Axes) -> None:
-            ax.bar(x_values, y_values, color=color, width=width)
+            # Keep `width` in the signature for compatibility with existing calls.
+            _ = width
+            ax.step(
+                x_values,
+                y_values,
+                where="mid",
+                color=color,
+                linewidth=2.2,
+            )
             if y_limits is not None:
                 ax.set_ylim(*y_limits)
             if x_left is not None:
@@ -661,6 +676,22 @@ class PDBScientificPlotter:
         )
 
     @staticmethod
+    def _prepare_nmr_program_count_table(df: pd.DataFrame) -> pd.DataFrame:
+        prepared = PDBScientificPlotter._prepare_typed_table(
+            df=df,
+            required_columns={"year", "program", "count"},
+            column_types={"year": int, "program": str, "count": int},
+            dataset_name="Solution NMR program count CSV",
+        )
+        limited = PDBScientificPlotter._limit_year_column(prepared)
+        return (
+            limited.pivot(index="year", columns="program", values="count")
+            .fillna(0)
+            .sort_index()
+            .astype(int)
+        )
+
+    @staticmethod
     def _prepare_membrane_count_table(df: pd.DataFrame) -> pd.DataFrame:
         prepared = PDBScientificPlotter._prepare_typed_table(
             df=df,
@@ -732,6 +763,50 @@ class PDBScientificPlotter:
             self.config.cumulative_title,
             self.config.cumulative_y_label,
             lambda ax: draw(ax, cumulative_table),
+        )
+
+    def plot_solution_nmr_program_counts(
+        self,
+        data_path: Path,
+        annual_output_png: Path,
+        annual_output_svg: Path,
+        top_n: int = NMR_PROGRAM_TOP_N,
+    ) -> None:
+        table = self._prepare_nmr_program_count_table(self._read_csv(data_path))
+        if table.empty:
+            raise ValueError("Solution NMR program count CSV is empty.")
+        top_programs = (
+            table.sum(axis=0)
+            .sort_values(ascending=False)
+            .head(max(1, top_n))
+            .index.tolist()
+        )
+        filtered_table = table[top_programs]
+        self._scientific_style()
+
+        def draw(ax: plt.Axes) -> None:
+            colors = plt.cm.tab10.colors
+            for idx, program in enumerate(filtered_table.columns):
+                ax.plot(
+                    filtered_table.index,
+                    filtered_table[program],
+                    color=colors[idx % len(colors)],
+                    linewidth=2.0,
+                    label=program,
+                )
+            self._add_legend(
+                ax,
+                loc="upper left",
+                ncol=2 if len(filtered_table.columns) > 4 else 1,
+                title="Program",
+            )
+
+        self._render_figure(
+            output_png=annual_output_png,
+            output_svg=annual_output_svg,
+            title=self.config.nmr_program_annual_title,
+            y_label=self.config.nmr_program_annual_y_label,
+            draw_fn=draw,
         )
 
     def plot_solution_nmr_weight_stats(
@@ -1932,6 +2007,7 @@ def parse_args() -> argparse.Namespace:
         default=[
             PlotKind.METHOD_COUNTS,
             PlotKind.MEMBRANE_PROTEIN_COUNTS,
+            PlotKind.SOLUTION_NMR_PROGRAM_COUNTS,
             PlotKind.SOLUTION_NMR_WEIGHT_STATS,
             PlotKind.SOLUTION_NMR_PERIOD_BOXPLOT,
             PlotKind.SOLUTION_NMR_PERIOD_AREA,
@@ -1954,7 +2030,7 @@ def parse_args() -> argparse.Namespace:
             PlotKind.SOLUTION_NMR_MONOMER_XRAY_HOMOLOGS,
             PlotKind.SOLUTION_NMR_MONOMER_XRAY_RMSD,
         ],
-        help="Comma-separated plot kinds or 'all'. Available: method_counts, membrane_protein_counts, solution_nmr_weight_stats, solution_nmr_period_boxplot, solution_nmr_period_area, solution_nmr_period_area_share, solution_nmr_period_area_cumulative_share, solution_nmr_monomer_secondary, solution_nmr_monomer_secondary_comparison, solution_nmr_monomer_secondary_comparison_cumulative, solution_nmr_monomer_stride_modeled_first_model, solution_nmr_monomer_secondary_modeled_first_model_comparison, solution_nmr_monomer_secondary_modeled_first_model_comparison_cumulative, solution_nmr_monomer_stride_comparison, solution_nmr_monomer_stride_comparison_cumulative, solution_nmr_monomer_stride_modeled_first_model_comparison, solution_nmr_monomer_stride_modeled_first_model_comparison_cumulative, solution_nmr_monomer_three_way_comparison, solution_nmr_monomer_three_way_comparison_cumulative, solution_nmr_monomer_precision, solution_nmr_monomer_quality, solution_nmr_monomer_xray_homologs, solution_nmr_monomer_xray_rmsd (default: all).",
+        help="Comma-separated plot kinds or 'all'. Available: method_counts, membrane_protein_counts, solution_nmr_program_counts, solution_nmr_weight_stats, solution_nmr_period_boxplot, solution_nmr_period_area, solution_nmr_period_area_share, solution_nmr_period_area_cumulative_share, solution_nmr_monomer_secondary, solution_nmr_monomer_secondary_comparison, solution_nmr_monomer_secondary_comparison_cumulative, solution_nmr_monomer_stride_modeled_first_model, solution_nmr_monomer_secondary_modeled_first_model_comparison, solution_nmr_monomer_secondary_modeled_first_model_comparison_cumulative, solution_nmr_monomer_stride_comparison, solution_nmr_monomer_stride_comparison_cumulative, solution_nmr_monomer_stride_modeled_first_model_comparison, solution_nmr_monomer_stride_modeled_first_model_comparison_cumulative, solution_nmr_monomer_three_way_comparison, solution_nmr_monomer_three_way_comparison_cumulative, solution_nmr_monomer_precision, solution_nmr_monomer_quality, solution_nmr_monomer_xray_homologs, solution_nmr_monomer_xray_rmsd (default: all).",
     )
     parser.add_argument(
         "--counts-input",
@@ -1973,6 +2049,12 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("data/solution_nmr_structure_weights.csv"),
         help="Input CSV for SOLUTION NMR weight-based plots.",
+    )
+    parser.add_argument(
+        "--nmr-program-counts-input",
+        type=Path,
+        default=Path("data/solution_nmr_program_counts_by_year.csv"),
+        help="Input CSV for SOLUTION NMR refinement program trend plot.",
     )
     parser.add_argument(
         "--nmr-monomer-secondary-input",
@@ -2082,6 +2164,18 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("figures/membrane_protein_counts_cumulative_by_year.svg"),
         help="Output SVG for cumulative membrane-protein count figure.",
+    )
+    parser.add_argument(
+        "--nmr-program-annual-output-png",
+        type=Path,
+        default=Path("figures/solution_nmr_program_trends_by_year.png"),
+        help="Output PNG for annual SOLUTION NMR refinement program trend figure.",
+    )
+    parser.add_argument(
+        "--nmr-program-annual-output-svg",
+        type=Path,
+        default=Path("figures/solution_nmr_program_trends_by_year.svg"),
+        help="Output SVG for annual SOLUTION NMR refinement program trend figure.",
     )
 
     parser.add_argument(
@@ -2498,6 +2592,13 @@ def main() -> None:
             annual_output_svg=args.membrane_annual_output_svg,
             cumulative_output_png=args.membrane_cumulative_output_png,
             cumulative_output_svg=args.membrane_cumulative_output_svg,
+        )
+
+    if PlotKind.SOLUTION_NMR_PROGRAM_COUNTS in args.plots:
+        plotter.plot_solution_nmr_program_counts(
+            data_path=args.nmr_program_counts_input,
+            annual_output_png=args.nmr_program_annual_output_png,
+            annual_output_svg=args.nmr_program_annual_output_svg,
         )
 
     if PlotKind.SOLUTION_NMR_WEIGHT_STATS in args.plots:

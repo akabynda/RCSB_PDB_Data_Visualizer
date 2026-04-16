@@ -4,6 +4,7 @@ import argparse
 import csv
 import logging
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -65,6 +66,7 @@ class ExperimentalMethod(Enum):
 class DatasetKind(str, Enum):
     METHOD_COUNTS = "method_counts"
     MEMBRANE_PROTEIN_COUNTS = "membrane_protein_counts"
+    SOLUTION_NMR_PROGRAM_COUNTS = "solution_nmr_program_counts"
     SOLUTION_NMR_WEIGHTS = "solution_nmr_weights"
     SOLUTION_NMR_MONOMER_SECONDARY = "solution_nmr_monomer_secondary"
     SOLUTION_NMR_MONOMER_SECONDARY_MODELED_FIRST_MODEL = (
@@ -102,6 +104,13 @@ class YearlyCountRecord:
 @dataclass(frozen=True)
 class MembraneYearlyCountRecord:
     year: int
+    count: int
+
+
+@dataclass(frozen=True)
+class SolutionNMRProgramYearlyCountRecord:
+    year: int
+    program: str
     count: int
 
 
@@ -425,6 +434,71 @@ def write_csv_rows(
         writer = csv.writer(csvfile)
         writer.writerow(header)
         writer.writerows(rows)
+
+
+PROGRAM_REMARK_PATTERN = re.compile(r"^REMARK\s+3\s+PROGRAM\s*:\s*(.*)$")
+PROGRAM_SPLIT_PATTERN = re.compile(r"\s*(?:,|;|/|\+|\bAND\b)\s*", re.IGNORECASE)
+PROGRAM_TRAILING_VERSION_PATTERN = re.compile(
+    r"\s+(?:V(?:ERSION)?\.?\s*)?\d[\w.\-_:]*$",
+    re.IGNORECASE,
+)
+PROGRAM_PARENTHESIS_PATTERN = re.compile(r"\([^)]*\)")
+PROGRAM_HAS_LETTER_PATTERN = re.compile(r"[A-Z]")
+PROGRAM_EMPTY_VALUES: frozenset[str] = frozenset(
+    {
+        "",
+        "NULL",
+        "NONE",
+        "N/A",
+        "NA",
+        "NOT APPLICABLE",
+        "NOT PROVIDED",
+        "UNKNOWN",
+        "?",
+    }
+)
+
+
+def _normalize_refinement_program_name(raw_value: str) -> str | None:
+    token = raw_value.strip().upper()
+    if not token:
+        return None
+    token = PROGRAM_PARENTHESIS_PATTERN.sub(" ", token)
+    token = " ".join(token.split()).strip(".,:; ")
+    if not token or token in PROGRAM_EMPTY_VALUES:
+        return None
+    if ":" in token:
+        token = token.split(":", 1)[0].strip(".,:; ")
+    while token:
+        trimmed = PROGRAM_TRAILING_VERSION_PATTERN.sub("", token).strip(".,:; ")
+        if trimmed == token:
+            break
+        token = trimmed
+    if token.endswith(" VERSION"):
+        token = token[: -len(" VERSION")].strip(".,:; ")
+    token = " ".join(token.split()).strip(".,:; ")
+    if not token or token in PROGRAM_EMPTY_VALUES:
+        return None
+    if PROGRAM_HAS_LETTER_PATTERN.search(token) is None:
+        return None
+    return token
+
+
+def extract_refinement_programs_from_pdb(pdb_path: Path) -> set[str]:
+    programs: set[str] = set()
+    with pdb_path.open("r", encoding="utf-8", errors="ignore") as handle:
+        for line in handle:
+            match = PROGRAM_REMARK_PATTERN.match(line)
+            if not match:
+                continue
+            value = match.group(1).strip()
+            if not value:
+                continue
+            for raw_token in PROGRAM_SPLIT_PATTERN.split(value):
+                normalized = _normalize_refinement_program_name(raw_token)
+                if normalized is not None:
+                    programs.add(normalized)
+    return programs
 
 
 def extract_model_pdb_texts(pdb_path: Path) -> list[str]:
@@ -1554,6 +1628,37 @@ class RCSBClient:
             for entry in entries
             if entry and entry.get("rcsb_accession_info", {}).get("deposit_date")
         ]
+
+    def fetch_deposit_year_by_entry_id_for_ids(
+        self, entry_ids: list[str]
+    ) -> dict[str, int]:
+        if not entry_ids:
+            return {}
+        query = """
+        query($ids:[String!]!) {
+          entries(entry_ids:$ids) {
+            rcsb_id
+            rcsb_accession_info {
+              deposit_date
+            }
+          }
+        }
+        """
+        payload = {"query": query, "variables": {"ids": entry_ids}}
+        data = self._post_json(self.config.graphql_url, payload)
+        entries = data.get("data", {}).get("entries", [])
+        entry_year_by_id: dict[str, int] = {}
+        for entry in entries:
+            if not entry:
+                continue
+            entry_id = entry.get("rcsb_id")
+            if not entry_id:
+                continue
+            year = extract_year(entry.get("rcsb_accession_info", {}).get("deposit_date"))
+            if year is None:
+                continue
+            entry_year_by_id[str(entry_id)] = year
+        return entry_year_by_id
 
     def fetch_entry_resolution_for_ids(self, entry_ids: list[str]) -> dict[str, float]:
         query = """
@@ -2873,6 +2978,131 @@ class PDBMethodYearlyCollector:
         return sorted(records, key=lambda record: (record.year, record.method))
 
 
+class SolutionNMRProgramYearlyCollector:
+    def __init__(
+        self,
+        client: RCSBClient,
+        config: CollectorConfig,
+        cache_dir: Path,
+        download_missing: bool = True,
+    ) -> None:
+        self.client = client
+        self.config = config
+        self.cache_dir = cache_dir
+        self.download_missing = download_missing
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+
+    def _fetch_entry_years(self, entry_ids: list[str]) -> dict[str, int]:
+        entry_year_by_id: dict[str, int] = {}
+        batches = list(chunked(entry_ids, self.config.graphql_batch_size))
+        for batch_year_map in collect_batch_results(
+            batches=batches,
+            max_workers=self.config.max_workers,
+            fetch_fn=self.client.fetch_deposit_year_by_entry_id_for_ids,
+            progress_label="SOLUTION NMR programs years",
+        ):
+            entry_year_by_id.update(batch_year_map)
+        return entry_year_by_id
+
+    def _load_programs_for_entry(self, entry_id: str) -> set[str] | None:
+        cached_pdb_path = self.cache_dir / f"{entry_id}.pdb"
+        if cached_pdb_path.exists() and cached_pdb_path.stat().st_size > 0:
+            return extract_refinement_programs_from_pdb(cached_pdb_path)
+        if not self.download_missing:
+            return None
+        try:
+            downloaded_pdb_path = download_pdb_if_needed(
+                session=self.client.session,
+                config=self.config,
+                cache_dir=self.cache_dir,
+                entry_id=entry_id,
+            )
+        except Exception as exc:
+            LOGGER.warning("Failed to get PDB for %s: %s", entry_id, exc)
+            return None
+        return extract_refinement_programs_from_pdb(downloaded_pdb_path)
+
+    def collect(self) -> list[SolutionNMRProgramYearlyCountRecord]:
+        entry_ids = fetch_solution_nmr_entry_ids(
+            client=self.client,
+            log_label="SOLUTION NMR programs",
+        )
+        if not entry_ids:
+            return []
+
+        entry_year_by_id = self._fetch_entry_years(entry_ids)
+        missing_year_count = 0
+        missing_program_count = 0
+        skipped_uncached_count = 0
+        yearly_program_counter: Counter[tuple[int, str]] = Counter()
+
+        entry_year_pairs = [
+            (entry_id, entry_year_by_id.get(entry_id))
+            for entry_id in entry_ids
+        ]
+
+        with ThreadPoolExecutor(max_workers=self.config.max_workers) as executor:
+            future_map = {
+                executor.submit(self._load_programs_for_entry, entry_id): (
+                    entry_id,
+                    year,
+                )
+                for entry_id, year in entry_year_pairs
+                if year is not None
+            }
+            missing_year_count = len(entry_ids) - len(future_map)
+            total = len(entry_ids)
+            processed = 0
+            for future in as_completed(future_map):
+                entry_id, year = future_map[future]
+                programs = future.result()
+                if programs is None:
+                    cached_pdb_path = self.cache_dir / f"{entry_id}.pdb"
+                    if (
+                        not self.download_missing
+                        and (not cached_pdb_path.exists() or cached_pdb_path.stat().st_size <= 0)
+                    ):
+                        skipped_uncached_count += 1
+                    else:
+                        missing_program_count += 1
+                elif not programs:
+                    missing_program_count += 1
+                else:
+                    for program in programs:
+                        yearly_program_counter[(year, program)] += 1
+
+                processed += 1
+                if processed % 500 == 0 or processed == len(future_map):
+                    LOGGER.info(
+                        "SOLUTION NMR programs: parsed %d/%d entries",
+                        processed + missing_year_count,
+                        total,
+                    )
+
+        LOGGER.info(
+            (
+                "SOLUTION NMR programs: entries=%d, missing_year=%d, "
+                "without_program=%d, skipped_uncached=%d, unique_programs=%d"
+            ),
+            len(entry_ids),
+            missing_year_count,
+            missing_program_count,
+            skipped_uncached_count,
+            len({program for _, program in yearly_program_counter.keys()}),
+        )
+        return sorted(
+            (
+                SolutionNMRProgramYearlyCountRecord(
+                    year=year,
+                    program=program,
+                    count=count,
+                )
+                for (year, program), count in yearly_program_counter.items()
+            ),
+            key=lambda record: (record.year, record.program),
+        )
+
+
 class MembraneProteinYearlyCollector:
     def __init__(self, client: RCSBClient, config: CollectorConfig) -> None:
         self.client = client
@@ -3789,6 +4019,16 @@ def write_method_counts_csv(
     )
 
 
+def write_solution_nmr_program_counts_csv(
+    records: list[SolutionNMRProgramYearlyCountRecord], output_path: Path
+) -> None:
+    write_csv_rows(
+        output_path=output_path,
+        header=["year", "program", "count"],
+        rows=((r.year, r.program, r.count) for r in records),
+    )
+
+
 def write_membrane_counts_csv(
     records: list[MembraneYearlyCountRecord], output_path: Path
 ) -> None:
@@ -4693,6 +4933,7 @@ def parse_dataset_kinds(raw_value: str) -> list[DatasetKind]:
         return [
             DatasetKind.METHOD_COUNTS,
             DatasetKind.MEMBRANE_PROTEIN_COUNTS,
+            DatasetKind.SOLUTION_NMR_PROGRAM_COUNTS,
             DatasetKind.SOLUTION_NMR_WEIGHTS,
             DatasetKind.SOLUTION_NMR_MONOMER_SECONDARY,
             DatasetKind.SOLUTION_NMR_MONOMER_SECONDARY_MODELED_FIRST_MODEL,
@@ -4731,7 +4972,7 @@ def parse_args() -> argparse.Namespace:
             DatasetKind.SOLUTION_NMR_MONOMER_SECONDARY,
         ],
         help="Comma-separated dataset kinds or 'all'. "
-        "Available: method_counts, membrane_protein_counts, solution_nmr_weights, solution_nmr_monomer_secondary, solution_nmr_monomer_secondary_modeled_first_model, solution_nmr_monomer_stride, solution_nmr_monomer_stride_modeled_first_model, solution_nmr_monomer_precision, solution_nmr_monomer_quality, solution_nmr_monomer_xray_homologs, solution_nmr_monomer_xray_rmsd (default: the first three).",
+        "Available: method_counts, membrane_protein_counts, solution_nmr_program_counts, solution_nmr_weights, solution_nmr_monomer_secondary, solution_nmr_monomer_secondary_modeled_first_model, solution_nmr_monomer_stride, solution_nmr_monomer_stride_modeled_first_model, solution_nmr_monomer_precision, solution_nmr_monomer_quality, solution_nmr_monomer_xray_homologs, solution_nmr_monomer_xray_rmsd (default: the first three).",
     )
     parser.add_argument(
         "--counts-output",
@@ -4750,6 +4991,26 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("data/solution_nmr_structure_weights.csv"),
         help="Output CSV path for solution_nmr_weights dataset.",
+    )
+    parser.add_argument(
+        "--solution-nmr-program-counts-output",
+        type=Path,
+        default=Path("data/solution_nmr_program_counts_by_year.csv"),
+        help="Output CSV path for solution_nmr_program_counts dataset.",
+    )
+    parser.add_argument(
+        "--solution-nmr-program-cache-dir",
+        type=Path,
+        default=Path("data/pdb_cache"),
+        help="Directory to cache downloaded PDB files for solution_nmr_program_counts dataset.",
+    )
+    parser.add_argument(
+        "--solution-nmr-program-cache-only",
+        action="store_true",
+        help=(
+            "Use only already cached PDB files for solution_nmr_program_counts "
+            "(skip downloading missing files)."
+        ),
     )
     parser.add_argument(
         "--solution-nmr-monomer-secondary-output",
@@ -4963,6 +5224,24 @@ def main() -> None:
             "Saved %d records to %s",
             len(membrane_records),
             args.membrane_counts_output,
+        )
+
+    if DatasetKind.SOLUTION_NMR_PROGRAM_COUNTS in args.datasets:
+        nmr_program_collector = SolutionNMRProgramYearlyCollector(
+            client=client,
+            config=config,
+            cache_dir=Path(args.solution_nmr_program_cache_dir),
+            download_missing=not args.solution_nmr_program_cache_only,
+        )
+        nmr_program_records = nmr_program_collector.collect()
+        write_solution_nmr_program_counts_csv(
+            records=nmr_program_records,
+            output_path=args.solution_nmr_program_counts_output,
+        )
+        LOGGER.info(
+            "Saved %d records to %s",
+            len(nmr_program_records),
+            args.solution_nmr_program_counts_output,
         )
 
     if DatasetKind.SOLUTION_NMR_WEIGHTS in args.datasets:
