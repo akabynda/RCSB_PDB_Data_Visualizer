@@ -618,15 +618,34 @@ class PDBScientificPlotter:
         y_limits: tuple[float, float] | None = None,
         x_left: float | None = None,
         x_right: float | None = None,
+        use_step_segments: bool = False,
     ) -> None:
         def draw(ax: plt.Axes) -> None:
-            ax.stackplot(
-                table.index,
-                *(table[label] for label in NMR_WEIGHT_LABELS),
-                labels=NMR_WEIGHT_LABELS,
-                colors=self.config.area_colors,
-                alpha=0.85,
-            )
+            if use_step_segments:
+                base = pd.Series(0.0, index=table.index, dtype=float)
+                x_vals = table.index.to_numpy()
+                for idx, label in enumerate(NMR_WEIGHT_LABELS):
+                    values = table[label].astype(float)
+                    top = base + values
+                    color = self.config.area_colors[idx % len(self.config.area_colors)]
+                    ax.fill_between(
+                        x_vals,
+                        base.to_numpy(),
+                        top.to_numpy(),
+                        step="mid",
+                        color=color,
+                        alpha=0.85,
+                        label=label,
+                    )
+                    base = top
+            else:
+                ax.stackplot(
+                    table.index,
+                    *(table[label] for label in NMR_WEIGHT_LABELS),
+                    labels=NMR_WEIGHT_LABELS,
+                    colors=self.config.area_colors,
+                    alpha=0.85,
+                )
             if y_limits is not None:
                 ax.set_ylim(*y_limits)
             if x_left is not None or x_right is not None:
@@ -738,16 +757,30 @@ class PDBScientificPlotter:
         cumulative_table = table.cumsum()
         self._scientific_style()
 
-        def draw(ax: plt.Axes, source: pd.DataFrame) -> None:
+        def draw(ax: plt.Axes, source: pd.DataFrame, use_step: bool) -> None:
             for col, color in [
                 ("X-ray", self.config.xray_color),
                 ("NMR", self.config.nmr_color),
                 ("cryo-EM", self.config.cryoem_color),
             ]:
                 if col in source.columns:
-                    ax.plot(
-                        source.index, source[col], color=color, linewidth=2.0, label=col
-                    )
+                    if use_step:
+                        ax.step(
+                            source.index,
+                            source[col],
+                            where="mid",
+                            color=color,
+                            linewidth=2.0,
+                            label=col,
+                        )
+                    else:
+                        ax.plot(
+                            source.index,
+                            source[col],
+                            color=color,
+                            linewidth=2.0,
+                            label=col,
+                        )
             self._add_legend(ax, loc="upper left")
 
         self._render_figure(
@@ -755,14 +788,14 @@ class PDBScientificPlotter:
             annual_output_svg,
             self.config.annual_title,
             self.config.annual_y_label,
-            lambda ax: draw(ax, table),
+            lambda ax: draw(ax, table, use_step=True),
         )
         self._render_figure(
             cumulative_output_png,
             cumulative_output_svg,
             self.config.cumulative_title,
             self.config.cumulative_y_label,
-            lambda ax: draw(ax, cumulative_table),
+            lambda ax: draw(ax, cumulative_table, use_step=False),
         )
 
     def plot_solution_nmr_program_counts(
@@ -787,9 +820,10 @@ class PDBScientificPlotter:
         def draw(ax: plt.Axes) -> None:
             colors = plt.cm.tab10.colors
             for idx, program in enumerate(filtered_table.columns):
-                ax.plot(
+                ax.step(
                     filtered_table.index,
                     filtered_table[program],
+                    where="mid",
                     color=colors[idx % len(colors)],
                     linewidth=2.0,
                     label=program,
@@ -953,6 +987,7 @@ class PDBScientificPlotter:
             y_limits=(0.0, 100.0),
             x_left=1979,
             x_right=float(yearly_share.index.max()),
+            use_step_segments=True,
         )
 
     def plot_solution_nmr_period_area_cumulative_share(
@@ -1065,9 +1100,10 @@ class PDBScientificPlotter:
                 color="#7f7f7f",
                 label="Individual structures",
             )
-            ax.plot(
+            ax.step(
                 yearly_mean.index,
                 yearly_mean.values,
+                where="mid",
                 linewidth=2.2,
                 color=self.config.nmr_color,
                 label="Yearly mean",
@@ -1115,9 +1151,10 @@ class PDBScientificPlotter:
                 color="#7f7f7f",
                 label="Individual structures",
             )
-            ax.plot(
+            ax.step(
                 yearly_mean.index,
                 yearly_mean.values,
+                where="mid",
                 linewidth=2.2,
                 color=self.config.nmr_color,
                 label="Yearly mean",
@@ -1675,23 +1712,26 @@ class PDBScientificPlotter:
         )
 
         def draw(ax: plt.Axes) -> None:
-            ax.plot(
+            ax.step(
                 pdb_yearly.index,
                 pdb_yearly.values,
+                where="mid",
                 linewidth=2.2,
                 color=self.config.nmr_color,
                 label="PDB",
             )
-            ax.plot(
+            ax.step(
                 dssp_yearly.index,
                 dssp_yearly.values,
+                where="mid",
                 linewidth=2.2,
                 color=self.config.avg_color,
                 label="DSSP H+G+I+E+B",
             )
-            ax.plot(
+            ax.step(
                 stride_yearly.index,
                 stride_yearly.values,
+                where="mid",
                 linewidth=2.2,
                 color=self.config.max_color,
                 label="STRIDE H+G+I+E+B",
