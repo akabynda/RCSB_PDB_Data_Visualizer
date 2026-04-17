@@ -67,6 +67,7 @@ class DatasetKind(str, Enum):
     METHOD_COUNTS = "method_counts"
     MEMBRANE_PROTEIN_COUNTS = "membrane_protein_counts"
     SOLUTION_NMR_PROGRAM_COUNTS = "solution_nmr_program_counts"
+    SOLUTION_NMR_MONOMER_PROGRAM_CLUSTERS = "solution_nmr_monomer_program_clusters"
     SOLUTION_NMR_WEIGHTS = "solution_nmr_weights"
     SOLUTION_NMR_MONOMER_SECONDARY = "solution_nmr_monomer_secondary"
     SOLUTION_NMR_MONOMER_SECONDARY_MODELED_FIRST_MODEL = (
@@ -112,6 +113,27 @@ class SolutionNMRProgramYearlyCountRecord:
     year: int
     program: str
     count: int
+
+
+@dataclass(frozen=True)
+class SolutionNMRMonomerProgramClusterAssignmentRecord:
+    entry_id: str
+    year: int
+    cluster_id: str
+    cluster_name: str
+    has_program_text: bool
+    program_text: str
+
+
+@dataclass(frozen=True)
+class SolutionNMRMonomerProgramClusterSummaryRecord:
+    year: int
+    cluster_id: str
+    cluster_name: str
+    structure_count: int
+    avg_ramachandran_outliers_percent: float | None
+    avg_sidechain_outliers_percent: float | None
+    avg_clashscore: float | None
 
 
 @dataclass(frozen=True)
@@ -457,6 +479,18 @@ PROGRAM_EMPTY_VALUES: frozenset[str] = frozenset(
         "?",
     }
 )
+PROGRAM_CLUSTER_DEFINITIONS: tuple[tuple[str, str], ...] = (
+    ("CLUSTER1", "AMBER"),
+    ("CLUSTER2", "ARIA"),
+    ("CLUSTER3", "CNS"),
+    ("CLUSTER4", "CYANA"),
+    ("CLUSTER5", "DISCOVER"),
+    ("CLUSTER6", "DIANA_DYANA"),
+    ("CLUSTER7", "XPLOR"),
+    ("CLUSTER8", "XPLOR_NIH"),
+    ("CLUSTER9", "OTHER"),
+)
+PROGRAM_CLUSTER_NAME_BY_ID: dict[str, str] = dict(PROGRAM_CLUSTER_DEFINITIONS)
 
 
 def _normalize_refinement_program_name(raw_value: str) -> str | None:
@@ -484,6 +518,19 @@ def _normalize_refinement_program_name(raw_value: str) -> str | None:
     return token
 
 
+def extract_raw_refinement_program_text_from_pdb(pdb_path: Path) -> str:
+    values: list[str] = []
+    with pdb_path.open("r", encoding="utf-8", errors="ignore") as handle:
+        for line in handle:
+            match = PROGRAM_REMARK_PATTERN.match(line)
+            if not match:
+                continue
+            value = match.group(1).strip()
+            if value:
+                values.append(value)
+    return " || ".join(values)
+
+
 def extract_refinement_programs_from_pdb(pdb_path: Path) -> set[str]:
     programs: set[str] = set()
     with pdb_path.open("r", encoding="utf-8", errors="ignore") as handle:
@@ -499,6 +546,34 @@ def extract_refinement_programs_from_pdb(pdb_path: Path) -> set[str]:
                 if normalized is not None:
                     programs.add(normalized)
     return programs
+
+
+def classify_solution_nmr_program_cluster(
+    program_text: str | None,
+) -> tuple[str, str]:
+    text = (program_text or "").upper()
+    if "AMBER" in text:
+        return "CLUSTER1", PROGRAM_CLUSTER_NAME_BY_ID["CLUSTER1"]
+    if "ARIA" in text:
+        return "CLUSTER2", PROGRAM_CLUSTER_NAME_BY_ID["CLUSTER2"]
+    if "CNS" in text:
+        return "CLUSTER3", PROGRAM_CLUSTER_NAME_BY_ID["CLUSTER3"]
+    if "CYANA" in text:
+        return "CLUSTER4", PROGRAM_CLUSTER_NAME_BY_ID["CLUSTER4"]
+    if "DISCOVER" in text:
+        return "CLUSTER5", PROGRAM_CLUSTER_NAME_BY_ID["CLUSTER5"]
+    if "DIANA" in text or "DYANA" in text:
+        return "CLUSTER6", PROGRAM_CLUSTER_NAME_BY_ID["CLUSTER6"]
+    if ("X-PLOR" in text or "XPLOR" in text) and "NIH" not in text:
+        return "CLUSTER7", PROGRAM_CLUSTER_NAME_BY_ID["CLUSTER7"]
+    if (
+        "X-PLOR NIH" in text
+        or "XPLOR NIH" in text
+        or "X-PLOR-NIH" in text
+        or "XPLOR-NIH" in text
+    ):
+        return "CLUSTER8", PROGRAM_CLUSTER_NAME_BY_ID["CLUSTER8"]
+    return "CLUSTER9", PROGRAM_CLUSTER_NAME_BY_ID["CLUSTER9"]
 
 
 def extract_model_pdb_texts(pdb_path: Path) -> list[str]:
@@ -3103,6 +3178,142 @@ class SolutionNMRProgramYearlyCollector:
         )
 
 
+class SolutionNMRMonomerProgramClusterCollector:
+    def __init__(
+        self,
+        quality_records: list[SolutionNMRMonomerQualityRecord],
+        cache_dir: Path,
+        max_workers: int,
+    ) -> None:
+        self.quality_records = quality_records
+        self.cache_dir = cache_dir
+        self.max_workers = max(1, max_workers)
+
+    def _load_program_text(self, entry_id: str) -> str:
+        pdb_path = self.cache_dir / f"{entry_id}.pdb"
+        if not pdb_path.exists() or pdb_path.stat().st_size <= 0:
+            return ""
+        return extract_raw_refinement_program_text_from_pdb(pdb_path)
+
+    def collect(
+        self,
+    ) -> tuple[
+        list[SolutionNMRMonomerProgramClusterAssignmentRecord],
+        list[SolutionNMRMonomerProgramClusterSummaryRecord],
+    ]:
+        if not self.quality_records:
+            return [], []
+
+        quality_by_entry_id = {
+            record.entry_id: record for record in self.quality_records
+        }
+        assignments: list[SolutionNMRMonomerProgramClusterAssignmentRecord] = []
+        summary_totals: dict[
+            tuple[int, str],
+            dict[str, float | int],
+        ] = {}
+        missing_cache_count = 0
+        empty_program_count = 0
+
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            future_map = {
+                executor.submit(self._load_program_text, entry_id): entry_id
+                for entry_id in quality_by_entry_id
+            }
+            total = len(future_map)
+            processed = 0
+            for future in as_completed(future_map):
+                entry_id = future_map[future]
+                quality_record = quality_by_entry_id[entry_id]
+                program_text = future.result()
+                if not program_text:
+                    pdb_path = self.cache_dir / f"{entry_id}.pdb"
+                    if not pdb_path.exists() or pdb_path.stat().st_size <= 0:
+                        missing_cache_count += 1
+                    empty_program_count += 1
+
+                cluster_id, cluster_name = classify_solution_nmr_program_cluster(
+                    program_text
+                )
+                assignments.append(
+                    SolutionNMRMonomerProgramClusterAssignmentRecord(
+                        entry_id=quality_record.entry_id,
+                        year=quality_record.year,
+                        cluster_id=cluster_id,
+                        cluster_name=cluster_name,
+                        has_program_text=bool(program_text),
+                        program_text=program_text,
+                    )
+                )
+                key = (quality_record.year, cluster_id)
+                total_row = summary_totals.setdefault(
+                    key,
+                    {
+                        "count": 0,
+                        "rama_sum": 0.0,
+                        "side_sum": 0.0,
+                        "clash_sum": 0.0,
+                    },
+                )
+                total_row["count"] += 1
+                total_row["rama_sum"] += quality_record.ramachandran_outliers_percent
+                total_row["side_sum"] += quality_record.sidechain_outliers_percent
+                total_row["clash_sum"] += quality_record.clashscore
+
+                processed += 1
+                if processed % 500 == 0 or processed == total:
+                    LOGGER.info(
+                        "SOLUTION NMR monomer program clusters: processed %d/%d entries",
+                        processed,
+                        total,
+                    )
+
+        LOGGER.info(
+            (
+                "SOLUTION NMR monomer program clusters: entries=%d, "
+                "missing_cache=%d, empty_program=%d"
+            ),
+            len(self.quality_records),
+            missing_cache_count,
+            empty_program_count,
+        )
+
+        assignments = sorted(assignments, key=lambda r: (r.year, r.entry_id))
+        years = sorted({record.year for record in self.quality_records})
+        summaries: list[SolutionNMRMonomerProgramClusterSummaryRecord] = []
+        for year in years:
+            for cluster_id, cluster_name in PROGRAM_CLUSTER_DEFINITIONS:
+                totals = summary_totals.get((year, cluster_id))
+                if totals is None:
+                    summaries.append(
+                        SolutionNMRMonomerProgramClusterSummaryRecord(
+                            year=year,
+                            cluster_id=cluster_id,
+                            cluster_name=cluster_name,
+                            structure_count=0,
+                            avg_ramachandran_outliers_percent=None,
+                            avg_sidechain_outliers_percent=None,
+                            avg_clashscore=None,
+                        )
+                    )
+                    continue
+                count = int(totals["count"])
+                summaries.append(
+                    SolutionNMRMonomerProgramClusterSummaryRecord(
+                        year=year,
+                        cluster_id=cluster_id,
+                        cluster_name=cluster_name,
+                        structure_count=count,
+                        avg_ramachandran_outliers_percent=float(totals["rama_sum"])
+                        / count,
+                        avg_sidechain_outliers_percent=float(totals["side_sum"])
+                        / count,
+                        avg_clashscore=float(totals["clash_sum"]) / count,
+                    )
+                )
+        return assignments, summaries
+
+
 class MembraneProteinYearlyCollector:
     def __init__(self, client: RCSBClient, config: CollectorConfig) -> None:
         self.client = client
@@ -4029,6 +4240,99 @@ def write_solution_nmr_program_counts_csv(
     )
 
 
+def read_solution_nmr_monomer_quality_csv(
+    input_path: Path,
+) -> list[SolutionNMRMonomerQualityRecord]:
+    if not input_path.exists():
+        return []
+    records: list[SolutionNMRMonomerQualityRecord] = []
+    with input_path.open("r", newline="", encoding="utf-8") as csvfile:
+        reader = csv.DictReader(csvfile)
+        for row in reader:
+            if not row:
+                continue
+            records.append(
+                SolutionNMRMonomerQualityRecord(
+                    entry_id=str(row["entry_id"]),
+                    year=int(row["year"]),
+                    clashscore=float(row["clashscore"]),
+                    ramachandran_outliers_percent=float(
+                        row["ramachandran_outliers_percent"]
+                    ),
+                    sidechain_outliers_percent=float(
+                        row["sidechain_outliers_percent"]
+                    ),
+                )
+            )
+    return records
+
+
+def write_solution_nmr_monomer_program_cluster_assignments_csv(
+    records: list[SolutionNMRMonomerProgramClusterAssignmentRecord],
+    output_path: Path,
+) -> None:
+    write_csv_rows(
+        output_path=output_path,
+        header=[
+            "entry_id",
+            "year",
+            "cluster_id",
+            "cluster_name",
+            "has_program_text",
+            "program_text",
+        ],
+        rows=(
+            (
+                r.entry_id,
+                r.year,
+                r.cluster_id,
+                r.cluster_name,
+                int(r.has_program_text),
+                r.program_text,
+            )
+            for r in records
+        ),
+    )
+
+
+def write_solution_nmr_monomer_program_cluster_summary_csv(
+    records: list[SolutionNMRMonomerProgramClusterSummaryRecord],
+    output_path: Path,
+) -> None:
+    write_csv_rows(
+        output_path=output_path,
+        header=[
+            "year",
+            "cluster_id",
+            "cluster_name",
+            "structure_count",
+            "avg_ramachandran_outliers_percent",
+            "avg_sidechain_outliers_percent",
+            "avg_clashscore",
+        ],
+        rows=(
+            (
+                r.year,
+                r.cluster_id,
+                r.cluster_name,
+                r.structure_count,
+                (
+                    f"{r.avg_ramachandran_outliers_percent:.4f}"
+                    if r.avg_ramachandran_outliers_percent is not None
+                    else ""
+                ),
+                (
+                    f"{r.avg_sidechain_outliers_percent:.4f}"
+                    if r.avg_sidechain_outliers_percent is not None
+                    else ""
+                ),
+                f"{r.avg_clashscore:.4f}" if r.avg_clashscore is not None else "",
+            )
+            for r in records
+        ),
+    )
+
+
 def write_membrane_counts_csv(
     records: list[MembraneYearlyCountRecord], output_path: Path
 ) -> None:
@@ -4934,6 +5238,7 @@ def parse_dataset_kinds(raw_value: str) -> list[DatasetKind]:
             DatasetKind.METHOD_COUNTS,
             DatasetKind.MEMBRANE_PROTEIN_COUNTS,
             DatasetKind.SOLUTION_NMR_PROGRAM_COUNTS,
+            DatasetKind.SOLUTION_NMR_MONOMER_PROGRAM_CLUSTERS,
             DatasetKind.SOLUTION_NMR_WEIGHTS,
             DatasetKind.SOLUTION_NMR_MONOMER_SECONDARY,
             DatasetKind.SOLUTION_NMR_MONOMER_SECONDARY_MODELED_FIRST_MODEL,
@@ -4972,7 +5277,7 @@ def parse_args() -> argparse.Namespace:
             DatasetKind.SOLUTION_NMR_MONOMER_SECONDARY,
         ],
         help="Comma-separated dataset kinds or 'all'. "
-        "Available: method_counts, membrane_protein_counts, solution_nmr_program_counts, solution_nmr_weights, solution_nmr_monomer_secondary, solution_nmr_monomer_secondary_modeled_first_model, solution_nmr_monomer_stride, solution_nmr_monomer_stride_modeled_first_model, solution_nmr_monomer_precision, solution_nmr_monomer_quality, solution_nmr_monomer_xray_homologs, solution_nmr_monomer_xray_rmsd (default: the first three).",
+        "Available: method_counts, membrane_protein_counts, solution_nmr_program_counts, solution_nmr_monomer_program_clusters, solution_nmr_weights, solution_nmr_monomer_secondary, solution_nmr_monomer_secondary_modeled_first_model, solution_nmr_monomer_stride, solution_nmr_monomer_stride_modeled_first_model, solution_nmr_monomer_precision, solution_nmr_monomer_quality, solution_nmr_monomer_xray_homologs, solution_nmr_monomer_xray_rmsd (default: the first three).",
     )
     parser.add_argument(
         "--counts-output",
@@ -5097,6 +5402,42 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("data/solution_nmr_monomer_quality_metrics.csv"),
         help="Output CSV path for solution_nmr_monomer_quality dataset.",
+    )
+    parser.add_argument(
+        "--solution-nmr-monomer-program-cluster-input",
+        type=Path,
+        default=Path("data/solution_nmr_monomer_quality_metrics.csv"),
+        help=(
+            "Input CSV path for solution_nmr_monomer_program_clusters dataset. "
+            "Expected format: solution_nmr_monomer_quality_metrics.csv."
+        ),
+    )
+    parser.add_argument(
+        "--solution-nmr-monomer-program-cluster-cache-dir",
+        type=Path,
+        default=Path("data/pdb_cache"),
+        help=(
+            "Directory with cached PDB files for solution_nmr_monomer_program_clusters "
+            "dataset."
+        ),
+    )
+    parser.add_argument(
+        "--solution-nmr-monomer-program-cluster-assignment-output",
+        type=Path,
+        default=Path("data/solution_nmr_monomer_program_cluster_assignments.csv"),
+        help=(
+            "Output CSV path for per-entry assignments in "
+            "solution_nmr_monomer_program_clusters dataset."
+        ),
+    )
+    parser.add_argument(
+        "--solution-nmr-monomer-program-cluster-summary-output",
+        type=Path,
+        default=Path("data/solution_nmr_monomer_program_cluster_quality_by_year.csv"),
+        help=(
+            "Output CSV path for yearly cluster summary in "
+            "solution_nmr_monomer_program_clusters dataset."
+        ),
     )
     parser.add_argument(
         "--solution-nmr-monomer-xray-homolog-95-output",
@@ -5523,6 +5864,41 @@ def main() -> None:
             "Saved %d records to %s",
             len(quality_records),
             args.solution_nmr_monomer_quality_output,
+        )
+
+    if DatasetKind.SOLUTION_NMR_MONOMER_PROGRAM_CLUSTERS in args.datasets:
+        quality_input_path = Path(args.solution_nmr_monomer_program_cluster_input)
+        quality_records = read_solution_nmr_monomer_quality_csv(quality_input_path)
+        if not quality_records:
+            raise RuntimeError(
+                "solution_nmr_monomer_program_clusters requires a non-empty quality "
+                f"CSV at {quality_input_path}"
+            )
+        cluster_collector = SolutionNMRMonomerProgramClusterCollector(
+            quality_records=quality_records,
+            cache_dir=Path(args.solution_nmr_monomer_program_cluster_cache_dir),
+            max_workers=config.max_workers,
+        )
+        assignment_records, summary_records = cluster_collector.collect()
+        write_solution_nmr_monomer_program_cluster_assignments_csv(
+            records=assignment_records,
+            output_path=Path(
+                args.solution_nmr_monomer_program_cluster_assignment_output
+            ),
+        )
+        write_solution_nmr_monomer_program_cluster_summary_csv(
+            records=summary_records,
+            output_path=Path(args.solution_nmr_monomer_program_cluster_summary_output),
+        )
+        LOGGER.info(
+            "Saved %d records to %s",
+            len(assignment_records),
+            args.solution_nmr_monomer_program_cluster_assignment_output,
+        )
+        LOGGER.info(
+            "Saved %d records to %s",
+            len(summary_records),
+            args.solution_nmr_monomer_program_cluster_summary_output,
         )
 
     if DatasetKind.SOLUTION_NMR_MONOMER_XRAY_HOMOLOGS in args.datasets:
