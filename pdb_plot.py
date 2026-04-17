@@ -273,7 +273,7 @@ NMR_MONOMER_PROGRAM_CLUSTER_COLORS: tuple[str, ...] = (
     "#eeca3b",
     "#b279a2",
     "#ff9da6",
-    "#9d755d",
+    "#858585",
 )
 YEAR_MAJOR_TICK_STEP: int = 5
 YEAR_MINOR_TICK_STEP: int = 1
@@ -506,9 +506,16 @@ class PDBScientificPlotter:
         draw_fn: Callable[[plt.Axes], None],
         x_label: str | None = None,
         use_year_x_ticks: bool = True,
+        tight_layout_rect: tuple[float, float, float, float] | None = None,
+        savefig_bbox_inches: str | None = None,
+        savefig_pad_inches: float = 0.1,
+        height_scale: float = 1.0,
     ) -> None:
         fig, ax = plt.subplots(
-            figsize=(self.config.width_inches, self.config.height_inches)
+            figsize=(
+                self.config.width_inches,
+                self.config.height_inches * height_scale,
+            )
         )
         draw_fn(ax)
         if use_year_x_ticks:
@@ -524,11 +531,23 @@ class PDBScientificPlotter:
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
         ax.margins(x=0.01)
-        fig.tight_layout()
+        if tight_layout_rect is None:
+            fig.tight_layout()
+        else:
+            fig.tight_layout(rect=tight_layout_rect)
         output_png.parent.mkdir(parents=True, exist_ok=True)
-        fig.savefig(output_png, dpi=self.config.dpi)
+        fig.savefig(
+            output_png,
+            dpi=self.config.dpi,
+            bbox_inches=savefig_bbox_inches,
+            pad_inches=savefig_pad_inches,
+        )
         if self.generate_svg:
-            fig.savefig(output_svg)
+            fig.savefig(
+                output_svg,
+                bbox_inches=savefig_bbox_inches,
+                pad_inches=savefig_pad_inches,
+            )
         plt.close(fig)
 
     @staticmethod
@@ -824,6 +843,8 @@ class PDBScientificPlotter:
         x_left: float | None = None,
         x_right: float | None = None,
         use_step_segments: bool = False,
+        legend_outside: bool = False,
+        height_scale: float = 1.0,
     ) -> None:
         cluster_labels = list(table.columns)
 
@@ -862,7 +883,17 @@ class PDBScientificPlotter:
                     left=x_left if x_left is not None else current_left,
                     right=x_right if x_right is not None else current_right,
                 )
-            self._add_legend(ax, loc="upper left", title="Program cluster", ncol=1)
+            if legend_outside:
+                self._add_legend(
+                    ax,
+                    loc="upper center",
+                    bbox_to_anchor=(0.5, -0.13),
+                    borderaxespad=0.0,
+                    title="Program cluster",
+                    ncol=5,
+                )
+            else:
+                self._add_legend(ax, loc="upper left", title="Program cluster", ncol=1)
 
         self._render_figure(
             output_png=output_png,
@@ -870,6 +901,10 @@ class PDBScientificPlotter:
             title=title,
             y_label=y_label,
             draw_fn=draw,
+            tight_layout_rect=(0.0, 0.03, 1.0, 1.0) if legend_outside else None,
+            savefig_bbox_inches="tight" if legend_outside else None,
+            savefig_pad_inches=0.04 if legend_outside else 0.1,
+            height_scale=height_scale,
         )
 
     @classmethod
@@ -1140,9 +1175,11 @@ class PDBScientificPlotter:
             title=self.config.nmr_monomer_program_cluster_share_title,
             y_label=self.config.nmr_monomer_program_cluster_share_y_label,
             y_limits=(0.0, 100.0),
-            x_left=float(count_share_table.index.min()) - 10,
+            x_left=float(count_share_table.index.min()),
             x_right=float(count_share_table.index.max()),
             use_step_segments=True,
+            legend_outside=True,
+            height_scale=1.25,
         )
         self._render_cluster_metric_heatmaps(
             table=table,
