@@ -92,6 +92,10 @@ class PlotConfig:
     nmr_monomer_program_clusters_title: str = (
         "Solution NMR monomer program clusters and quality metrics by year"
     )
+    nmr_monomer_program_cluster_share_title: str = (
+        "Share of solution NMR monomeric proteins by program cluster and year"
+    )
+    nmr_monomer_program_cluster_share_y_label: str = "Share of structures (%)"
     cumulative_title: str = (
         "Cumulative number of deposited PDB structures by experimental method"
     )
@@ -238,6 +242,17 @@ NMR_WEIGHT_BINS: tuple[float, ...] = (0.0, 10.0, 20.0, float("inf"))
 NMR_WEIGHT_LABELS: tuple[str, ...] = ("<10 kDa", "10-20 kDa", ">20 kDa")
 MAX_PLOT_YEAR: int = 2024
 NMR_PROGRAM_TOP_N: int = 8
+NMR_MONOMER_PROGRAM_CLUSTER_ORDER: tuple[str, ...] = (
+    "CLUSTER1",
+    "CLUSTER2",
+    "CLUSTER3",
+    "CLUSTER4",
+    "CLUSTER5",
+    "CLUSTER6",
+    "CLUSTER7",
+    "CLUSTER8",
+    "CLUSTER9",
+)
 NMR_MONOMER_PROGRAM_CLUSTER_LABELS: dict[str, str] = {
     "CLUSTER1": "AMBER",
     "CLUSTER2": "ARIA",
@@ -249,6 +264,17 @@ NMR_MONOMER_PROGRAM_CLUSTER_LABELS: dict[str, str] = {
     "CLUSTER8": "X-PLOR NIH",
     "CLUSTER9": "OTHER",
 }
+NMR_MONOMER_PROGRAM_CLUSTER_COLORS: tuple[str, ...] = (
+    "#4c78a8",
+    "#f58518",
+    "#e45756",
+    "#72b7b2",
+    "#54a24b",
+    "#eeca3b",
+    "#b279a2",
+    "#ff9da6",
+    "#9d755d",
+)
 YEAR_MAJOR_TICK_STEP: int = 5
 YEAR_MINOR_TICK_STEP: int = 1
 
@@ -764,6 +790,89 @@ class PDBScientificPlotter:
         return cluster_name.replace("_", " ")
 
     @classmethod
+    def _cluster_column_labels(cls) -> list[str]:
+        return [
+            cls._display_cluster_label(cluster_id=cluster_id, cluster_name=cluster_id)
+            for cluster_id in NMR_MONOMER_PROGRAM_CLUSTER_ORDER
+        ]
+
+    @classmethod
+    def _build_cluster_yearly_table(
+        cls,
+        table: pd.DataFrame,
+        value_column: str,
+        fill_value: float | None,
+    ) -> pd.DataFrame:
+        pivoted = (
+            table.pivot(index="year", columns="cluster_id", values=value_column)
+            .reindex(columns=list(NMR_MONOMER_PROGRAM_CLUSTER_ORDER))
+            .sort_index()
+        )
+        if fill_value is not None:
+            pivoted = pivoted.fillna(fill_value)
+        pivoted.columns = cls._cluster_column_labels()
+        return pivoted
+
+    def _render_cluster_stackplot(
+        self,
+        table: pd.DataFrame,
+        output_png: Path,
+        output_svg: Path,
+        title: str,
+        y_label: str,
+        y_limits: tuple[float, float] | None = None,
+        x_left: float | None = None,
+        x_right: float | None = None,
+        use_step_segments: bool = False,
+    ) -> None:
+        cluster_labels = list(table.columns)
+
+        def draw(ax: plt.Axes) -> None:
+            if use_step_segments:
+                base = pd.Series(0.0, index=table.index, dtype=float)
+                x_vals = table.index.to_numpy()
+                for idx, label in enumerate(cluster_labels):
+                    values = table[label].astype(float)
+                    top = base + values
+                    ax.fill_between(
+                        x_vals,
+                        base.to_numpy(),
+                        top.to_numpy(),
+                        step="mid",
+                        color=NMR_MONOMER_PROGRAM_CLUSTER_COLORS[
+                            idx % len(NMR_MONOMER_PROGRAM_CLUSTER_COLORS)
+                        ],
+                        alpha=0.85,
+                        label=label,
+                    )
+                    base = top
+            else:
+                ax.stackplot(
+                    table.index,
+                    *(table[label] for label in cluster_labels),
+                    labels=cluster_labels,
+                    colors=NMR_MONOMER_PROGRAM_CLUSTER_COLORS[: len(cluster_labels)],
+                    alpha=0.85,
+                )
+            if y_limits is not None:
+                ax.set_ylim(*y_limits)
+            if x_left is not None or x_right is not None:
+                current_left, current_right = ax.get_xlim()
+                ax.set_xlim(
+                    left=x_left if x_left is not None else current_left,
+                    right=x_right if x_right is not None else current_right,
+                )
+            self._add_legend(ax, loc="upper left", title="Program cluster", ncol=1)
+
+        self._render_figure(
+            output_png=output_png,
+            output_svg=output_svg,
+            title=title,
+            y_label=y_label,
+            draw_fn=draw,
+        )
+
+    @classmethod
     def _build_cluster_metric_heatmap(
         cls,
         table: pd.DataFrame,
@@ -780,7 +889,10 @@ class PDBScientificPlotter:
             .reindex(index=cluster_rows["cluster_id"], columns=years)
         )
         cluster_labels = [
-            cls._display_cluster_label(cluster_id=str(row.cluster_id), cluster_name=str(row.cluster_name))
+            cls._display_cluster_label(
+                cluster_id=str(row.cluster_id),
+                cluster_name=str(row.cluster_name),
+            )
             for row in cluster_rows.itertuples(index=False)
         ]
         return heatmap.to_numpy(dtype=float), cluster_labels, years
@@ -812,7 +924,6 @@ class PDBScientificPlotter:
             figsize=(self.config.width_inches * 1.65, self.config.height_inches * 1.9),
         )
         axes_flat = list(axes.flat)
-        figure_title = self.config.nmr_monomer_program_clusters_title
 
         for ax, (column, panel_title, cmap_name) in zip(axes_flat, metrics, strict=True):
             matrix, cluster_labels, years = self._build_cluster_metric_heatmap(
@@ -855,7 +966,12 @@ class PDBScientificPlotter:
             colorbar = fig.colorbar(image, ax=ax, fraction=0.046, pad=0.02)
             colorbar.ax.tick_params(labelsize=10)
 
-        fig.suptitle(figure_title, fontsize=15, fontweight="bold", y=0.98)
+        fig.suptitle(
+            self.config.nmr_monomer_program_clusters_title,
+            fontsize=15,
+            fontweight="bold",
+            y=0.98,
+        )
         fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.96))
         output_png.parent.mkdir(parents=True, exist_ok=True)
         fig.savefig(output_png, dpi=self.config.dpi)
@@ -999,16 +1115,39 @@ class PDBScientificPlotter:
     def plot_solution_nmr_monomer_program_clusters(
         self,
         data_path: Path,
-        output_png: Path,
-        output_svg: Path,
+        share_output_png: Path,
+        share_output_svg: Path,
+        metrics_output_png: Path,
+        metrics_output_svg: Path,
     ) -> None:
         table = self._prepare_nmr_monomer_program_cluster_table(self._read_csv(data_path))
         if table.empty:
             raise ValueError("Solution NMR monomer program cluster summary CSV is empty.")
+        count_table = self._build_cluster_yearly_table(
+            table=table,
+            value_column="structure_count",
+            fill_value=0.0,
+        )
+        count_share_table = (
+            count_table.div(count_table.sum(axis=1), axis=0).fillna(0.0) * 100.0
+        )
+
+        self._scientific_style()
+        self._render_cluster_stackplot(
+            table=count_share_table,
+            output_png=share_output_png,
+            output_svg=share_output_svg,
+            title=self.config.nmr_monomer_program_cluster_share_title,
+            y_label=self.config.nmr_monomer_program_cluster_share_y_label,
+            y_limits=(0.0, 100.0),
+            x_left=float(count_share_table.index.min()) - 10,
+            x_right=float(count_share_table.index.max()),
+            use_step_segments=True,
+        )
         self._render_cluster_metric_heatmaps(
             table=table,
-            output_png=output_png,
-            output_svg=output_svg,
+            output_png=metrics_output_png,
+            output_svg=metrics_output_svg,
         )
 
     def plot_solution_nmr_weight_stats(
@@ -2393,6 +2532,18 @@ def parse_args() -> argparse.Namespace:
         help="Output SVG for annual SOLUTION NMR refinement program trend figure.",
     )
     parser.add_argument(
+        "--nmr-monomer-program-cluster-share-output-png",
+        type=Path,
+        default=Path("figures/solution_nmr_monomer_program_cluster_share_by_year.png"),
+        help="Output PNG for SOLUTION NMR monomer program cluster share stacked-area plot.",
+    )
+    parser.add_argument(
+        "--nmr-monomer-program-cluster-share-output-svg",
+        type=Path,
+        default=Path("figures/solution_nmr_monomer_program_cluster_share_by_year.svg"),
+        help="Output SVG for SOLUTION NMR monomer program cluster share stacked-area plot.",
+    )
+    parser.add_argument(
         "--nmr-monomer-program-cluster-output-png",
         type=Path,
         default=Path("figures/solution_nmr_monomer_program_cluster_metrics_by_year.png"),
@@ -2831,8 +2982,10 @@ def main() -> None:
     if PlotKind.SOLUTION_NMR_MONOMER_PROGRAM_CLUSTERS in args.plots:
         plotter.plot_solution_nmr_monomer_program_clusters(
             data_path=args.nmr_monomer_program_cluster_summary_input,
-            output_png=args.nmr_monomer_program_cluster_output_png,
-            output_svg=args.nmr_monomer_program_cluster_output_svg,
+            share_output_png=args.nmr_monomer_program_cluster_share_output_png,
+            share_output_svg=args.nmr_monomer_program_cluster_share_output_svg,
+            metrics_output_png=args.nmr_monomer_program_cluster_output_png,
+            metrics_output_svg=args.nmr_monomer_program_cluster_output_svg,
         )
 
     if PlotKind.SOLUTION_NMR_WEIGHT_STATS in args.plots:
