@@ -669,6 +669,7 @@ class PDBScientificPlotter:
         color: str,
         width: float = 0.8,
         y_limits: tuple[float, float] | None = None,
+        y_bottom: float | None = None,
         x_left: float | None = None,
     ) -> None:
         def draw(ax: plt.Axes) -> None:
@@ -683,6 +684,8 @@ class PDBScientificPlotter:
             )
             if y_limits is not None:
                 ax.set_ylim(*y_limits)
+            if y_bottom is not None:
+                ax.set_ylim(bottom=y_bottom)
             if x_left is not None:
                 ax.set_xlim(left=x_left)
 
@@ -1254,6 +1257,7 @@ class PDBScientificPlotter:
             x_values=stats.index,
             y_values=stats["mean"],
             color=self.config.avg_color,
+            y_bottom=0.0,
         )
         self._render_bar_series(
             output_png=median_output_png,
@@ -1263,6 +1267,7 @@ class PDBScientificPlotter:
             x_values=stats.index,
             y_values=stats["median"],
             color=self.config.median_color,
+            y_bottom=0.0,
         )
         self._render_bar_series(
             output_png=max_output_png,
@@ -1272,6 +1277,7 @@ class PDBScientificPlotter:
             x_values=stats.index,
             y_values=stats["max"],
             color=self.config.max_color,
+            y_bottom=0.0,
         )
 
     def plot_membrane_protein_counts(
@@ -2246,6 +2252,7 @@ class PDBScientificPlotter:
             x_values=yearly_mean_rmsd.index,
             y_values=yearly_mean_rmsd,
             color="#8c564b",
+            y_bottom=0.0,
         )
 
     @staticmethod
@@ -2293,6 +2300,7 @@ class PDBScientificPlotter:
             x_values=yearly.index,
             y_values=yearly["clashscore"],
             color="#8c564b",
+            y_bottom=0.0,
         )
         self._render_bar_series(
             output_png=rama_output_png,
@@ -2302,6 +2310,7 @@ class PDBScientificPlotter:
             x_values=yearly.index,
             y_values=yearly["ramachandran_outliers_percent"],
             color="#1f77b4",
+            y_bottom=0.0,
         )
         self._render_bar_series(
             output_png=side_output_png,
@@ -2311,6 +2320,7 @@ class PDBScientificPlotter:
             x_values=yearly.index,
             y_values=yearly["sidechain_outliers_percent"],
             color="#ff7f0e",
+            y_bottom=0.0,
         )
 
     @staticmethod
@@ -2419,6 +2429,7 @@ class PDBScientificPlotter:
             x_values=yearly_mean_rmsd.index,
             y_values=yearly_mean_rmsd,
             color="#9467bd",
+            y_bottom=0.0,
         )
 
 
