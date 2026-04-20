@@ -137,6 +137,24 @@ class SolutionNMRMonomerProgramClusterSummaryRecord:
 
 
 @dataclass(frozen=True)
+class SolutionNMRMonomerProgramClusterYearlySummaryRecord:
+    year: int
+    structure_count: int
+    avg_ramachandran_outliers_percent: float | None
+    avg_sidechain_outliers_percent: float | None
+    avg_clashscore: float | None
+
+
+@dataclass(frozen=True)
+class SolutionNMRMonomerProgramClusterTotalRecord:
+    cluster_name: str
+    structure_count: int
+    avg_ramachandran_outliers_percent: float | None
+    avg_sidechain_outliers_percent: float | None
+    avg_clashscore: float | None
+
+
+@dataclass(frozen=True)
 class SolutionNMRWeightRecord:
     entry_id: str
     year: int
@@ -4295,6 +4313,30 @@ def write_solution_nmr_monomer_program_cluster_assignments_csv(
     )
 
 
+def read_solution_nmr_monomer_program_cluster_assignments_csv(
+    input_path: Path,
+) -> list[SolutionNMRMonomerProgramClusterAssignmentRecord]:
+    if not input_path.exists():
+        return []
+    records: list[SolutionNMRMonomerProgramClusterAssignmentRecord] = []
+    with input_path.open("r", newline="", encoding="utf-8") as csvfile:
+        reader = csv.DictReader(csvfile)
+        for row in reader:
+            if not row:
+                continue
+            records.append(
+                SolutionNMRMonomerProgramClusterAssignmentRecord(
+                    entry_id=str(row["entry_id"]),
+                    year=int(row["year"]),
+                    cluster_id=str(row["cluster_id"]),
+                    cluster_name=str(row["cluster_name"]),
+                    has_program_text=bool(int(row["has_program_text"])),
+                    program_text=str(row["program_text"]),
+                )
+            )
+    return records
+
+
 def write_solution_nmr_monomer_program_cluster_summary_csv(
     records: list[SolutionNMRMonomerProgramClusterSummaryRecord],
     output_path: Path,
@@ -4314,6 +4356,233 @@ def write_solution_nmr_monomer_program_cluster_summary_csv(
             (
                 r.year,
                 r.cluster_id,
+                r.cluster_name,
+                r.structure_count,
+                (
+                    f"{r.avg_ramachandran_outliers_percent:.4f}"
+                    if r.avg_ramachandran_outliers_percent is not None
+                    else ""
+                ),
+                (
+                    f"{r.avg_sidechain_outliers_percent:.4f}"
+                    if r.avg_sidechain_outliers_percent is not None
+                    else ""
+                ),
+                f"{r.avg_clashscore:.4f}" if r.avg_clashscore is not None else "",
+            )
+            for r in records
+        ),
+    )
+
+
+def summarize_solution_nmr_monomer_program_cluster_quality_by_year(
+    assignment_records: list[SolutionNMRMonomerProgramClusterAssignmentRecord],
+    quality_records: list[SolutionNMRMonomerQualityRecord],
+) -> list[SolutionNMRMonomerProgramClusterYearlySummaryRecord]:
+    if not assignment_records or not quality_records:
+        return []
+
+    quality_by_key = {
+        (record.entry_id.upper(), record.year): record for record in quality_records
+    }
+    yearly_totals: dict[int, dict[str, float | int]] = {}
+    matched_quality_keys: set[tuple[str, int]] = set()
+    missing_quality_count = 0
+
+    for assignment_record in assignment_records:
+        key = (assignment_record.entry_id.upper(), assignment_record.year)
+        quality_record = quality_by_key.get(key)
+        if quality_record is None:
+            missing_quality_count += 1
+            continue
+        matched_quality_keys.add(key)
+        total_row = yearly_totals.setdefault(
+            assignment_record.year,
+            {
+                "count": 0,
+                "rama_sum": 0.0,
+                "side_sum": 0.0,
+                "clash_sum": 0.0,
+            },
+        )
+        total_row["count"] += 1
+        total_row["rama_sum"] += quality_record.ramachandran_outliers_percent
+        total_row["side_sum"] += quality_record.sidechain_outliers_percent
+        total_row["clash_sum"] += quality_record.clashscore
+
+    unmatched_quality_count = len(quality_by_key) - len(matched_quality_keys)
+    LOGGER.info(
+        (
+            "SOLUTION NMR monomer program-cluster yearly totals: years=%d, "
+            "matched_entries=%d, missing_quality=%d, unmatched_quality=%d"
+        ),
+        len(yearly_totals),
+        len(matched_quality_keys),
+        missing_quality_count,
+        unmatched_quality_count,
+    )
+
+    return [
+        SolutionNMRMonomerProgramClusterYearlySummaryRecord(
+            year=year,
+            structure_count=int(total_row["count"]),
+            avg_ramachandran_outliers_percent=(
+                float(total_row["rama_sum"]) / int(total_row["count"])
+                if int(total_row["count"]) > 0
+                else None
+            ),
+            avg_sidechain_outliers_percent=(
+                float(total_row["side_sum"]) / int(total_row["count"])
+                if int(total_row["count"]) > 0
+                else None
+            ),
+            avg_clashscore=(
+                float(total_row["clash_sum"]) / int(total_row["count"])
+                if int(total_row["count"]) > 0
+                else None
+            ),
+        )
+        for year, total_row in sorted(yearly_totals.items())
+    ]
+
+
+def write_solution_nmr_monomer_program_cluster_yearly_summary_csv(
+    records: list[SolutionNMRMonomerProgramClusterYearlySummaryRecord],
+    output_path: Path,
+) -> None:
+    write_csv_rows(
+        output_path=output_path,
+        header=[
+            "year",
+            "structure_count",
+            "avg_ramachandran_outliers_percent",
+            "avg_sidechain_outliers_percent",
+            "avg_clashscore",
+        ],
+        rows=(
+            (
+                r.year,
+                r.structure_count,
+                (
+                    f"{r.avg_ramachandran_outliers_percent:.4f}"
+                    if r.avg_ramachandran_outliers_percent is not None
+                    else ""
+                ),
+                (
+                    f"{r.avg_sidechain_outliers_percent:.4f}"
+                    if r.avg_sidechain_outliers_percent is not None
+                    else ""
+                ),
+                f"{r.avg_clashscore:.4f}" if r.avg_clashscore is not None else "",
+            )
+            for r in records
+        ),
+    )
+
+
+def summarize_solution_nmr_monomer_program_cluster_quality_total(
+    assignment_records: list[SolutionNMRMonomerProgramClusterAssignmentRecord],
+    quality_records: list[SolutionNMRMonomerQualityRecord],
+) -> list[SolutionNMRMonomerProgramClusterTotalRecord]:
+    if not assignment_records or not quality_records:
+        return []
+
+    quality_by_key = {
+        (record.entry_id.upper(), record.year): record for record in quality_records
+    }
+    totals_by_cluster_id: dict[str, dict[str, float | int | str]] = {
+        cluster_id: {
+            "cluster_name": cluster_name,
+            "count": 0,
+            "rama_sum": 0.0,
+            "side_sum": 0.0,
+            "clash_sum": 0.0,
+        }
+        for cluster_id, cluster_name in PROGRAM_CLUSTER_DEFINITIONS
+    }
+    matched_quality_keys: set[tuple[str, int]] = set()
+    missing_quality_count = 0
+
+    for assignment_record in assignment_records:
+        key = (assignment_record.entry_id.upper(), assignment_record.year)
+        quality_record = quality_by_key.get(key)
+        if quality_record is None:
+            missing_quality_count += 1
+            continue
+        matched_quality_keys.add(key)
+        total_row = totals_by_cluster_id.setdefault(
+            assignment_record.cluster_id,
+            {
+                "cluster_name": assignment_record.cluster_name,
+                "count": 0,
+                "rama_sum": 0.0,
+                "side_sum": 0.0,
+                "clash_sum": 0.0,
+            },
+        )
+        total_row["count"] += 1
+        total_row["rama_sum"] += quality_record.ramachandran_outliers_percent
+        total_row["side_sum"] += quality_record.sidechain_outliers_percent
+        total_row["clash_sum"] += quality_record.clashscore
+
+    unmatched_quality_count = len(quality_by_key) - len(matched_quality_keys)
+    LOGGER.info(
+        (
+            "SOLUTION NMR monomer program-cluster totals: clusters=%d, "
+            "matched_entries=%d, missing_quality=%d, unmatched_quality=%d"
+        ),
+        len(totals_by_cluster_id),
+        len(matched_quality_keys),
+        missing_quality_count,
+        unmatched_quality_count,
+    )
+
+    ordered_records: list[SolutionNMRMonomerProgramClusterTotalRecord] = []
+    for cluster_id, cluster_name in PROGRAM_CLUSTER_DEFINITIONS:
+        total_row = totals_by_cluster_id.get(
+            cluster_id,
+            {
+                "cluster_name": cluster_name,
+                "count": 0,
+                "rama_sum": 0.0,
+                "side_sum": 0.0,
+                "clash_sum": 0.0,
+            },
+        )
+        count = int(total_row["count"])
+        ordered_records.append(
+            SolutionNMRMonomerProgramClusterTotalRecord(
+                cluster_name=str(total_row["cluster_name"]),
+                structure_count=count,
+                avg_ramachandran_outliers_percent=(
+                    float(total_row["rama_sum"]) / count if count > 0 else None
+                ),
+                avg_sidechain_outliers_percent=(
+                    float(total_row["side_sum"]) / count if count > 0 else None
+                ),
+                avg_clashscore=(
+                    float(total_row["clash_sum"]) / count if count > 0 else None
+                ),
+            )
+        )
+    return ordered_records
+
+
+def write_solution_nmr_monomer_program_cluster_total_csv(
+    records: list[SolutionNMRMonomerProgramClusterTotalRecord],
+    output_path: Path,
+) -> None:
+    write_csv_rows(
+        output_path=output_path,
+        header=[
+            "cluster_name",
+            "structure_count",
+            "avg_ramachandran_outliers_percent",
+            "avg_sidechain_outliers_percent",
+            "avg_clashscore",
+        ],
+        rows=(
+            (
                 r.cluster_name,
                 r.structure_count,
                 (
@@ -5440,6 +5709,24 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--solution-nmr-monomer-program-cluster-yearly-summary-output",
+        type=Path,
+        default=Path("data/solution_nmr_monomer_program_cluster_quality_total_by_year.csv"),
+        help=(
+            "Output CSV path for yearly totals across all program clusters in "
+            "solution_nmr_monomer_program_clusters dataset."
+        ),
+    )
+    parser.add_argument(
+        "--solution-nmr-monomer-program-cluster-total-output",
+        type=Path,
+        default=Path("data/solution_nmr_monomer_program_cluster_quality_total.csv"),
+        help=(
+            "Output CSV path for totals across all years per program cluster in "
+            "solution_nmr_monomer_program_clusters dataset."
+        ),
+    )
+    parser.add_argument(
         "--solution-nmr-monomer-xray-homolog-95-output",
         type=Path,
         default=Path("data/solution_nmr_monomer_xray_homologs_95.csv"),
@@ -5890,6 +6177,26 @@ def main() -> None:
             records=summary_records,
             output_path=Path(args.solution_nmr_monomer_program_cluster_summary_output),
         )
+        yearly_summary_records = (
+            summarize_solution_nmr_monomer_program_cluster_quality_by_year(
+                assignment_records=assignment_records,
+                quality_records=quality_records,
+            )
+        )
+        write_solution_nmr_monomer_program_cluster_yearly_summary_csv(
+            records=yearly_summary_records,
+            output_path=Path(
+                args.solution_nmr_monomer_program_cluster_yearly_summary_output
+            ),
+        )
+        total_records = summarize_solution_nmr_monomer_program_cluster_quality_total(
+            assignment_records=assignment_records,
+            quality_records=quality_records,
+        )
+        write_solution_nmr_monomer_program_cluster_total_csv(
+            records=total_records,
+            output_path=Path(args.solution_nmr_monomer_program_cluster_total_output),
+        )
         LOGGER.info(
             "Saved %d records to %s",
             len(assignment_records),
@@ -5899,6 +6206,16 @@ def main() -> None:
             "Saved %d records to %s",
             len(summary_records),
             args.solution_nmr_monomer_program_cluster_summary_output,
+        )
+        LOGGER.info(
+            "Saved %d records to %s",
+            len(yearly_summary_records),
+            args.solution_nmr_monomer_program_cluster_yearly_summary_output,
+        )
+        LOGGER.info(
+            "Saved %d records to %s",
+            len(total_records),
+            args.solution_nmr_monomer_program_cluster_total_output,
         )
 
     if DatasetKind.SOLUTION_NMR_MONOMER_XRAY_HOMOLOGS in args.datasets:
