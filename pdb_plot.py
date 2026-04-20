@@ -580,6 +580,47 @@ class PDBScientificPlotter:
             prepared[column] = prepared[column].astype(dtype)
         return prepared
 
+    @staticmethod
+    def _step_edges(
+        x_values: pd.Index[Any] | pd.Series[Any] | np.ndarray,
+    ) -> np.ndarray:
+        x_array = np.asarray(x_values, dtype=float)
+        if x_array.size == 0:
+            return np.array([], dtype=float)
+        if x_array.size == 1:
+            center = x_array[0]
+            return np.array([center - 0.5, center + 0.5], dtype=float)
+        midpoints = (x_array[:-1] + x_array[1:]) / 2.0
+        left_edge = x_array[0] - (midpoints[0] - x_array[0])
+        right_edge = x_array[-1] + (x_array[-1] - midpoints[-1])
+        return np.concatenate(([left_edge], midpoints, [right_edge]))
+
+    @staticmethod
+    def _step_values(y_values: pd.Series[Any] | np.ndarray) -> np.ndarray:
+        y_array = np.asarray(y_values, dtype=float)
+        if y_array.size == 0:
+            return np.array([], dtype=float)
+        return np.concatenate((y_array, [y_array[-1]]))
+
+    def _plot_step_series(
+        self,
+        ax: plt.Axes,
+        x_values: pd.Index[Any] | pd.Series[Any],
+        y_values: pd.Series[Any] | np.ndarray,
+        color: str,
+        linewidth: float,
+        label: str | None = None,
+    ) -> None:
+        ax.stairs(
+            values=np.asarray(y_values, dtype=float),
+            edges=self._step_edges(x_values),
+            baseline=None,
+            color=color,
+            linewidth=linewidth,
+            label=label,
+            fill=False,
+        )
+
     def _render_line_series(
         self,
         output_png: Path,
@@ -633,10 +674,10 @@ class PDBScientificPlotter:
         def draw(ax: plt.Axes) -> None:
             # Keep `width` in the signature for compatibility with existing calls.
             _ = width
-            ax.step(
-                x_values,
-                y_values,
-                where="mid",
+            self._plot_step_series(
+                ax=ax,
+                x_values=x_values,
+                y_values=y_values,
                 color=color,
                 linewidth=2.2,
             )
@@ -685,16 +726,16 @@ class PDBScientificPlotter:
         def draw(ax: plt.Axes) -> None:
             if use_step_segments:
                 base = pd.Series(0.0, index=table.index, dtype=float)
-                x_vals = table.index.to_numpy()
+                x_edges = self._step_edges(table.index)
                 for idx, label in enumerate(NMR_WEIGHT_LABELS):
                     values = table[label].astype(float)
                     top = base + values
                     color = self.config.area_colors[idx % len(self.config.area_colors)]
                     ax.fill_between(
-                        x_vals,
-                        base.to_numpy(),
-                        top.to_numpy(),
-                        step="mid",
+                        x_edges,
+                        self._step_values(base),
+                        self._step_values(top),
+                        step="post",
                         color=color,
                         alpha=0.85,
                         label=label,
@@ -851,15 +892,15 @@ class PDBScientificPlotter:
         def draw(ax: plt.Axes) -> None:
             if use_step_segments:
                 base = pd.Series(0.0, index=table.index, dtype=float)
-                x_vals = table.index.to_numpy()
+                x_edges = self._step_edges(table.index)
                 for idx, label in enumerate(cluster_labels):
                     values = table[label].astype(float)
                     top = base + values
                     ax.fill_between(
-                        x_vals,
-                        base.to_numpy(),
-                        top.to_numpy(),
-                        step="mid",
+                        x_edges,
+                        self._step_values(base),
+                        self._step_values(top),
+                        step="post",
                         color=NMR_MONOMER_PROGRAM_CLUSTER_COLORS[
                             idx % len(NMR_MONOMER_PROGRAM_CLUSTER_COLORS)
                         ],
@@ -1069,10 +1110,10 @@ class PDBScientificPlotter:
             ]:
                 if col in source.columns:
                     if use_step:
-                        ax.step(
-                            source.index,
-                            source[col],
-                            where="mid",
+                        self._plot_step_series(
+                            ax=ax,
+                            x_values=source.index,
+                            y_values=source[col],
                             color=color,
                             linewidth=2.0,
                             label=col,
@@ -1124,10 +1165,10 @@ class PDBScientificPlotter:
         def draw(ax: plt.Axes) -> None:
             colors = plt.cm.tab10.colors
             for idx, program in enumerate(filtered_table.columns):
-                ax.step(
-                    filtered_table.index,
-                    filtered_table[program],
-                    where="mid",
+                self._plot_step_series(
+                    ax=ax,
+                    x_values=filtered_table.index,
+                    y_values=filtered_table[program],
                     color=colors[idx % len(colors)],
                     linewidth=2.0,
                     label=program,
@@ -1444,10 +1485,10 @@ class PDBScientificPlotter:
                 color="#7f7f7f",
                 label="Individual structures",
             )
-            ax.step(
-                yearly_mean.index,
-                yearly_mean.values,
-                where="mid",
+            self._plot_step_series(
+                ax=ax,
+                x_values=yearly_mean.index,
+                y_values=yearly_mean.values,
                 linewidth=2.2,
                 color=self.config.nmr_color,
                 label="Yearly mean",
@@ -1495,10 +1536,10 @@ class PDBScientificPlotter:
                 color="#7f7f7f",
                 label="Individual structures",
             )
-            ax.step(
-                yearly_mean.index,
-                yearly_mean.values,
-                where="mid",
+            self._plot_step_series(
+                ax=ax,
+                x_values=yearly_mean.index,
+                y_values=yearly_mean.values,
                 linewidth=2.2,
                 color=self.config.nmr_color,
                 label="Yearly mean",
@@ -2056,26 +2097,26 @@ class PDBScientificPlotter:
         )
 
         def draw(ax: plt.Axes) -> None:
-            ax.step(
-                pdb_yearly.index,
-                pdb_yearly.values,
-                where="mid",
+            self._plot_step_series(
+                ax=ax,
+                x_values=pdb_yearly.index,
+                y_values=pdb_yearly.values,
                 linewidth=2.2,
                 color=self.config.nmr_color,
                 label="PDB",
             )
-            ax.step(
-                dssp_yearly.index,
-                dssp_yearly.values,
-                where="mid",
+            self._plot_step_series(
+                ax=ax,
+                x_values=dssp_yearly.index,
+                y_values=dssp_yearly.values,
                 linewidth=2.2,
                 color=self.config.avg_color,
                 label="DSSP H+G+I+E+B",
             )
-            ax.step(
-                stride_yearly.index,
-                stride_yearly.values,
-                where="mid",
+            self._plot_step_series(
+                ax=ax,
+                x_values=stride_yearly.index,
+                y_values=stride_yearly.values,
                 linewidth=2.2,
                 color=self.config.max_color,
                 label="STRIDE H+G+I+E+B",
