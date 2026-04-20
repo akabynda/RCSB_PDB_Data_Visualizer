@@ -727,15 +727,16 @@ class PDBScientificPlotter:
         use_step_segments: bool = False,
     ) -> None:
         def draw(ax: plt.Axes) -> None:
+            x_step_edges: np.ndarray | None = None
             if use_step_segments:
                 base = pd.Series(0.0, index=table.index, dtype=float)
-                x_edges = self._step_edges(table.index)
+                x_step_edges = self._step_edges(table.index)
                 for idx, label in enumerate(NMR_WEIGHT_LABELS):
                     values = table[label].astype(float)
                     top = base + values
                     color = self.config.area_colors[idx % len(self.config.area_colors)]
                     ax.fill_between(
-                        x_edges,
+                        x_step_edges,
                         self._step_values(base),
                         self._step_values(top),
                         step="post",
@@ -756,9 +757,12 @@ class PDBScientificPlotter:
                 ax.set_ylim(*y_limits)
             if x_left is not None or x_right is not None:
                 current_left, current_right = ax.get_xlim()
+                effective_right = x_right if x_right is not None else current_right
+                if use_step_segments and x_step_edges is not None:
+                    effective_right = max(effective_right, float(x_step_edges[-1]))
                 ax.set_xlim(
                     left=x_left if x_left is not None else current_left,
-                    right=x_right if x_right is not None else current_right,
+                    right=effective_right,
                 )
             self._add_legend(ax, loc="upper left", title="Weight category")
 
@@ -893,14 +897,15 @@ class PDBScientificPlotter:
         cluster_labels = list(table.columns)
 
         def draw(ax: plt.Axes) -> None:
+            x_step_edges: np.ndarray | None = None
             if use_step_segments:
                 base = pd.Series(0.0, index=table.index, dtype=float)
-                x_edges = self._step_edges(table.index)
+                x_step_edges = self._step_edges(table.index)
                 for idx, label in enumerate(cluster_labels):
                     values = table[label].astype(float)
                     top = base + values
                     ax.fill_between(
-                        x_edges,
+                        x_step_edges,
                         self._step_values(base),
                         self._step_values(top),
                         step="post",
@@ -923,9 +928,12 @@ class PDBScientificPlotter:
                 ax.set_ylim(*y_limits)
             if x_left is not None or x_right is not None:
                 current_left, current_right = ax.get_xlim()
+                effective_right = x_right if x_right is not None else current_right
+                if use_step_segments and x_step_edges is not None:
+                    effective_right = max(effective_right, float(x_step_edges[-1]))
                 ax.set_xlim(
                     left=x_left if x_left is not None else current_left,
-                    right=x_right if x_right is not None else current_right,
+                    right=effective_right,
                 )
             if legend_outside:
                 self._add_legend(
@@ -1300,6 +1308,7 @@ class PDBScientificPlotter:
             x_values=table["year"],
             y_values=table["count"],
             color="#17becf",
+            y_bottom = 0.0
         )
         self._render_line_series(
             output_png=cumulative_output_png,
@@ -2374,6 +2383,7 @@ class PDBScientificPlotter:
             x_values=yearly_95.index,
             y_values=yearly_95,
             color="#1f77b4",
+            y_bottom=0.0,
         )
         self._render_bar_series(
             output_png=output_100_png,
@@ -2383,6 +2393,7 @@ class PDBScientificPlotter:
             x_values=yearly_100.index,
             y_values=yearly_100,
             color="#2ca02c",
+            y_bottom=0.0,
         )
         self._render_line_series(
             output_png=cumulative_output_95_png,
