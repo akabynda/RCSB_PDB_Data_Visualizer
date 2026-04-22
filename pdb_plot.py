@@ -2383,7 +2383,7 @@ class PDBScientificPlotter:
             x_values=yearly_95.index,
             y_values=yearly_95,
             color="#1f77b4",
-            y_bottom=0.0,
+            y_limits=(0.0, 100.0),
         )
         self._render_bar_series(
             output_png=output_100_png,
@@ -2393,7 +2393,7 @@ class PDBScientificPlotter:
             x_values=yearly_100.index,
             y_values=yearly_100,
             color="#2ca02c",
-            y_bottom=0.0,
+            y_limits=(0.0, 100.0),
         )
         self._render_line_series(
             output_png=cumulative_output_95_png,
@@ -2403,6 +2403,7 @@ class PDBScientificPlotter:
             x_values=cumulative_share_95.index,
             y_values=cumulative_share_95,
             color="#1f77b4",
+            y_limits=(0.0, 100.0),
         )
         self._render_line_series(
             output_png=cumulative_output_100_png,
@@ -2412,6 +2413,7 @@ class PDBScientificPlotter:
             x_values=cumulative_share_100.index,
             y_values=cumulative_share_100,
             color="#2ca02c",
+            y_limits=(0.0, 100.0),
         )
 
     @staticmethod
