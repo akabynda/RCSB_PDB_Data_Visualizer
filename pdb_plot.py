@@ -60,6 +60,12 @@ class PlotKind(str, Enum):
         "solution_nmr_monomer_three_way_comparison_cumulative"
     )
     SOLUTION_NMR_MONOMER_PRECISION = "solution_nmr_monomer_precision"
+    SOLUTION_NMR_MONOMER_PRECISION_STRIDE_MODELED_FIRST_MODEL_MEAN = (
+        "solution_nmr_monomer_precision_stride_modeled_first_model_mean"
+    )
+    SOLUTION_NMR_MONOMER_PRECISION_STRIDE_MODELED_FIRST_MODEL_MEDIAN = (
+        "solution_nmr_monomer_precision_stride_modeled_first_model_median"
+    )
     SOLUTION_NMR_MONOMER_QUALITY = "solution_nmr_monomer_quality"
     SOLUTION_NMR_MONOMER_XRAY_HOMOLOGS = "solution_nmr_monomer_xray_homologs"
     SOLUTION_NMR_MONOMER_XRAY_RMSD = "solution_nmr_monomer_xray_rmsd"
@@ -197,6 +203,18 @@ class PlotConfig:
         "Mean ensemble RMSD of solution NMR monomeric proteins by year"
     )
     nmr_monomer_precision_y_label: str = "Mean RMSD to average structure (Å)"
+    nmr_monomer_precision_stride_mean_title: str = (
+        "Mean ensemble RMSD of solution NMR monomeric proteins by year (STRIDE-defined core)"
+    )
+    nmr_monomer_precision_stride_mean_y_label: str = (
+        "Mean RMSD to average structure (Å)"
+    )
+    nmr_monomer_precision_stride_median_title: str = (
+        "Median ensemble RMSD of solution NMR monomeric proteins by year (STRIDE-defined core)"
+    )
+    nmr_monomer_precision_stride_median_y_label: str = (
+        "Median RMSD to average structure (Å)"
+    )
     nmr_monomer_quality_clash_title: str = (
         "Mean clashscore of solution NMR monomeric proteins by year"
     )
@@ -313,6 +331,8 @@ def parse_plot_kinds(raw_value: str) -> list[PlotKind]:
             PlotKind.SOLUTION_NMR_MONOMER_THREE_WAY_COMPARISON,
             PlotKind.SOLUTION_NMR_MONOMER_THREE_WAY_COMPARISON_CUMULATIVE,
             PlotKind.SOLUTION_NMR_MONOMER_PRECISION,
+            PlotKind.SOLUTION_NMR_MONOMER_PRECISION_STRIDE_MODELED_FIRST_MODEL_MEAN,
+            PlotKind.SOLUTION_NMR_MONOMER_PRECISION_STRIDE_MODELED_FIRST_MODEL_MEDIAN,
             PlotKind.SOLUTION_NMR_MONOMER_QUALITY,
             PlotKind.SOLUTION_NMR_MONOMER_XRAY_HOMOLOGS,
             PlotKind.SOLUTION_NMR_MONOMER_XRAY_RMSD,
@@ -2245,23 +2265,65 @@ class PDBScientificPlotter:
     def plot_solution_nmr_monomer_precision(
         self, data_path: Path, output_png: Path, output_svg: Path
     ) -> None:
+        self._plot_solution_nmr_monomer_precision_stat(
+            data_path=data_path,
+            output_png=output_png,
+            output_svg=output_svg,
+            statistic="mean",
+            title=self.config.nmr_monomer_precision_title,
+            y_label=self.config.nmr_monomer_precision_y_label,
+        )
+
+    def _plot_solution_nmr_monomer_precision_stat(
+        self,
+        data_path: Path,
+        output_png: Path,
+        output_svg: Path,
+        statistic: str,
+        title: str,
+        y_label: str,
+    ) -> None:
         table = self._prepare_monomer_precision_table(self._read_csv(data_path))
         self._scientific_style()
-        yearly_mean_rmsd = (
+        yearly_rmsd = (
             table.groupby("year", as_index=True)["mean_rmsd_angstrom"]
-            .mean()
+            .agg(statistic)
             .sort_index()
         )
 
         self._render_bar_series(
             output_png=output_png,
             output_svg=output_svg,
-            title=self.config.nmr_monomer_precision_title,
-            y_label=self.config.nmr_monomer_precision_y_label,
-            x_values=yearly_mean_rmsd.index,
-            y_values=yearly_mean_rmsd,
+            title=title,
+            y_label=y_label,
+            x_values=yearly_rmsd.index,
+            y_values=yearly_rmsd,
             color="#8c564b",
             y_bottom=0.0,
+        )
+
+    def plot_solution_nmr_monomer_precision_stride_modeled_first_model_mean(
+        self, data_path: Path, output_png: Path, output_svg: Path
+    ) -> None:
+        self._plot_solution_nmr_monomer_precision_stat(
+            data_path=data_path,
+            output_png=output_png,
+            output_svg=output_svg,
+            statistic="mean",
+            title=self.config.nmr_monomer_precision_stride_mean_title,
+            y_label=self.config.nmr_monomer_precision_stride_mean_y_label,
+        )
+
+    def plot_solution_nmr_monomer_precision_stride_modeled_first_model_median(
+        self, data_path: Path, output_png: Path, output_svg: Path
+    ) -> None:
+        self._plot_solution_nmr_monomer_precision_stat(
+            data_path=data_path,
+            output_png=output_png,
+            output_svg=output_svg,
+            statistic="median",
+            title=self.config.nmr_monomer_precision_stride_median_title,
+            y_label=self.config.nmr_monomer_precision_stride_median_y_label,
         )
 
     @staticmethod
@@ -2476,11 +2538,13 @@ def parse_args() -> argparse.Namespace:
             PlotKind.SOLUTION_NMR_MONOMER_THREE_WAY_COMPARISON,
             PlotKind.SOLUTION_NMR_MONOMER_THREE_WAY_COMPARISON_CUMULATIVE,
             PlotKind.SOLUTION_NMR_MONOMER_PRECISION,
+            PlotKind.SOLUTION_NMR_MONOMER_PRECISION_STRIDE_MODELED_FIRST_MODEL_MEAN,
+            PlotKind.SOLUTION_NMR_MONOMER_PRECISION_STRIDE_MODELED_FIRST_MODEL_MEDIAN,
             PlotKind.SOLUTION_NMR_MONOMER_QUALITY,
             PlotKind.SOLUTION_NMR_MONOMER_XRAY_HOMOLOGS,
             PlotKind.SOLUTION_NMR_MONOMER_XRAY_RMSD,
         ],
-        help="Comma-separated plot kinds or 'all'. Available: method_counts, membrane_protein_counts, solution_nmr_program_counts, solution_nmr_monomer_program_clusters, solution_nmr_weight_stats, solution_nmr_period_boxplot, solution_nmr_period_area, solution_nmr_period_area_share, solution_nmr_period_area_cumulative_share, solution_nmr_monomer_secondary, solution_nmr_monomer_secondary_comparison, solution_nmr_monomer_secondary_comparison_cumulative, solution_nmr_monomer_stride_modeled_first_model, solution_nmr_monomer_secondary_modeled_first_model_comparison, solution_nmr_monomer_secondary_modeled_first_model_comparison_cumulative, solution_nmr_monomer_stride_comparison, solution_nmr_monomer_stride_comparison_cumulative, solution_nmr_monomer_stride_modeled_first_model_comparison, solution_nmr_monomer_stride_modeled_first_model_comparison_cumulative, solution_nmr_monomer_three_way_comparison, solution_nmr_monomer_three_way_comparison_cumulative, solution_nmr_monomer_precision, solution_nmr_monomer_quality, solution_nmr_monomer_xray_homologs, solution_nmr_monomer_xray_rmsd (default: all).",
+        help="Comma-separated plot kinds or 'all'. Available: method_counts, membrane_protein_counts, solution_nmr_program_counts, solution_nmr_monomer_program_clusters, solution_nmr_weight_stats, solution_nmr_period_boxplot, solution_nmr_period_area, solution_nmr_period_area_share, solution_nmr_period_area_cumulative_share, solution_nmr_monomer_secondary, solution_nmr_monomer_secondary_comparison, solution_nmr_monomer_secondary_comparison_cumulative, solution_nmr_monomer_stride_modeled_first_model, solution_nmr_monomer_secondary_modeled_first_model_comparison, solution_nmr_monomer_secondary_modeled_first_model_comparison_cumulative, solution_nmr_monomer_stride_comparison, solution_nmr_monomer_stride_comparison_cumulative, solution_nmr_monomer_stride_modeled_first_model_comparison, solution_nmr_monomer_stride_modeled_first_model_comparison_cumulative, solution_nmr_monomer_three_way_comparison, solution_nmr_monomer_three_way_comparison_cumulative, solution_nmr_monomer_precision, solution_nmr_monomer_precision_stride_modeled_first_model_mean, solution_nmr_monomer_precision_stride_modeled_first_model_median, solution_nmr_monomer_quality, solution_nmr_monomer_xray_homologs, solution_nmr_monomer_xray_rmsd (default: all).",
     )
     parser.add_argument(
         "--counts-input",
@@ -2547,6 +2611,15 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("data/solution_nmr_monomer_precision.csv"),
         help="Input CSV for SOLUTION NMR monomer precision (RMSD) plot.",
+    )
+    parser.add_argument(
+        "--nmr-monomer-precision-stride-modeled-first-model-input",
+        type=Path,
+        default=Path("data/solution_nmr_monomer_precision_stride_modeled_first_model.csv"),
+        help=(
+            "Input CSV for SOLUTION NMR monomer precision plots "
+            "with STRIDE-defined modeled-first-model core."
+        ),
     )
     parser.add_argument(
         "--nmr-monomer-quality-input",
@@ -2932,6 +3005,38 @@ def parse_args() -> argparse.Namespace:
         help="Output SVG for SOLUTION NMR monomer precision (RMSD) plot.",
     )
     parser.add_argument(
+        "--nmr-monomer-precision-stride-mean-output-png",
+        type=Path,
+        default=Path(
+            "figures/solution_nmr_monomer_precision_stride_modeled_first_model_mean_rmsd_by_year.png"
+        ),
+        help="Output PNG for STRIDE-core monomer precision yearly-mean RMSD plot.",
+    )
+    parser.add_argument(
+        "--nmr-monomer-precision-stride-mean-output-svg",
+        type=Path,
+        default=Path(
+            "figures/solution_nmr_monomer_precision_stride_modeled_first_model_mean_rmsd_by_year.svg"
+        ),
+        help="Output SVG for STRIDE-core monomer precision yearly-mean RMSD plot.",
+    )
+    parser.add_argument(
+        "--nmr-monomer-precision-stride-median-output-png",
+        type=Path,
+        default=Path(
+            "figures/solution_nmr_monomer_precision_stride_modeled_first_model_median_rmsd_by_year.png"
+        ),
+        help="Output PNG for STRIDE-core monomer precision yearly-median RMSD plot.",
+    )
+    parser.add_argument(
+        "--nmr-monomer-precision-stride-median-output-svg",
+        type=Path,
+        default=Path(
+            "figures/solution_nmr_monomer_precision_stride_modeled_first_model_median_rmsd_by_year.svg"
+        ),
+        help="Output SVG for STRIDE-core monomer precision yearly-median RMSD plot.",
+    )
+    parser.add_argument(
         "--nmr-monomer-quality-clash-output-png",
         type=Path,
         default=Path("figures/solution_nmr_monomer_quality_clashscore_by_year.png"),
@@ -3232,6 +3337,20 @@ def main() -> None:
             data_path=args.nmr_monomer_precision_input,
             output_png=args.nmr_monomer_precision_output_png,
             output_svg=args.nmr_monomer_precision_output_svg,
+        )
+
+    if PlotKind.SOLUTION_NMR_MONOMER_PRECISION_STRIDE_MODELED_FIRST_MODEL_MEAN in args.plots:
+        plotter.plot_solution_nmr_monomer_precision_stride_modeled_first_model_mean(
+            data_path=args.nmr_monomer_precision_stride_modeled_first_model_input,
+            output_png=args.nmr_monomer_precision_stride_mean_output_png,
+            output_svg=args.nmr_monomer_precision_stride_mean_output_svg,
+        )
+
+    if PlotKind.SOLUTION_NMR_MONOMER_PRECISION_STRIDE_MODELED_FIRST_MODEL_MEDIAN in args.plots:
+        plotter.plot_solution_nmr_monomer_precision_stride_modeled_first_model_median(
+            data_path=args.nmr_monomer_precision_stride_modeled_first_model_input,
+            output_png=args.nmr_monomer_precision_stride_median_output_png,
+            output_svg=args.nmr_monomer_precision_stride_median_output_svg,
         )
 
     if PlotKind.SOLUTION_NMR_MONOMER_QUALITY in args.plots:

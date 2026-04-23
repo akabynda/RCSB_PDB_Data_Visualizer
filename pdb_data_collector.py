@@ -45,6 +45,7 @@ LOCAL_DSSP_CANDIDATE = Path("dssp/build/mkdssp")
 LOCAL_STRIDE_CANDIDATE = Path("/tmp/stride_src/src/stride")
 DSSP_STATE_CODES: tuple[str, ...] = ("H", "B", "E", "G", "I", "T", "S", "-")
 STRIDE_STATE_CODES: tuple[str, ...] = ("H", "G", "I", "E", "B", "T", "C")
+STRIDE_CORE_STATE_CODES: frozenset[str] = frozenset({"H", "G", "I", "E", "B"})
 DEFAULT_MAX_WORKERS = max(1, os.cpu_count() or 1)
 print(f"Using up to {DEFAULT_MAX_WORKERS} worker threads for concurrent tasks")
 
@@ -78,6 +79,9 @@ class DatasetKind(str, Enum):
         "solution_nmr_monomer_stride_modeled_first_model"
     )
     SOLUTION_NMR_MONOMER_PRECISION = "solution_nmr_monomer_precision"
+    SOLUTION_NMR_MONOMER_PRECISION_STRIDE_MODELED_FIRST_MODEL = (
+        "solution_nmr_monomer_precision_stride_modeled_first_model"
+    )
     SOLUTION_NMR_MONOMER_QUALITY = "solution_nmr_monomer_quality"
     SOLUTION_NMR_MONOMER_XRAY_HOMOLOGS = "solution_nmr_monomer_xray_homologs"
     SOLUTION_NMR_MONOMER_XRAY_RMSD = "solution_nmr_monomer_xray_rmsd"
@@ -282,6 +286,14 @@ class SolutionNMRMonomerCoreRegionRecord:
     core_start_seq_id: int
     core_end_seq_id: int
     deposited_model_count: int
+
+
+@dataclass(frozen=True)
+class SolutionNMRMonomerModeledFirstModelSeedRecord:
+    entry_id: str
+    year: int
+    chain_id: str
+    modeled_auth_seq_ids: frozenset[int]
 
 
 @dataclass(frozen=True)
@@ -817,6 +829,78 @@ def compute_stride_state_coverages_for_chain(
     return coverages, len(model_texts), analyzed_model_count
 
 
+def _parse_stride_state_by_chain(stdout: str) -> dict[str, dict[int, str]]:
+    state_by_chain: dict[str, dict[int, str]] = {}
+    for line in stdout.splitlines():
+        if not line.startswith("ASG"):
+            continue
+        parts = line.split()
+        if len(parts) < 6:
+            continue
+        chain_label = str(parts[2]).strip()
+        seq_id_raw = str(parts[3]).strip()
+        if not seq_id_raw:
+            continue
+        if seq_id_raw[-1:].isalpha():
+            seq_id_raw = seq_id_raw[:-1]
+        try:
+            auth_seq_id = int(seq_id_raw)
+        except ValueError:
+            continue
+        state_raw = str(parts[5]).strip()
+        if len(state_raw) != 1:
+            continue
+        state = state_raw if state_raw in STRIDE_STATE_CODES else "C"
+        chain_states = state_by_chain.setdefault(chain_label, {})
+        chain_states.setdefault(auth_seq_id, state)
+    return state_by_chain
+
+
+def _select_stride_chain_states(
+    state_by_chain: dict[str, dict[int, str]],
+    chain_id: str,
+) -> dict[int, str] | None:
+    chain_states = state_by_chain.get(chain_id)
+    if not chain_states and len(state_by_chain) == 1:
+        chain_states = next(iter(state_by_chain.values()))
+    return chain_states
+
+
+def _run_stride_for_model_text(
+    model_text: str,
+    stride_executable: str,
+) -> dict[str, dict[int, str]] | None:
+    with tempfile.NamedTemporaryFile(
+        "w", suffix=".pdb", encoding="utf-8", delete=True
+    ) as handle:
+        handle.write(model_text)
+        handle.flush()
+
+        process = subprocess.run(
+            [stride_executable, handle.name],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if process.returncode != 0:
+            return None
+        return _parse_stride_state_by_chain(process.stdout)
+
+
+def _extract_stride_core_range_for_modeled_auth_seq_ids(
+    chain_states: dict[int, str],
+    modeled_auth_seq_ids: set[int],
+) -> tuple[int, int] | None:
+    structured_auth_seq_ids = sorted(
+        auth_seq_id
+        for auth_seq_id in modeled_auth_seq_ids
+        if chain_states.get(auth_seq_id) in STRIDE_CORE_STATE_CODES
+    )
+    if not structured_auth_seq_ids:
+        return None
+    return structured_auth_seq_ids[0], structured_auth_seq_ids[-1]
+
+
 def compute_dssp_state_coverages_for_chain_modeled_first_model(
     session: requests.Session,
     config: CollectorConfig,
@@ -934,70 +1018,66 @@ def compute_stride_state_coverages_for_chain_modeled_first_model(
         return default_coverages, 0, 0
 
     try:
-        with tempfile.NamedTemporaryFile(
-            "w", suffix=".pdb", encoding="utf-8", delete=True
-        ) as handle:
-            handle.write(model_texts[0])
-            handle.flush()
+        state_by_chain = _run_stride_for_model_text(
+            model_text=model_texts[0],
+            stride_executable=stride_executable,
+        )
+        if state_by_chain is None:
+            return default_coverages, len(model_texts), 0
 
-            process = subprocess.run(
-                [stride_executable, handle.name],
-                check=False,
-                capture_output=True,
-                text=True,
-            )
-            if process.returncode != 0:
-                return default_coverages, len(model_texts), 0
+        chain_states = _select_stride_chain_states(state_by_chain, chain_id)
+        if not chain_states:
+            return default_coverages, len(model_texts), 0
 
-            state_by_chain: dict[str, dict[int, str]] = {}
-            for line in process.stdout.splitlines():
-                if not line.startswith("ASG"):
-                    continue
-                parts = line.split()
-                if len(parts) < 6:
-                    continue
-                chain_label = str(parts[2]).strip()
-                seq_id_raw = str(parts[3]).strip()
-                if not seq_id_raw:
-                    continue
-                if seq_id_raw[-1:].isalpha():
-                    seq_id_raw = seq_id_raw[:-1]
-                try:
-                    auth_seq_id = int(seq_id_raw)
-                except ValueError:
-                    continue
-                state_raw = str(parts[5]).strip()
-                if len(state_raw) != 1:
-                    continue
-                state = state_raw if state_raw in STRIDE_STATE_CODES else "C"
-                chain_states = state_by_chain.setdefault(chain_label, {})
-                chain_states.setdefault(auth_seq_id, state)
+        filtered_states = [
+            chain_states.get(auth_seq_id, "C")
+            for auth_seq_id in sorted(modeled_auth_seq_ids)
+        ]
+        missing_count = max(0, modeled_sequence_length - len(filtered_states))
+        if missing_count > 0:
+            filtered_states.extend(["C"] * missing_count)
+        if not filtered_states:
+            return default_coverages, len(model_texts), 0
 
-            chain_states = state_by_chain.get(chain_id)
-            if not chain_states and len(state_by_chain) == 1:
-                chain_states = next(iter(state_by_chain.values()))
-            if not chain_states:
-                return default_coverages, len(model_texts), 0
-
-            filtered_states = [
-                chain_states.get(auth_seq_id, "C")
-                for auth_seq_id in sorted(modeled_auth_seq_ids)
-            ]
-            missing_count = max(0, modeled_sequence_length - len(filtered_states))
-            if missing_count > 0:
-                filtered_states.extend(["C"] * missing_count)
-            if not filtered_states:
-                return default_coverages, len(model_texts), 0
-
-            state_counts = Counter(filtered_states)
-            denominator = float(modeled_sequence_length)
-            coverages = {
-                state: min(1.0, max(0.0, state_counts.get(state, 0) / denominator))
-                for state in STRIDE_STATE_CODES
-            }
-            return coverages, len(model_texts), 1
+        state_counts = Counter(filtered_states)
+        denominator = float(modeled_sequence_length)
+        coverages = {
+            state: min(1.0, max(0.0, state_counts.get(state, 0) / denominator))
+            for state in STRIDE_STATE_CODES
+        }
+        return coverages, len(model_texts), 1
     except Exception:
         return default_coverages, len(model_texts), 0
+
+
+def compute_stride_core_range_for_modeled_auth_seq_ids_in_first_model(
+    pdb_path: Path,
+    chain_id: str,
+    modeled_auth_seq_ids: set[int],
+    stride_executable: str,
+) -> tuple[int, int] | None:
+    if not modeled_auth_seq_ids:
+        return None
+
+    model_texts = extract_model_pdb_texts(pdb_path)
+    if not model_texts:
+        return None
+
+    state_by_chain = _run_stride_for_model_text(
+        model_text=model_texts[0],
+        stride_executable=stride_executable,
+    )
+    if state_by_chain is None:
+        return None
+
+    chain_states = _select_stride_chain_states(state_by_chain, chain_id)
+    if not chain_states:
+        return None
+
+    return _extract_stride_core_range_for_modeled_auth_seq_ids(
+        chain_states=chain_states,
+        modeled_auth_seq_ids=modeled_auth_seq_ids,
+    )
 
 
 def parse_models_ca_coords(
@@ -2892,6 +2972,82 @@ class RCSBClient:
             )
         return records
 
+    def fetch_solution_nmr_monomer_modeled_first_model_seed_records_for_ids(
+        self, entry_ids: list[str]
+    ) -> list[SolutionNMRMonomerModeledFirstModelSeedRecord]:
+        query = """
+        query($ids:[String!]!) {
+          entries(entry_ids:$ids) {
+            rcsb_id
+            rcsb_entry_info {
+              deposited_model_count
+            }
+            rcsb_accession_info {
+              deposit_date
+            }
+            polymer_entities {
+              entity_poly {
+                type
+                rcsb_entity_polymer_type
+                pdbx_strand_id
+                rcsb_sample_sequence_length
+              }
+              polymer_entity_instances {
+                rcsb_polymer_entity_instance_container_identifiers {
+                  auth_to_entity_poly_seq_mapping
+                }
+                rcsb_polymer_instance_feature {
+                  type
+                  feature_positions {
+                    beg_seq_id
+                    end_seq_id
+                  }
+                }
+              }
+            }
+          }
+        }
+        """
+        payload = {"query": query, "variables": {"ids": entry_ids}}
+        data = self._post_json(self.config.graphql_url, payload)
+        entries = data.get("data", {}).get("entries", [])
+        records: list[SolutionNMRMonomerModeledFirstModelSeedRecord] = []
+
+        for entry in entries:
+            if not entry:
+                continue
+            context = self._extract_solution_nmr_monomer_context(entry)
+            if context is None:
+                continue
+            entry_id, year, _, polymer_entity, chain_id = context
+            entity_poly = polymer_entity.get("entity_poly") or {}
+
+            sequence_length_raw = entity_poly.get("rcsb_sample_sequence_length")
+            if sequence_length_raw is None or int(sequence_length_raw) <= 0:
+                continue
+            sequence_length = int(sequence_length_raw)
+
+            instances = polymer_entity.get("polymer_entity_instances") or []
+            if len(instances) != 1:
+                continue
+            instance = instances[0] or {}
+            _, modeled_auth_seq_ids = self._extract_modeled_residue_sets_for_instance(
+                sequence_length=sequence_length,
+                instance=instance,
+            )
+            if not modeled_auth_seq_ids:
+                continue
+
+            records.append(
+                SolutionNMRMonomerModeledFirstModelSeedRecord(
+                    entry_id=str(entry_id),
+                    year=year,
+                    chain_id=chain_id,
+                    modeled_auth_seq_ids=frozenset(modeled_auth_seq_ids),
+                )
+            )
+        return records
+
     def fetch_solution_nmr_monomer_xray_group_records_for_ids(
         self, entry_ids: list[str]
     ) -> list[tuple[str, int, str | None, str | None]]:
@@ -3679,30 +3835,48 @@ class SolutionNMRMonomerPrecisionCollector:
             float(np.mean(per_model_rmsd)),
         )
 
+    def _build_record_from_core_range(
+        self,
+        pdb_path: Path,
+        entry_id: str,
+        year: int,
+        chain_id: str,
+        core_start_seq_id: int,
+        core_end_seq_id: int,
+    ) -> SolutionNMRMonomerPrecisionRecord | None:
+        result = self._compute_mean_rmsd_to_average(
+            pdb_path=pdb_path,
+            chain_id=chain_id,
+            start_seq_id=core_start_seq_id,
+            end_seq_id=core_end_seq_id,
+        )
+        if result is None:
+            return None
+        n_models, n_ca_core_used, n_ca_core_raw, mean_rmsd = result
+        return SolutionNMRMonomerPrecisionRecord(
+            entry_id=entry_id,
+            year=year,
+            chain_id=chain_id,
+            core_start_seq_id=core_start_seq_id,
+            core_end_seq_id=core_end_seq_id,
+            n_models=n_models,
+            n_ca_core_used=n_ca_core_used,
+            n_ca_core_raw=n_ca_core_raw,
+            mean_rmsd_angstrom=mean_rmsd,
+        )
+
     def _compute_record(
         self, core: SolutionNMRMonomerCoreRegionRecord
     ) -> SolutionNMRMonomerPrecisionRecord | None:
         try:
             pdb_path = self._download_pdb_if_needed(core.entry_id)
-            result = self._compute_mean_rmsd_to_average(
+            return self._build_record_from_core_range(
                 pdb_path=pdb_path,
-                chain_id=core.chain_id,
-                start_seq_id=core.core_start_seq_id,
-                end_seq_id=core.core_end_seq_id,
-            )
-            if result is None:
-                return None
-            n_models, n_ca_core_used, n_ca_core_raw, mean_rmsd = result
-            return SolutionNMRMonomerPrecisionRecord(
                 entry_id=core.entry_id,
                 year=core.year,
                 chain_id=core.chain_id,
                 core_start_seq_id=core.core_start_seq_id,
                 core_end_seq_id=core.core_end_seq_id,
-                n_models=n_models,
-                n_ca_core_used=n_ca_core_used,
-                n_ca_core_raw=n_ca_core_raw,
-                mean_rmsd_angstrom=mean_rmsd,
             )
         except Exception as exc:
             LOGGER.warning(
@@ -3760,6 +3934,115 @@ class SolutionNMRMonomerPrecisionCollector:
                 if total > 0 and (idx % 50 == 0 or idx == total):
                     LOGGER.info(
                         "SOLUTION NMR precision RMSD: processed %d/%d entries",
+                        idx,
+                        total,
+                    )
+
+        return sorted(precision_records, key=lambda r: (r.year, r.entry_id))
+
+
+class SolutionNMRMonomerPrecisionStrideModeledFirstModelCollector(
+    SolutionNMRMonomerPrecisionCollector
+):
+    def __init__(
+        self,
+        client: RCSBClient,
+        config: CollectorConfig,
+        cache_dir: Path,
+        precision_workers: int,
+        stride_executable: str,
+    ) -> None:
+        super().__init__(
+            client=client,
+            config=config,
+            cache_dir=cache_dir,
+            precision_workers=precision_workers,
+        )
+        self.stride_executable = stride_executable
+
+    def _compute_record_from_seed(
+        self,
+        seed: SolutionNMRMonomerModeledFirstModelSeedRecord,
+    ) -> SolutionNMRMonomerPrecisionRecord | None:
+        try:
+            pdb_path = self._download_pdb_if_needed(seed.entry_id)
+            core_range = compute_stride_core_range_for_modeled_auth_seq_ids_in_first_model(
+                pdb_path=pdb_path,
+                chain_id=seed.chain_id,
+                modeled_auth_seq_ids=set(seed.modeled_auth_seq_ids),
+                stride_executable=self.stride_executable,
+            )
+            if core_range is None:
+                return None
+            core_start, core_end = core_range
+            return self._build_record_from_core_range(
+                pdb_path=pdb_path,
+                entry_id=seed.entry_id,
+                year=seed.year,
+                chain_id=seed.chain_id,
+                core_start_seq_id=core_start,
+                core_end_seq_id=core_end,
+            )
+        except Exception as exc:
+            LOGGER.warning(
+                "STRIDE modeled-first-model precision calculation failed for %s: %s",
+                seed.entry_id,
+                exc,
+            )
+            return None
+
+    def collect(
+        self,
+        max_entries: int | None = None,
+        skip_entry_ids: set[str] | None = None,
+        on_record: Callable[[SolutionNMRMonomerPrecisionRecord], None] | None = None,
+    ) -> list[SolutionNMRMonomerPrecisionRecord]:
+        skip_entry_ids = skip_entry_ids or set()
+        entry_ids = fetch_solution_nmr_entry_ids(
+            client=self.client,
+            log_label="SOLUTION NMR precision STRIDE modeled-first-model",
+        )
+
+        batches = list(chunked(entry_ids, self.config.graphql_batch_size))
+        seed_records: list[SolutionNMRMonomerModeledFirstModelSeedRecord] = []
+        for batch_seeds in collect_batch_results(
+            batches=batches,
+            max_workers=self.config.max_workers,
+            fetch_fn=(
+                self.client.fetch_solution_nmr_monomer_modeled_first_model_seed_records_for_ids
+            ),
+            progress_label="SOLUTION NMR precision STRIDE modeled-first-model seeds",
+        ):
+            seed_records.extend(batch_seeds)
+
+        filtered_seeds = [
+            record for record in seed_records if record.entry_id not in skip_entry_ids
+        ]
+        filtered_seeds = sorted(filtered_seeds, key=lambda r: (r.year, r.entry_id))
+        if max_entries is not None:
+            filtered_seeds = filtered_seeds[: max(0, max_entries)]
+        LOGGER.info(
+            "SOLUTION NMR precision STRIDE modeled-first-model: entries to process after filters: %d",
+            len(filtered_seeds),
+        )
+
+        precision_records: list[SolutionNMRMonomerPrecisionRecord] = []
+        with ThreadPoolExecutor(max_workers=self.precision_workers) as executor:
+            future_map = {
+                executor.submit(self._compute_record_from_seed, seed): idx
+                for idx, seed in enumerate(filtered_seeds, start=1)
+            }
+            total = len(future_map)
+            for future in as_completed(future_map):
+                record = future.result()
+                if record is not None:
+                    precision_records.append(record)
+                    if on_record is not None:
+                        on_record(record)
+                idx = future_map[future]
+                if total > 0 and (idx % 50 == 0 or idx == total):
+                    LOGGER.info(
+                        "SOLUTION NMR precision STRIDE modeled-first-model RMSD: processed %d/%d entries",
                         idx,
                         total,
                     )
@@ -5514,6 +5797,7 @@ def parse_dataset_kinds(raw_value: str) -> list[DatasetKind]:
             DatasetKind.SOLUTION_NMR_MONOMER_STRIDE,
             DatasetKind.SOLUTION_NMR_MONOMER_STRIDE_MODELED_FIRST_MODEL,
             DatasetKind.SOLUTION_NMR_MONOMER_PRECISION,
+            DatasetKind.SOLUTION_NMR_MONOMER_PRECISION_STRIDE_MODELED_FIRST_MODEL,
             DatasetKind.SOLUTION_NMR_MONOMER_QUALITY,
             DatasetKind.SOLUTION_NMR_MONOMER_XRAY_HOMOLOGS,
             DatasetKind.SOLUTION_NMR_MONOMER_XRAY_RMSD,
@@ -5546,7 +5830,7 @@ def parse_args() -> argparse.Namespace:
             DatasetKind.SOLUTION_NMR_MONOMER_SECONDARY,
         ],
         help="Comma-separated dataset kinds or 'all'. "
-        "Available: method_counts, membrane_protein_counts, solution_nmr_program_counts, solution_nmr_monomer_program_clusters, solution_nmr_weights, solution_nmr_monomer_secondary, solution_nmr_monomer_secondary_modeled_first_model, solution_nmr_monomer_stride, solution_nmr_monomer_stride_modeled_first_model, solution_nmr_monomer_precision, solution_nmr_monomer_quality, solution_nmr_monomer_xray_homologs, solution_nmr_monomer_xray_rmsd (default: the first three).",
+        "Available: method_counts, membrane_protein_counts, solution_nmr_program_counts, solution_nmr_monomer_program_clusters, solution_nmr_weights, solution_nmr_monomer_secondary, solution_nmr_monomer_secondary_modeled_first_model, solution_nmr_monomer_stride, solution_nmr_monomer_stride_modeled_first_model, solution_nmr_monomer_precision, solution_nmr_monomer_precision_stride_modeled_first_model, solution_nmr_monomer_quality, solution_nmr_monomer_xray_homologs, solution_nmr_monomer_xray_rmsd (default: the first three).",
     )
     parser.add_argument(
         "--counts-output",
@@ -5665,6 +5949,15 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("data/solution_nmr_monomer_precision.csv"),
         help="Output CSV path for solution_nmr_monomer_precision dataset.",
+    )
+    parser.add_argument(
+        "--solution-nmr-monomer-precision-stride-modeled-first-model-output",
+        type=Path,
+        default=Path("data/solution_nmr_monomer_precision_stride_modeled_first_model.csv"),
+        help=(
+            "Output CSV path for solution_nmr_monomer_precision_stride_modeled_first_model "
+            "dataset."
+        ),
     )
     parser.add_argument(
         "--solution-nmr-monomer-quality-output",
@@ -6135,6 +6428,74 @@ def main() -> None:
             "Saved %d records to %s (new: %d)",
             len(existing_records) + len(new_records),
             args.solution_nmr_monomer_precision_output,
+            len(new_records),
+        )
+
+    if (
+        DatasetKind.SOLUTION_NMR_MONOMER_PRECISION_STRIDE_MODELED_FIRST_MODEL
+        in args.datasets
+    ):
+        precision_stride_executable = resolve_stride_executable(
+            args.solution_nmr_monomer_stride_executable
+        )
+        if precision_stride_executable is None:
+            raise RuntimeError(
+                "STRIDE executable not found for "
+                "solution_nmr_monomer_precision_stride_modeled_first_model. "
+                "Provide --solution-nmr-monomer-stride-executable or install stride."
+            )
+
+        existing_records = []
+        skip_entry_ids = set()
+        precision_stride_output_path = Path(
+            args.solution_nmr_monomer_precision_stride_modeled_first_model_output
+        )
+        if not args.precision_overwrite and precision_stride_output_path.exists():
+            existing_records = read_solution_nmr_monomer_precision_csv(
+                precision_stride_output_path
+            )
+            skip_entry_ids = {record.entry_id for record in existing_records}
+            LOGGER.info(
+                "SOLUTION NMR precision STRIDE modeled-first-model: loaded %d existing records for resume",
+                len(existing_records),
+            )
+
+        precision_stride_collector = (
+            SolutionNMRMonomerPrecisionStrideModeledFirstModelCollector(
+                client=client,
+                config=config,
+                cache_dir=Path(args.precision_cache_dir),
+                precision_workers=args.precision_workers,
+                stride_executable=precision_stride_executable,
+            )
+        )
+        existing_records = sorted(existing_records, key=lambda r: (r.year, r.entry_id))
+        precision_stride_output_path.parent.mkdir(parents=True, exist_ok=True)
+        with precision_stride_output_path.open(
+            "w", newline="", encoding="utf-8"
+        ) as csvfile:
+            writer = csv.writer(csvfile)
+            writer.writerow(SOLUTION_NMR_MONOMER_PRECISION_HEADER)
+            for record in existing_records:
+                writer.writerow(_solution_nmr_monomer_precision_csv_row(record))
+            csvfile.flush()
+
+            def _on_precision_stride_record(
+                record: SolutionNMRMonomerPrecisionRecord,
+            ) -> None:
+                writer.writerow(_solution_nmr_monomer_precision_csv_row(record))
+                csvfile.flush()
+
+            new_records = precision_stride_collector.collect(
+                max_entries=args.precision_max_entries,
+                skip_entry_ids=skip_entry_ids,
+                on_record=_on_precision_stride_record,
+            )
+
+        LOGGER.info(
+            "Saved %d records to %s (new: %d)",
+            len(existing_records) + len(new_records),
+            args.solution_nmr_monomer_precision_stride_modeled_first_model_output,
             len(new_records),
         )
 
