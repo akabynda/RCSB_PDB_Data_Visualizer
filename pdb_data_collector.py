@@ -11,11 +11,11 @@ import tempfile
 import time
 import requests
 import numpy as np
-from Bio.PDB import PDBParser
+from Bio.PDB import MMCIFParser, PDBIO, PDBParser
 from Bio.PDB.DSSP import DSSP as BioDSSP
 from Bio.SeqUtils import molecular_weight as sequence_molecular_weight
 from collections import Counter
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -25,6 +25,7 @@ from MDAnalysis.analysis.rms import rmsd as mda_rmsd
 
 LOGGER = logging.getLogger(__name__)
 T = TypeVar("T")
+_MISSING = object()
 
 SOLUTION_NMR_METHOD = "SOLUTION NMR"
 PROTEIN_MONOMER_ENTITY_TYPES: frozenset[str] = frozenset(
@@ -323,8 +324,23 @@ class SolutionNMRMonomerXrayHomologRecord:
     entry_id: str
     year: int
     sequence_identity_percent: int
-    group_id: str | None
+    nmr_core_start_seq_id: int | None
+    nmr_core_end_seq_id: int | None
+    nmr_query_sequence_length: int
+    xray_homolog_entry_ids: tuple[str, ...]
+    xray_homolog_entity_ids: tuple[str, ...]
     has_xray_homolog: bool
+
+
+@dataclass(frozen=True)
+class SolutionNMRMonomerXrayHomologSeedRecord:
+    entry_id: str
+    year: int
+    chain_id: str
+    sequence: str
+    modeled_label_seq_ids: frozenset[int]
+    modeled_auth_seq_ids: frozenset[int]
+    auth_mapping: tuple[int | None, ...]
 
 
 @dataclass(frozen=True)
@@ -456,15 +472,23 @@ def download_pdb_if_needed(
     cache_dir: Path,
     entry_id: str,
 ) -> Path:
+    cache_dir.mkdir(parents=True, exist_ok=True)
     path = cache_dir / f"{entry_id}.pdb"
     if path.exists() and path.stat().st_size > 0:
         return path
 
     url = f"https://files.rcsb.org/download/{entry_id}.pdb"
     last_error: Exception | None = None
+    saw_not_found = False
     for attempt in range(1, config.retries + 1):
         try:
             response = session.get(url, timeout=config.timeout_seconds)
+            if response.status_code == 404:
+                saw_not_found = True
+                last_error = requests.HTTPError(
+                    f"404 Client Error: Not Found for url: {url}"
+                )
+                break
             response.raise_for_status()
             path.write_text(response.text, encoding="utf-8")
             return path
@@ -473,6 +497,34 @@ def download_pdb_if_needed(
             wait_seconds = config.backoff_seconds * attempt
             if attempt < config.retries:
                 time.sleep(wait_seconds)
+    if saw_not_found:
+        cif_path = cache_dir / f"{entry_id}.cif"
+        cif_url = f"https://files.rcsb.org/download/{entry_id}.cif"
+        LOGGER.info(
+            "PDB file is unavailable for %s; trying mmCIF fallback",
+            entry_id,
+        )
+        for attempt in range(1, config.retries + 1):
+            try:
+                response = session.get(cif_url, timeout=config.timeout_seconds)
+                response.raise_for_status()
+                cif_path.write_text(response.text, encoding="utf-8")
+                parser = MMCIFParser(QUIET=True)
+                structure = parser.get_structure(entry_id, str(cif_path))
+                io = PDBIO()
+                io.set_structure(structure)
+                io.save(str(path))
+                if path.exists() and path.stat().st_size > 0:
+                    LOGGER.info(
+                        "Converted mmCIF fallback to cached PDB for %s",
+                        entry_id,
+                    )
+                    return path
+            except Exception as exc:
+                last_error = exc
+                wait_seconds = config.backoff_seconds * attempt
+                if attempt < config.retries:
+                    time.sleep(wait_seconds)
     raise RuntimeError(f"Failed to download {entry_id}: {last_error}")
 
 
@@ -1404,6 +1456,18 @@ def _map_label_seq_ids_to_auth_seq_ids(
     return {int(seq_id) for seq_id in label_seq_ids}
 
 
+def _auth_mapping_tuple(auth_mapping_raw: Any) -> tuple[int | None, ...]:
+    if not isinstance(auth_mapping_raw, list):
+        return tuple()
+    values: list[int | None] = []
+    for item in auth_mapping_raw:
+        try:
+            values.append(int(str(item).strip()))
+        except (TypeError, ValueError):
+            values.append(None)
+    return tuple(values)
+
+
 def _sequence_weight_kda(sequence: str, seq_type: str) -> float | None:
     if sequence_molecular_weight is None:
         return None
@@ -2003,6 +2067,116 @@ class RCSBClient:
             )
             matching_group_ids.update(group_ids.values())
         return matching_group_ids
+
+    def fetch_xray_polymer_entity_ids_by_sequence(
+        self,
+        sequence: str,
+        sequence_identity_percent: int,
+    ) -> list[str]:
+        if sequence_identity_percent not in {95, 100}:
+            raise ValueError("sequence_identity_percent must be 95 or 100")
+        sequence = "".join(sequence.split()).upper()
+        if not sequence:
+            return []
+        if len(sequence) < 10:
+            return []
+
+        query = {
+            "type": "group",
+            "logical_operator": "and",
+            "nodes": [
+                {
+                    "type": "terminal",
+                    "service": "sequence",
+                    "parameters": {
+                        "evalue_cutoff": 0.1,
+                        "identity_cutoff": sequence_identity_percent / 100.0,
+                        "sequence_type": "protein",
+                        "target": "pdb_protein_sequence",
+                        "value": sequence,
+                    },
+                },
+                {
+                    "type": "terminal",
+                    "service": "text",
+                    "parameters": {
+                        "attribute": "exptl.method",
+                        "operator": "exact_match",
+                        "value": "X-RAY DIFFRACTION",
+                    },
+                },
+            ],
+        }
+
+        entity_ids: list[str] = []
+        start = 0
+        total_count: int | None = None
+        while total_count is None or start < total_count:
+            payload = {
+                "query": query,
+                "return_type": "polymer_entity",
+                "request_options": {
+                    "paginate": {"start": start, "rows": self.config.page_size},
+                    "results_verbosity": "compact",
+                    "scoring_strategy": "sequence",
+                },
+            }
+            response: requests.Response | None = None
+            last_error: Exception | None = None
+            for attempt in range(1, self.config.retries + 1):
+                try:
+                    response = self.session.post(
+                        self.config.search_url,
+                        json=payload,
+                        timeout=self.config.timeout_seconds,
+                    )
+                    if response.status_code in {429} or response.status_code >= 500:
+                        last_error = requests.HTTPError(
+                            f"{response.status_code} Server Error for url: {self.config.search_url}"
+                        )
+                        LOGGER.warning(
+                            "Sequence search request returned HTTP %d (attempt %d/%d)",
+                            response.status_code,
+                            attempt,
+                            self.config.retries,
+                        )
+                        if attempt < self.config.retries:
+                            time.sleep(self.config.backoff_seconds * attempt)
+                            continue
+                    break
+                except requests.RequestException as exc:
+                    last_error = exc
+                    LOGGER.warning(
+                        "Sequence search request failed (attempt %d/%d): %s",
+                        attempt,
+                        self.config.retries,
+                        exc,
+                    )
+                    if attempt < self.config.retries:
+                        time.sleep(self.config.backoff_seconds * attempt)
+            if response is None:
+                raise RuntimeError(
+                    "Sequence search request failed after "
+                    f"{self.config.retries} attempts: {last_error}"
+                )
+            if response.status_code == 204:
+                break
+            if response.status_code == 400 and "minimum length" in response.text:
+                break
+            response.raise_for_status()
+            data = response.json()
+            total_count = int(data.get("total_count", 0))
+            batch_ids: list[str] = []
+            for item in data.get("result_set", []):
+                if isinstance(item, str):
+                    batch_ids.append(item)
+                elif isinstance(item, dict) and item.get("identifier"):
+                    batch_ids.append(str(item["identifier"]))
+            entity_ids.extend(batch_ids)
+            start += len(batch_ids)
+            if not batch_ids:
+                break
+        return entity_ids
 
     def fetch_solution_nmr_weight_records_for_ids(
         self, entry_ids: list[str]
@@ -3048,9 +3222,9 @@ class RCSBClient:
             )
         return records
 
-    def fetch_solution_nmr_monomer_xray_group_records_for_ids(
+    def fetch_solution_nmr_monomer_xray_homolog_seed_records_for_ids(
         self, entry_ids: list[str]
-    ) -> list[tuple[str, int, str | None, str | None]]:
+    ) -> list[SolutionNMRMonomerXrayHomologSeedRecord]:
         query = """
         query($ids:[String!]!) {
           entries(entry_ids:$ids) {
@@ -3066,11 +3240,20 @@ class RCSBClient:
                 type
                 rcsb_entity_polymer_type
                 pdbx_strand_id
+                rcsb_sample_sequence_length
+                pdbx_seq_one_letter_code_can
               }
-              rcsb_polymer_entity_group_membership {
-                aggregation_method
-                similarity_cutoff
-                group_id
+              polymer_entity_instances {
+                rcsb_polymer_entity_instance_container_identifiers {
+                  auth_to_entity_poly_seq_mapping
+                }
+                rcsb_polymer_instance_feature {
+                  type
+                  feature_positions {
+                    beg_seq_id
+                    end_seq_id
+                  }
+                }
               }
             }
           }
@@ -3079,7 +3262,7 @@ class RCSBClient:
         payload = {"query": query, "variables": {"ids": entry_ids}}
         data = self._post_json(self.config.graphql_url, payload)
         entries = data.get("data", {}).get("entries", [])
-        records: list[tuple[str, int, str | None, str | None]] = []
+        records: list[SolutionNMRMonomerXrayHomologSeedRecord] = []
 
         for entry in entries:
             if not entry:
@@ -3087,18 +3270,48 @@ class RCSBClient:
             context = self._extract_solution_nmr_monomer_context(entry)
             if context is None:
                 continue
-            entry_id, year, _, polymer_entity, _ = context
-            memberships = (
-                polymer_entity.get("rcsb_polymer_entity_group_membership") or []
+            entry_id, year, _, polymer_entity, chain_id = context
+            entity_poly = polymer_entity.get("entity_poly") or {}
+            try:
+                sequence_length = int(entity_poly.get("rcsb_sample_sequence_length"))
+            except (TypeError, ValueError):
+                continue
+            sequence = _normalize_polymer_sequence(
+                raw_sequence=entity_poly.get("pdbx_seq_one_letter_code_can"),
+                expected_length=sequence_length,
             )
-            groups = self._extract_sequence_identity_groups(
-                memberships,
-                allowed_cutoffs={95, 100},
+            if sequence is None:
+                continue
+            instances = polymer_entity.get("polymer_entity_instances") or []
+            if len(instances) != 1:
+                continue
+            instance = instances[0] or {}
+            modeled_label_seq_ids, modeled_auth_seq_ids = (
+                self._extract_modeled_residue_sets_for_instance(
+                    sequence_length=sequence_length,
+                    instance=instance,
+                )
             )
-            group_95 = groups.get(95)
-            group_100 = groups.get(100)
-
-            records.append((str(entry_id), year, group_95, group_100))
+            if not modeled_label_seq_ids or not modeled_auth_seq_ids:
+                continue
+            identifiers = (
+                instance.get("rcsb_polymer_entity_instance_container_identifiers")
+                or {}
+            )
+            auth_mapping = _auth_mapping_tuple(
+                identifiers.get("auth_to_entity_poly_seq_mapping") or []
+            )
+            records.append(
+                SolutionNMRMonomerXrayHomologSeedRecord(
+                    entry_id=str(entry_id),
+                    year=year,
+                    chain_id=chain_id,
+                    sequence=sequence,
+                    modeled_label_seq_ids=frozenset(modeled_label_seq_ids),
+                    modeled_auth_seq_ids=frozenset(modeled_auth_seq_ids),
+                    auth_mapping=auth_mapping,
+                )
+            )
         return records
 
     def fetch_solution_nmr_monomer_xray_seed_records_for_ids(
@@ -4074,38 +4287,143 @@ class SolutionNMRMonomerQualityCollector:
 
 
 class SolutionNMRMonomerXrayHomologCollector:
-    def __init__(self, client: RCSBClient, config: CollectorConfig) -> None:
+    def __init__(
+        self,
+        client: RCSBClient,
+        config: CollectorConfig,
+        stride_executable: str,
+        cache_dir: Path,
+    ) -> None:
         self.client = client
         self.config = config
-        self.group_query_batch_size = 200
+        self.stride_executable = stride_executable
+        self.cache_dir = cache_dir
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
 
-    def _resolve_xray_groups(
-        self, group_ids: set[str], similarity_cutoff: int
-    ) -> set[str]:
-        if not group_ids:
-            return set()
-        found_groups: set[str] = set()
-        group_batches = list(chunked(sorted(group_ids), self.group_query_batch_size))
-        for batch_idx, group_batch in enumerate(group_batches, start=1):
-            entity_ids = self.client.fetch_xray_polymer_entity_ids_for_group_ids(
-                group_batch
+    @staticmethod
+    def _entry_ids_from_polymer_entity_ids(
+        entity_ids: Sequence[str],
+    ) -> tuple[str, ...]:
+        seen: set[str] = set()
+        entry_ids: list[str] = []
+        for entity_id in entity_ids:
+            entry_id = str(entity_id).split("_", 1)[0].strip()
+            if not entry_id or entry_id in seen:
+                continue
+            seen.add(entry_id)
+            entry_ids.append(entry_id)
+        return tuple(entry_ids)
+
+    @staticmethod
+    def _label_seq_ids_for_auth_range(
+        seed: SolutionNMRMonomerXrayHomologSeedRecord,
+        core_start_seq_id: int,
+        core_end_seq_id: int,
+    ) -> list[int]:
+        selected: list[int] = []
+        start = min(core_start_seq_id, core_end_seq_id)
+        end = max(core_start_seq_id, core_end_seq_id)
+        for label_seq_id in sorted(seed.modeled_label_seq_ids):
+            if seed.auth_mapping:
+                if label_seq_id <= 0 or label_seq_id > len(seed.auth_mapping):
+                    continue
+                auth_seq_id = seed.auth_mapping[label_seq_id - 1]
+                if auth_seq_id is None:
+                    continue
+            else:
+                auth_seq_id = label_seq_id
+            if start <= auth_seq_id <= end:
+                selected.append(label_seq_id)
+        return selected
+
+    def _build_stride_core_query_sequence(
+        self,
+        seed: SolutionNMRMonomerXrayHomologSeedRecord,
+    ) -> tuple[str, int, int] | None:
+        pdb_path = download_pdb_if_needed(
+            session=self.client.session,
+            config=self.config,
+            cache_dir=self.cache_dir,
+            entry_id=seed.entry_id,
+        )
+        core_range = compute_stride_core_range_for_modeled_auth_seq_ids_in_first_model(
+            pdb_path=pdb_path,
+            chain_id=seed.chain_id,
+            modeled_auth_seq_ids=set(seed.modeled_auth_seq_ids),
+            stride_executable=self.stride_executable,
+        )
+        if core_range is None:
+            return None
+        core_start, core_end = core_range
+        label_seq_ids = self._label_seq_ids_for_auth_range(
+            seed=seed,
+            core_start_seq_id=core_start,
+            core_end_seq_id=core_end,
+        )
+        if not label_seq_ids:
+            return None
+        query_sequence = "".join(seed.sequence[seq_id - 1] for seq_id in label_seq_ids)
+        if not query_sequence:
+            return None
+        return query_sequence, core_start, core_end
+
+    def _build_record(
+        self,
+        seed: SolutionNMRMonomerXrayHomologSeedRecord,
+        sequence_identity_percent: int,
+        core_query: tuple[str, int, int] | None | object = _MISSING,
+    ) -> SolutionNMRMonomerXrayHomologRecord:
+        if core_query is _MISSING:
+            core_query = self._build_stride_core_query_sequence(seed)
+        if core_query is None:
+            return SolutionNMRMonomerXrayHomologRecord(
+                entry_id=seed.entry_id,
+                year=seed.year,
+                sequence_identity_percent=sequence_identity_percent,
+                nmr_core_start_seq_id=None,
+                nmr_core_end_seq_id=None,
+                nmr_query_sequence_length=0,
+                xray_homolog_entry_ids=tuple(),
+                xray_homolog_entity_ids=tuple(),
+                has_xray_homolog=False,
             )
-            if entity_ids:
-                for entity_batch in chunked(entity_ids, self.config.graphql_batch_size):
-                    matched = self.client.fetch_sequence_identity_group_ids_for_polymer_entity_ids(
-                        entity_batch, similarity_cutoff=similarity_cutoff
-                    )
-                    found_groups.update(gid for gid in matched if gid in group_ids)
-            LOGGER.info(
-                "SOLUTION NMR X-ray homologs %d%%: processed group batch %d/%d",
-                similarity_cutoff,
-                batch_idx,
-                len(group_batches),
+        query_sequence, core_start, core_end = core_query
+        xray_entity_ids = tuple(
+            self.client.fetch_xray_polymer_entity_ids_by_sequence(
+                sequence=query_sequence,
+                sequence_identity_percent=sequence_identity_percent,
             )
-        return found_groups
+        )
+        xray_entry_ids = self._entry_ids_from_polymer_entity_ids(xray_entity_ids)
+        return SolutionNMRMonomerXrayHomologRecord(
+            entry_id=seed.entry_id,
+            year=seed.year,
+            sequence_identity_percent=sequence_identity_percent,
+            nmr_core_start_seq_id=core_start,
+            nmr_core_end_seq_id=core_end,
+            nmr_query_sequence_length=len(query_sequence),
+            xray_homolog_entry_ids=xray_entry_ids,
+            xray_homolog_entity_ids=xray_entity_ids,
+            has_xray_homolog=bool(xray_entity_ids),
+        )
+
+    def _build_record_pair(
+        self,
+        seed: SolutionNMRMonomerXrayHomologSeedRecord,
+    ) -> tuple[SolutionNMRMonomerXrayHomologRecord, SolutionNMRMonomerXrayHomologRecord]:
+        core_query = self._build_stride_core_query_sequence(seed)
+        return (
+            self._build_record(seed, sequence_identity_percent=95, core_query=core_query),
+            self._build_record(seed, sequence_identity_percent=100, core_query=core_query),
+        )
 
     def collect(
         self,
+        on_record_pair: Callable[
+            [SolutionNMRMonomerXrayHomologRecord, SolutionNMRMonomerXrayHomologRecord],
+            None,
+        ]
+        | None = None,
     ) -> tuple[
         list[SolutionNMRMonomerXrayHomologRecord],
         list[SolutionNMRMonomerXrayHomologRecord],
@@ -4115,52 +4433,94 @@ class SolutionNMRMonomerXrayHomologCollector:
             log_label="SOLUTION NMR monomer X-ray homologs",
         )
         batches = list(chunked(entry_ids, self.config.graphql_batch_size))
-        base_rows: list[tuple[str, int, str | None, str | None]] = []
+        seeds: list[SolutionNMRMonomerXrayHomologSeedRecord] = []
 
-        for batch_rows in collect_batch_results(
+        for batch_seeds in collect_batch_results(
             batches=batches,
             max_workers=self.config.max_workers,
-            fetch_fn=self.client.fetch_solution_nmr_monomer_xray_group_records_for_ids,
-            progress_label="SOLUTION NMR monomer X-ray homolog base",
+            fetch_fn=(
+                self.client.fetch_solution_nmr_monomer_xray_homolog_seed_records_for_ids
+            ),
+            progress_label="SOLUTION NMR monomer X-ray homolog seeds",
         ):
-            base_rows.extend(batch_rows)
-
-        group_ids_95 = {row[2] for row in base_rows if row[2]}
-        group_ids_100 = {row[3] for row in base_rows if row[3]}
-        LOGGER.info(
-            "SOLUTION NMR monomer X-ray homologs: unique groups found (%d%%=%d, %d%%=%d)",
-            95,
-            len(group_ids_95),
-            100,
-            len(group_ids_100),
-        )
-
-        xray_groups_95 = self._resolve_xray_groups(group_ids_95, similarity_cutoff=95)
-        xray_groups_100 = self._resolve_xray_groups(
-            group_ids_100, similarity_cutoff=100
-        )
+            seeds.extend(batch_seeds)
+        LOGGER.info("SOLUTION NMR monomer X-ray homolog seeds: %d", len(seeds))
 
         records_95: list[SolutionNMRMonomerXrayHomologRecord] = []
         records_100: list[SolutionNMRMonomerXrayHomologRecord] = []
-        for entry_id, year, group_95, group_100 in base_rows:
-            records_95.append(
-                SolutionNMRMonomerXrayHomologRecord(
-                    entry_id=entry_id,
-                    year=year,
-                    sequence_identity_percent=95,
-                    group_id=group_95,
-                    has_xray_homolog=bool(group_95 and group_95 in xray_groups_95),
+        with ThreadPoolExecutor(max_workers=self.config.max_workers) as executor:
+            future_map = {
+                executor.submit(self._build_record_pair, seed): seed for seed in seeds
+            }
+            pending = set(future_map)
+            total = len(pending)
+            completed_count = 0
+            error_count = 0
+            last_progress_log = time.monotonic()
+
+            while pending:
+                done, pending = wait(
+                    pending,
+                    timeout=30.0,
+                    return_when=FIRST_COMPLETED,
                 )
-            )
-            records_100.append(
-                SolutionNMRMonomerXrayHomologRecord(
-                    entry_id=entry_id,
-                    year=year,
-                    sequence_identity_percent=100,
-                    group_id=group_100,
-                    has_xray_homolog=bool(group_100 and group_100 in xray_groups_100),
-                )
-            )
+                if not done:
+                    LOGGER.info(
+                        "SOLUTION NMR monomer X-ray homolog sequence searches: "
+                        "processed %d/%d entries (95%% hits=%d, 100%% hits=%d, errors=%d)",
+                        completed_count,
+                        total,
+                        sum(1 for record in records_95 if record.has_xray_homolog),
+                        sum(1 for record in records_100 if record.has_xray_homolog),
+                        error_count,
+                    )
+                    continue
+
+                for future in done:
+                    completed_count += 1
+                    seed = future_map[future]
+                    try:
+                        record_95, record_100 = future.result()
+                    except Exception as exc:
+                        error_count += 1
+                        LOGGER.warning(
+                            "SOLUTION NMR monomer X-ray homolog sequence search failed for %s: %s",
+                            seed.entry_id,
+                            exc,
+                        )
+                        continue
+
+                    records_95.append(record_95)
+                    records_100.append(record_100)
+                    if on_record_pair is not None:
+                        on_record_pair(record_95, record_100)
+
+                    now = time.monotonic()
+                    if (
+                        completed_count % 25 == 0
+                        or completed_count == total
+                        or now - last_progress_log >= 30.0
+                    ):
+                        LOGGER.info(
+                            "SOLUTION NMR monomer X-ray homolog sequence searches: "
+                            "processed %d/%d entries (95%% hits=%d, 100%% hits=%d, errors=%d)",
+                            completed_count,
+                            total,
+                            sum(1 for record in records_95 if record.has_xray_homolog),
+                            sum(1 for record in records_100 if record.has_xray_homolog),
+                            error_count,
+                        )
+                        last_progress_log = now
+
+        LOGGER.info(
+            "SOLUTION NMR monomer X-ray homologs: found X-ray hits (%d%%=%d/%d, %d%%=%d/%d)",
+            95,
+            sum(1 for record in records_95 if record.has_xray_homolog),
+            len(records_95),
+            100,
+            sum(1 for record in records_100 if record.has_xray_homolog),
+            len(records_100),
+        )
 
         key_fn = lambda r: (r.year, r.entry_id)
         return sorted(records_95, key=key_fn), sorted(records_100, key=key_fn)
@@ -5657,28 +6017,50 @@ def write_solution_nmr_monomer_quality_csv(
     )
 
 
+SOLUTION_NMR_MONOMER_XRAY_HOMOLOG_HEADER = [
+    "entry_id",
+    "year",
+    "sequence_identity_percent",
+    "nmr_core_start_seq_id",
+    "nmr_core_end_seq_id",
+    "nmr_query_sequence_length",
+    "has_xray_homolog",
+    "xray_homolog_count",
+    "xray_homolog_entry_ids",
+    "xray_homolog_entity_ids",
+]
+
+
+def _solution_nmr_monomer_xray_homolog_csv_row(
+    record: SolutionNMRMonomerXrayHomologRecord,
+) -> tuple[Any, ...]:
+    return (
+        record.entry_id,
+        record.year,
+        record.sequence_identity_percent,
+        (
+            record.nmr_core_start_seq_id
+            if record.nmr_core_start_seq_id is not None
+            else ""
+        ),
+        record.nmr_core_end_seq_id
+        if record.nmr_core_end_seq_id is not None
+        else "",
+        record.nmr_query_sequence_length,
+        int(record.has_xray_homolog),
+        len(record.xray_homolog_entity_ids),
+        ";".join(record.xray_homolog_entry_ids),
+        ";".join(record.xray_homolog_entity_ids),
+    )
+
+
 def write_solution_nmr_monomer_xray_homolog_csv(
     records: list[SolutionNMRMonomerXrayHomologRecord], output_path: Path
 ) -> None:
     write_csv_rows(
         output_path=output_path,
-        header=[
-            "entry_id",
-            "year",
-            "sequence_identity_percent",
-            "group_id",
-            "has_xray_homolog",
-        ],
-        rows=(
-            (
-                r.entry_id,
-                r.year,
-                r.sequence_identity_percent,
-                r.group_id or "",
-                int(r.has_xray_homolog),
-            )
-            for r in records
-        ),
+        header=SOLUTION_NMR_MONOMER_XRAY_HOMOLOG_HEADER,
+        rows=(_solution_nmr_monomer_xray_homolog_csv_row(r) for r in records),
     )
 
 
@@ -6580,27 +6962,65 @@ def main() -> None:
         )
 
     if DatasetKind.SOLUTION_NMR_MONOMER_XRAY_HOMOLOGS in args.datasets:
+        homolog_stride_executable = resolve_stride_executable(
+            args.solution_nmr_monomer_stride_executable
+        )
+        if homolog_stride_executable is None:
+            raise SystemExit(
+                "STRIDE executable not found for solution_nmr_monomer_xray_homologs. "
+                "Provide --solution-nmr-monomer-stride-executable or install stride."
+            )
+        LOGGER.info(
+            "SOLUTION NMR monomer X-ray homologs: using STRIDE executable %s",
+            homolog_stride_executable,
+        )
         homolog_collector = SolutionNMRMonomerXrayHomologCollector(
-            client=client, config=config
+            client=client,
+            config=config,
+            stride_executable=homolog_stride_executable,
+            cache_dir=Path(args.solution_nmr_monomer_stride_cache_dir),
         )
-        records_95, records_100 = homolog_collector.collect()
-        write_solution_nmr_monomer_xray_homolog_csv(
-            records=records_95,
-            output_path=args.solution_nmr_monomer_xray_homolog_95_output,
-        )
-        write_solution_nmr_monomer_xray_homolog_csv(
-            records=records_100,
-            output_path=args.solution_nmr_monomer_xray_homolog_100_output,
-        )
+        homolog_95_output_path = Path(args.solution_nmr_monomer_xray_homolog_95_output)
+        homolog_100_output_path = Path(args.solution_nmr_monomer_xray_homolog_100_output)
+        homolog_95_output_path.parent.mkdir(parents=True, exist_ok=True)
+        homolog_100_output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        with (
+            homolog_95_output_path.open("w", newline="", encoding="utf-8") as file_95,
+            homolog_100_output_path.open("w", newline="", encoding="utf-8") as file_100,
+        ):
+            writer_95 = csv.writer(file_95)
+            writer_100 = csv.writer(file_100)
+            writer_95.writerow(SOLUTION_NMR_MONOMER_XRAY_HOMOLOG_HEADER)
+            writer_100.writerow(SOLUTION_NMR_MONOMER_XRAY_HOMOLOG_HEADER)
+            file_95.flush()
+            file_100.flush()
+
+            def _on_homolog_record_pair(
+                record_95: SolutionNMRMonomerXrayHomologRecord,
+                record_100: SolutionNMRMonomerXrayHomologRecord,
+            ) -> None:
+                writer_95.writerow(
+                    _solution_nmr_monomer_xray_homolog_csv_row(record_95)
+                )
+                writer_100.writerow(
+                    _solution_nmr_monomer_xray_homolog_csv_row(record_100)
+                )
+                file_95.flush()
+                file_100.flush()
+
+            records_95, records_100 = homolog_collector.collect(
+                on_record_pair=_on_homolog_record_pair
+            )
         LOGGER.info(
             "Saved %d records to %s",
             len(records_95),
-            args.solution_nmr_monomer_xray_homolog_95_output,
+            homolog_95_output_path,
         )
         LOGGER.info(
             "Saved %d records to %s",
             len(records_100),
-            args.solution_nmr_monomer_xray_homolog_100_output,
+            homolog_100_output_path,
         )
 
     if DatasetKind.SOLUTION_NMR_MONOMER_XRAY_RMSD in args.datasets:
