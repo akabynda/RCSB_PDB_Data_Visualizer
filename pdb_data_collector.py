@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import logging
 import os
 import re
@@ -9,11 +10,14 @@ import shutil
 import subprocess
 import tempfile
 import time
+import warnings
 import requests
 import numpy as np
-from Bio.PDB import MMCIFParser, PDBIO, PDBParser
+from Bio.Align import PairwiseAligner
+from Bio.PDB import MMCIFParser, PDBIO, PDBParser, Select
 from Bio.PDB.DSSP import DSSP as BioDSSP
-from Bio.SeqUtils import molecular_weight as sequence_molecular_weight
+from Bio.PDB.PDBExceptions import PDBConstructionWarning
+from Bio.SeqUtils import molecular_weight as sequence_molecular_weight, seq1
 from collections import Counter
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 from dataclasses import dataclass
@@ -26,6 +30,15 @@ from MDAnalysis.analysis.rms import rmsd as mda_rmsd
 LOGGER = logging.getLogger(__name__)
 T = TypeVar("T")
 _MISSING = object()
+PDB_CHAIN_ID_POOL = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+
+
+class ChainSubsetSelect(Select):
+    def __init__(self, chain_object_ids: set[int]) -> None:
+        self.chain_object_ids = chain_object_ids
+
+    def accept_chain(self, chain: Any) -> bool:
+        return id(chain) in self.chain_object_ids
 
 SOLUTION_NMR_METHOD = "SOLUTION NMR"
 PROTEIN_MONOMER_ENTITY_TYPES: frozenset[str] = frozenset(
@@ -370,6 +383,9 @@ class SolutionNMRMonomerXrayRmsdRecord:
     nmr_chain_id: str
     nmr_core_start_seq_id: int | None
     nmr_core_end_seq_id: int | None
+    nmr_query_sequence_length: int
+    xray_homolog_entity_id: str
+    xray_homolog_count: int
     xray_entry_id: str
     xray_chain_id: str
     xray_core_start_seq_id: int | None
@@ -377,6 +393,14 @@ class SolutionNMRMonomerXrayRmsdRecord:
     xray_resolution_angstrom: float
     n_common_ca: int
     rmsd_ca_angstrom: float
+
+
+@dataclass(frozen=True)
+class XrayPolymerEntityCandidateRecord:
+    polymer_entity_id: str
+    entry_id: str
+    chain_ids: tuple[str, ...]
+    resolution_angstrom: float
 
 
 def chunked(items: list[str], size: int) -> Iterator[list[str]]:
@@ -509,12 +533,19 @@ def download_pdb_if_needed(
                 response = session.get(cif_url, timeout=config.timeout_seconds)
                 response.raise_for_status()
                 cif_path.write_text(response.text, encoding="utf-8")
-                parser = MMCIFParser(QUIET=True)
-                structure = parser.get_structure(entry_id, str(cif_path))
+                structure = parse_mmcif_structure(entry_id, cif_path)
+                chain_id_map = _coerce_structure_chain_ids_for_pdbio(structure)
                 io = PDBIO()
                 io.set_structure(structure)
                 io.save(str(path))
                 if path.exists() and path.stat().st_size > 0:
+                    if chain_id_map:
+                        map_path = cache_dir / f"{entry_id}.chain_map.csv"
+                        write_csv_rows(
+                            output_path=map_path,
+                            header=["original_chain_id", "mapped_chain_id"],
+                            rows=sorted(chain_id_map.items()),
+                        )
                     LOGGER.info(
                         "Converted mmCIF fallback to cached PDB for %s",
                         entry_id,
@@ -526,6 +557,203 @@ def download_pdb_if_needed(
                 if attempt < config.retries:
                     time.sleep(wait_seconds)
     raise RuntimeError(f"Failed to download {entry_id}: {last_error}")
+
+
+def parse_mmcif_structure(entry_id: str, cif_path: Path) -> Any:
+    parser = MMCIFParser(QUIET=True)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", PDBConstructionWarning)
+        return parser.get_structure(entry_id, str(cif_path))
+
+
+def parse_pdb_structure(entry_id: str, pdb_path: str | Path) -> Any:
+    parser = PDBParser(QUIET=True)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", PDBConstructionWarning)
+        return parser.get_structure(entry_id, str(pdb_path))
+
+
+def _coerce_structure_chain_ids_for_pdbio(structure: Any) -> dict[str, str]:
+    original_chain_ids: list[str] = []
+    seen_original_ids: set[str] = set()
+    for model in structure:
+        for chain in model:
+            chain_id = str(chain.id)
+            if chain_id in seen_original_ids:
+                continue
+            seen_original_ids.add(chain_id)
+            original_chain_ids.append(chain_id)
+
+    chain_id_map: dict[str, str] = {}
+    used_ids: set[str] = set()
+    for original_id in original_chain_ids:
+        if len(original_id) == 1 and original_id not in used_ids:
+            mapped_id = original_id
+        elif original_id and original_id[0] not in used_ids:
+            mapped_id = original_id[0]
+        else:
+            mapped_id = next(
+                (
+                    candidate
+                    for candidate in PDB_CHAIN_ID_POOL
+                    if candidate not in used_ids
+                ),
+                None,
+            )
+            if mapped_id is None:
+                raise RuntimeError("Too many chains to convert mmCIF to PDB")
+        chain_id_map[original_id] = mapped_id
+        used_ids.add(mapped_id)
+
+    for model in structure:
+        for chain in model:
+            chain.id = chain_id_map[str(chain.id)]
+    return {
+        original_id: mapped_id
+        for original_id, mapped_id in chain_id_map.items()
+        if original_id != mapped_id
+    }
+
+
+def _coerce_selected_structure_chain_ids_for_pdbio(
+    structure: Any,
+    selected_chain_ids: set[str],
+) -> tuple[dict[str, str], set[int]]:
+    selected_chain_object_ids: set[int] = set()
+    existing_chain_ids: set[str] = set()
+    for model in structure:
+        for chain in model:
+            chain_id = str(chain.id)
+            if chain_id in selected_chain_ids:
+                existing_chain_ids.add(chain_id)
+                selected_chain_object_ids.add(id(chain))
+    chain_id_map: dict[str, str] = {}
+    used_ids: set[str] = set()
+    for original_id in sorted(existing_chain_ids):
+        if len(original_id) == 1 and original_id not in used_ids:
+            mapped_id = original_id
+        elif original_id and original_id[0] not in used_ids:
+            mapped_id = original_id[0]
+        else:
+            mapped_id = next(
+                (
+                    candidate
+                    for candidate in PDB_CHAIN_ID_POOL
+                    if candidate not in used_ids
+                ),
+                None,
+            )
+            if mapped_id is None:
+                raise RuntimeError("Too many selected chains to convert mmCIF to PDB")
+        chain_id_map[original_id] = mapped_id
+        used_ids.add(mapped_id)
+
+    for model in structure:
+        for chain in model:
+            original_id = str(chain.id)
+            if original_id in chain_id_map:
+                chain.id = chain_id_map[original_id]
+    return chain_id_map, selected_chain_object_ids
+
+
+def load_cached_chain_id_map(cache_dir: Path, entry_id: str) -> dict[str, str]:
+    map_path = cache_dir / f"{entry_id}.chain_map.csv"
+    if not map_path.exists():
+        return {}
+    chain_id_map: dict[str, str] = {}
+    with map_path.open("r", newline="", encoding="utf-8") as csvfile:
+        reader = csv.DictReader(csvfile)
+        for row in reader:
+            original = str(row.get("original_chain_id") or "")
+            mapped = str(row.get("mapped_chain_id") or "")
+            if original and mapped:
+                chain_id_map[original] = mapped
+    return chain_id_map
+
+
+def _chain_subset_cache_stem(entry_id: str, chain_ids: Sequence[str]) -> str:
+    normalized = ",".join(sorted(str(chain_id) for chain_id in chain_ids))
+    digest = hashlib.sha1(normalized.encode("utf-8")).hexdigest()[:12]
+    return f"{entry_id}.chains_{digest}"
+
+
+def download_pdb_chain_subset_if_needed(
+    session: requests.Session,
+    config: CollectorConfig,
+    cache_dir: Path,
+    entry_id: str,
+    chain_ids: Sequence[str],
+) -> tuple[Path, dict[str, str]]:
+    selected_chain_ids = {str(chain_id) for chain_id in chain_ids if str(chain_id)}
+    if not selected_chain_ids:
+        raise RuntimeError(f"No chain IDs selected for {entry_id}")
+
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    stem = _chain_subset_cache_stem(entry_id, sorted(selected_chain_ids))
+    path = cache_dir / f"{stem}.pdb"
+    map_path = cache_dir / f"{stem}.chain_map.csv"
+    if path.exists() and path.stat().st_size > 0:
+        return path, load_chain_id_map(map_path)
+
+    full_pdb_path = cache_dir / f"{entry_id}.pdb"
+    if (
+        full_pdb_path.exists()
+        and full_pdb_path.stat().st_size > 0
+        and all(len(chain_id) == 1 for chain_id in selected_chain_ids)
+    ):
+        return full_pdb_path, {}
+
+    cif_path = cache_dir / f"{entry_id}.cif"
+    if not cif_path.exists() or cif_path.stat().st_size <= 0:
+        cif_url = f"https://files.rcsb.org/download/{entry_id}.cif"
+        last_error: Exception | None = None
+        for attempt in range(1, config.retries + 1):
+            try:
+                response = session.get(cif_url, timeout=config.timeout_seconds)
+                response.raise_for_status()
+                cif_path.write_text(response.text, encoding="utf-8")
+                break
+            except (requests.RequestException, OSError) as exc:
+                last_error = exc
+                if attempt < config.retries:
+                    time.sleep(config.backoff_seconds * attempt)
+        if not cif_path.exists() or cif_path.stat().st_size <= 0:
+            raise RuntimeError(f"Failed to download {entry_id} mmCIF: {last_error}")
+
+    structure = parse_mmcif_structure(entry_id, cif_path)
+    chain_id_map, selected_chain_object_ids = _coerce_selected_structure_chain_ids_for_pdbio(
+        structure=structure,
+        selected_chain_ids=selected_chain_ids,
+    )
+    missing_chain_ids = selected_chain_ids - set(chain_id_map)
+    if missing_chain_ids:
+        raise RuntimeError(
+            f"{entry_id} mmCIF is missing selected chains: "
+            + ",".join(sorted(missing_chain_ids))
+        )
+    io = PDBIO()
+    io.set_structure(structure)
+    io.save(str(path), select=ChainSubsetSelect(selected_chain_object_ids))
+    write_csv_rows(
+        output_path=map_path,
+        header=["original_chain_id", "mapped_chain_id"],
+        rows=sorted(chain_id_map.items()),
+    )
+    return path, chain_id_map
+
+
+def load_chain_id_map(map_path: Path) -> dict[str, str]:
+    if not map_path.exists():
+        return {}
+    chain_id_map: dict[str, str] = {}
+    with map_path.open("r", newline="", encoding="utf-8") as csvfile:
+        reader = csv.DictReader(csvfile)
+        for row in reader:
+            original = str(row.get("original_chain_id") or "")
+            mapped = str(row.get("mapped_chain_id") or "")
+            if original and mapped:
+                chain_id_map[original] = mapped
+    return chain_id_map
 
 
 def write_csv_rows(
@@ -721,11 +949,12 @@ def compute_dssp_state_coverages_for_chain(
     except Exception:
         return default_coverages, 0, 0, []
 
+    chain_map = load_cached_chain_id_map(cache_dir, entry_id)
+    parsed_chain_id = chain_map.get(chain_id, chain_id)
     model_texts = extract_model_pdb_texts(pdb_path)
     if not model_texts:
         return default_coverages, 0, 0, []
 
-    parser = PDBParser(QUIET=True)
     state_counts: Counter[str] = Counter()
     analyzed_model_count = 0
     per_model_coverages: list[tuple[int, int, dict[str, float]]] = []
@@ -740,7 +969,7 @@ def compute_dssp_state_coverages_for_chain(
                 handle.write(model_text)
                 handle.flush()
 
-                structure = parser.get_structure(entry_id, handle.name)
+                structure = parse_pdb_structure(entry_id, handle.name)
                 model = next(structure.get_models(), None)
                 if model is None:
                     continue
@@ -759,7 +988,7 @@ def compute_dssp_state_coverages_for_chain(
                     state = state_raw if state_raw in DSSP_STATE_CODES else "-"
                     state_by_chain.setdefault(chain_label, []).append(state)
 
-                states = state_by_chain.get(chain_id, [])
+                states = state_by_chain.get(parsed_chain_id, [])
                 if not states and len(state_by_chain) == 1:
                     states = next(iter(state_by_chain.values()))
                 if not states:
@@ -821,6 +1050,8 @@ def compute_stride_state_coverages_for_chain(
     except Exception:
         return default_coverages, 0, 0
 
+    chain_map = load_cached_chain_id_map(cache_dir, entry_id)
+    parsed_chain_id = chain_map.get(chain_id, chain_id)
     model_texts = extract_model_pdb_texts(pdb_path)
     if not model_texts:
         return default_coverages, 0, 0
@@ -859,7 +1090,7 @@ def compute_stride_state_coverages_for_chain(
                     state = state_raw if state_raw in STRIDE_STATE_CODES else "C"
                     state_by_chain.setdefault(chain_label, []).append(state)
 
-                states = state_by_chain.get(chain_id, [])
+                states = state_by_chain.get(parsed_chain_id, [])
                 if not states and len(state_by_chain) == 1:
                     states = next(iter(state_by_chain.values()))
                 if not states:
@@ -977,11 +1208,12 @@ def compute_dssp_state_coverages_for_chain_modeled_first_model(
     except Exception:
         return default_coverages, 0, 0
 
+    chain_map = load_cached_chain_id_map(cache_dir, entry_id)
+    parsed_chain_id = chain_map.get(chain_id, chain_id)
     model_texts = extract_model_pdb_texts(pdb_path)
     if not model_texts:
         return default_coverages, 0, 0
 
-    parser = PDBParser(QUIET=True)
     try:
         with tempfile.NamedTemporaryFile(
             "w", suffix=".pdb", encoding="utf-8", delete=True
@@ -989,7 +1221,7 @@ def compute_dssp_state_coverages_for_chain_modeled_first_model(
             handle.write(model_texts[0])
             handle.flush()
 
-            structure = parser.get_structure(entry_id, handle.name)
+            structure = parse_pdb_structure(entry_id, handle.name)
             model = next(structure.get_models(), None)
             if model is None:
                 return default_coverages, len(model_texts), 0
@@ -1014,7 +1246,7 @@ def compute_dssp_state_coverages_for_chain_modeled_first_model(
                 chain_states = state_by_chain.setdefault(chain_label, {})
                 chain_states.setdefault(auth_seq_id, state)
 
-            chain_states = state_by_chain.get(chain_id)
+            chain_states = state_by_chain.get(parsed_chain_id)
             if not chain_states and len(state_by_chain) == 1:
                 chain_states = next(iter(state_by_chain.values()))
             if not chain_states:
@@ -1065,6 +1297,8 @@ def compute_stride_state_coverages_for_chain_modeled_first_model(
     except Exception:
         return default_coverages, 0, 0
 
+    chain_map = load_cached_chain_id_map(cache_dir, entry_id)
+    parsed_chain_id = chain_map.get(chain_id, chain_id)
     model_texts = extract_model_pdb_texts(pdb_path)
     if not model_texts:
         return default_coverages, 0, 0
@@ -1077,7 +1311,7 @@ def compute_stride_state_coverages_for_chain_modeled_first_model(
         if state_by_chain is None:
             return default_coverages, len(model_texts), 0
 
-        chain_states = _select_stride_chain_states(state_by_chain, chain_id)
+        chain_states = _select_stride_chain_states(state_by_chain, parsed_chain_id)
         if not chain_states:
             return default_coverages, len(model_texts), 0
 
@@ -1145,6 +1379,127 @@ def parse_models_ca_coords(
         end_seq_id=end_seq_id,
     )
     return model_maps
+
+
+def parse_first_model_ca_residue_sequence(
+    pdb_path: Path,
+    chain_id: str,
+    start_seq_id: int | None = None,
+    end_seq_id: int | None = None,
+) -> list[tuple[int, str]]:
+    residue_order: list[int] = []
+    candidates: dict[int, tuple[str, float, str, str]] = {}
+    has_model_records = False
+    in_model = False
+
+    with pdb_path.open("r", encoding="utf-8", errors="ignore") as handle:
+        for line in handle:
+            record = line[:6]
+            if record.startswith("MODEL"):
+                if has_model_records:
+                    break
+                has_model_records = True
+                in_model = True
+                continue
+            if record.startswith("ENDMDL"):
+                if in_model:
+                    break
+                continue
+            if has_model_records and not in_model:
+                continue
+            if not record.startswith("ATOM"):
+                continue
+            atom_name = line[12:16].strip()
+            if atom_name != "CA":
+                continue
+            atom_chain = line[21].strip()
+            if atom_chain != chain_id:
+                continue
+            resid_text = line[22:26].strip()
+            try:
+                resid = int(resid_text)
+            except ValueError:
+                continue
+            if start_seq_id is not None and resid < start_seq_id:
+                continue
+            if end_seq_id is not None and resid > end_seq_id:
+                continue
+
+            insertion_code = line[26].strip()
+            alt_loc = line[16].strip()
+            occupancy = _parse_pdb_occupancy(line)
+            resname = line[17:20].strip()
+            aa = seq1(resname, custom_map={"MSE": "M"}, undef_code="X")
+
+            if resid not in candidates:
+                residue_order.append(resid)
+                candidates[resid] = (insertion_code, occupancy, alt_loc, aa)
+                continue
+
+            existing_insertion_code, existing_occupancy, existing_alt_loc, _ = (
+                candidates[resid]
+            )
+            if _is_better_ca_candidate(
+                new_insertion_code=insertion_code,
+                new_occupancy=occupancy,
+                new_alt_loc=alt_loc,
+                current_insertion_code=existing_insertion_code,
+                current_occupancy=existing_occupancy,
+                current_alt_loc=existing_alt_loc,
+            ):
+                candidates[resid] = (insertion_code, occupancy, alt_loc, aa)
+
+    return [(resid, candidates[resid][3]) for resid in residue_order if resid in candidates]
+
+
+def align_modeled_ca_sequences(
+    nmr_residues: list[tuple[int, str]],
+    xray_residues: list[tuple[int, str]],
+    sequence_identity_percent: int,
+    min_query_coverage: float = 0.8,
+) -> list[tuple[int, int]] | None:
+    if not nmr_residues or not xray_residues:
+        return None
+    nmr_sequence = "".join(aa for _, aa in nmr_residues)
+    xray_sequence = "".join(aa for _, aa in xray_residues)
+    if not nmr_sequence or not xray_sequence:
+        return None
+
+    aligner = PairwiseAligner()
+    aligner.mode = "local"
+    aligner.match_score = 2.0
+    aligner.mismatch_score = -1.0
+    aligner.open_gap_score = -10.0
+    aligner.extend_gap_score = -1.0
+
+    alignments = aligner.align(nmr_sequence, xray_sequence)
+    if not alignments:
+        return None
+    alignment = alignments[0]
+
+    pairs: list[tuple[int, int]] = []
+    matches = 0
+    for nmr_block, xray_block in zip(alignment.aligned[0], alignment.aligned[1]):
+        nmr_start, nmr_end = int(nmr_block[0]), int(nmr_block[1])
+        xray_start, xray_end = int(xray_block[0]), int(xray_block[1])
+        if nmr_end - nmr_start != xray_end - xray_start:
+            continue
+        for nmr_idx, xray_idx in zip(
+            range(nmr_start, nmr_end),
+            range(xray_start, xray_end),
+        ):
+            pairs.append((nmr_residues[nmr_idx][0], xray_residues[xray_idx][0]))
+            if nmr_sequence[nmr_idx] == xray_sequence[xray_idx]:
+                matches += 1
+
+    aligned_len = len(pairs)
+    if aligned_len < 3:
+        return None
+    if aligned_len / len(nmr_sequence) < min_query_coverage:
+        return None
+    if matches * 100 < sequence_identity_percent * aligned_len:
+        return None
+    return pairs
 
 
 def _alt_loc_tiebreak_key(alt_loc: str) -> tuple[int, str]:
@@ -2033,6 +2388,68 @@ class RCSBClient:
                     entry_id=str(entry_id),
                     chain_ids=chain_id_tuple,
                     group_id=matched_group_id,
+                )
+            )
+        return records
+
+    def fetch_xray_polymer_entity_candidates_for_ids(
+        self, entity_ids: list[str]
+    ) -> list[XrayPolymerEntityCandidateRecord]:
+        if not entity_ids:
+            return []
+        query = """
+        query($ids:[String!]!) {
+          polymer_entities(entity_ids:$ids) {
+            rcsb_id
+            entity_poly {
+              pdbx_strand_id
+            }
+            rcsb_polymer_entity_container_identifiers {
+              entry_id
+            }
+          }
+        }
+        """
+        payload = {"query": query, "variables": {"ids": entity_ids}}
+        data = self._post_json(self.config.graphql_url, payload)
+        entities = data.get("data", {}).get("polymer_entities", [])
+
+        entity_rows: list[tuple[str, str, tuple[str, ...]]] = []
+        for entity in entities:
+            if not entity:
+                continue
+            polymer_entity_id = entity.get("rcsb_id")
+            entry_id = (
+                entity.get("rcsb_polymer_entity_container_identifiers", {}) or {}
+            ).get("entry_id")
+            chain_ids = str(
+                (entity.get("entity_poly", {}) or {}).get("pdbx_strand_id") or ""
+            ).strip()
+            chain_id_tuple = tuple(
+                item.strip() for item in chain_ids.split(",") if item.strip()
+            )
+            if not polymer_entity_id or not entry_id or not chain_id_tuple:
+                continue
+            entity_rows.append(
+                (str(polymer_entity_id), str(entry_id), chain_id_tuple)
+            )
+
+        resolution_by_entry_id: dict[str, float] = {}
+        unknown_entries = sorted({entry_id for _, entry_id, _ in entity_rows})
+        for entry_batch in chunked(unknown_entries, self.config.graphql_batch_size):
+            resolution_by_entry_id.update(self.fetch_entry_resolution_for_ids(entry_batch))
+
+        records: list[XrayPolymerEntityCandidateRecord] = []
+        for polymer_entity_id, entry_id, chain_ids in entity_rows:
+            resolution = resolution_by_entry_id.get(entry_id)
+            if resolution is None:
+                continue
+            records.append(
+                XrayPolymerEntityCandidateRecord(
+                    polymer_entity_id=polymer_entity_id,
+                    entry_id=entry_id,
+                    chain_ids=chain_ids,
+                    resolution_angstrom=resolution,
                 )
             )
         return records
@@ -4056,10 +4473,11 @@ class SolutionNMRMonomerPrecisionCollector:
         chain_id: str,
         core_start_seq_id: int,
         core_end_seq_id: int,
+        parsed_chain_id: str | None = None,
     ) -> SolutionNMRMonomerPrecisionRecord | None:
         result = self._compute_mean_rmsd_to_average(
             pdb_path=pdb_path,
-            chain_id=chain_id,
+            chain_id=parsed_chain_id or chain_id,
             start_seq_id=core_start_seq_id,
             end_seq_id=core_end_seq_id,
         )
@@ -4083,6 +4501,7 @@ class SolutionNMRMonomerPrecisionCollector:
     ) -> SolutionNMRMonomerPrecisionRecord | None:
         try:
             pdb_path = self._download_pdb_if_needed(core.entry_id)
+            chain_map = load_cached_chain_id_map(self.cache_dir, core.entry_id)
             return self._build_record_from_core_range(
                 pdb_path=pdb_path,
                 entry_id=core.entry_id,
@@ -4090,6 +4509,7 @@ class SolutionNMRMonomerPrecisionCollector:
                 chain_id=core.chain_id,
                 core_start_seq_id=core.core_start_seq_id,
                 core_end_seq_id=core.core_end_seq_id,
+                parsed_chain_id=chain_map.get(core.chain_id, core.chain_id),
             )
         except Exception as exc:
             LOGGER.warning(
@@ -4179,9 +4599,11 @@ class SolutionNMRMonomerPrecisionStrideModeledFirstModelCollector(
     ) -> SolutionNMRMonomerPrecisionRecord | None:
         try:
             pdb_path = self._download_pdb_if_needed(seed.entry_id)
+            chain_map = load_cached_chain_id_map(self.cache_dir, seed.entry_id)
+            parsed_chain_id = chain_map.get(seed.chain_id, seed.chain_id)
             core_range = compute_stride_core_range_for_modeled_auth_seq_ids_in_first_model(
                 pdb_path=pdb_path,
-                chain_id=seed.chain_id,
+                chain_id=parsed_chain_id,
                 modeled_auth_seq_ids=set(seed.modeled_auth_seq_ids),
                 stride_executable=self.stride_executable,
             )
@@ -4195,6 +4617,7 @@ class SolutionNMRMonomerPrecisionStrideModeledFirstModelCollector(
                 chain_id=seed.chain_id,
                 core_start_seq_id=core_start,
                 core_end_seq_id=core_end,
+                parsed_chain_id=parsed_chain_id,
             )
         except Exception as exc:
             LOGGER.warning(
@@ -4346,9 +4769,10 @@ class SolutionNMRMonomerXrayHomologCollector:
             cache_dir=self.cache_dir,
             entry_id=seed.entry_id,
         )
+        chain_map = load_cached_chain_id_map(self.cache_dir, seed.entry_id)
         core_range = compute_stride_core_range_for_modeled_auth_seq_ids_in_first_model(
             pdb_path=pdb_path,
-            chain_id=seed.chain_id,
+            chain_id=chain_map.get(seed.chain_id, seed.chain_id),
             modeled_auth_seq_ids=set(seed.modeled_auth_seq_ids),
             stride_executable=self.stride_executable,
         )
@@ -4533,6 +4957,7 @@ class SolutionNMRMonomerXrayRmsdCollector:
         config: CollectorConfig,
         cache_dir: Path,
         rmsd_workers: int,
+        homolog_records: list[SolutionNMRMonomerXrayHomologRecord],
         sequence_identity_percent: int = 100,
     ) -> None:
         if sequence_identity_percent not in {95, 100}:
@@ -4541,8 +4966,8 @@ class SolutionNMRMonomerXrayRmsdCollector:
         self.config = config
         self.cache_dir = cache_dir
         self.rmsd_workers = max(1, rmsd_workers)
+        self.homolog_records = homolog_records
         self.sequence_identity_percent = sequence_identity_percent
-        self.group_query_batch_size = 200
         self.cache_dir.mkdir(parents=True, exist_ok=True)
 
     def _download_pdb_if_needed(self, entry_id: str) -> Path:
@@ -4561,6 +4986,7 @@ class SolutionNMRMonomerXrayRmsdCollector:
         nmr_core_end_seq_id: int,
         xray_pdb_path: Path,
         xray_chain_id: str,
+        sequence_identity_percent: int,
     ) -> tuple[int, float, int, int, int, int] | None:
         nmr_models = parse_models_ca_coords(
             nmr_pdb_path,
@@ -4584,170 +5010,155 @@ class SolutionNMRMonomerXrayRmsdCollector:
         if len(xray_resids) < 3:
             return None
 
-        nmr_min = min(common_nmr_resids)
-        nmr_max = max(common_nmr_resids)
-        xray_min = min(xray_resids)
-        xray_max = max(xray_resids)
-
-        max_overlap = 0
-        overlap_candidates: list[tuple[int, list[int]]] = []
-        for offset in range(xray_min - nmr_max, xray_max - nmr_min + 1):
-            mapped_resids = sorted(
-                resid for resid in common_nmr_resids if (resid + offset) in xray_resids
+        nmr_residues = [
+            item
+            for item in parse_first_model_ca_residue_sequence(
+                nmr_pdb_path,
+                nmr_chain_id,
+                start_seq_id=nmr_core_start_seq_id,
+                end_seq_id=nmr_core_end_seq_id,
             )
-            overlap = len(mapped_resids)
-            if overlap < 3:
-                continue
-            if overlap > max_overlap:
-                max_overlap = overlap
-                overlap_candidates = [(offset, mapped_resids)]
-            elif overlap == max_overlap:
-                overlap_candidates.append((offset, mapped_resids))
-
-        if not overlap_candidates:
+            if item[0] in common_nmr_resids
+        ]
+        xray_residues = [
+            item
+            for item in parse_first_model_ca_residue_sequence(
+                xray_pdb_path,
+                xray_chain_id,
+            )
+            if item[0] in xray_resids
+        ]
+        aligned_pairs = align_modeled_ca_sequences(
+            nmr_residues=nmr_residues,
+            xray_residues=xray_residues,
+            sequence_identity_percent=sequence_identity_percent,
+        )
+        if not aligned_pairs:
             return None
 
-        best_alignment: tuple[int, list[int], float] | None = None
-        for offset, common_resids in overlap_candidates:
-            nmr_coords = np.asarray(
-                [
-                    [model_map[resid] for resid in common_resids]
-                    for model_map in nmr_models
-                ],
-                dtype=float,
-            )
-            xray_coords = np.asarray(
-                [xray_models[0][resid + offset] for resid in common_resids],
-                dtype=float,
-            )
-            per_model_rmsd = [
-                _superposed_rmsd(model_coord, xray_coords) for model_coord in nmr_coords
-            ]
-            mean_rmsd = float(np.mean(per_model_rmsd))
-
-            if best_alignment is None:
-                best_alignment = (offset, common_resids, mean_rmsd)
-                continue
-
-            best_offset, _, best_rmsd = best_alignment
-            if mean_rmsd < best_rmsd or (
-                np.isclose(mean_rmsd, best_rmsd)
-                and (abs(offset), offset) < (abs(best_offset), best_offset)
-            ):
-                best_alignment = (offset, common_resids, mean_rmsd)
-
-        if best_alignment is None:
-            return None
-        best_offset, common_resids, rmsd_value = best_alignment
-        xray_common_resids = [resid + best_offset for resid in common_resids]
+        nmr_common_resids = [nmr_resid for nmr_resid, _ in aligned_pairs]
+        xray_common_resids = [xray_resid for _, xray_resid in aligned_pairs]
+        nmr_coords = np.asarray(
+            [
+                [model_map[resid] for resid in nmr_common_resids]
+                for model_map in nmr_models
+            ],
+            dtype=float,
+        )
+        xray_coords = np.asarray(
+            [xray_models[0][resid] for resid in xray_common_resids],
+            dtype=float,
+        )
+        per_model_rmsd = [
+            _superposed_rmsd(model_coord, xray_coords) for model_coord in nmr_coords
+        ]
+        rmsd_value = float(np.mean(per_model_rmsd))
         return (
-            len(common_resids),
+            len(aligned_pairs),
             rmsd_value,
-            min(common_resids),
-            max(common_resids),
+            min(nmr_common_resids),
+            max(nmr_common_resids),
             min(xray_common_resids),
             max(xray_common_resids),
         )
 
-    def _resolve_best_xray_analog_by_group(
-        self, group_ids: set[str]
-    ) -> dict[str, tuple[str, tuple[str, ...], float]]:
-        if not group_ids:
-            return {}
-
-        best_by_group: dict[str, tuple[str, tuple[str, ...], float]] = {}
-        resolution_cache: dict[str, float] = {}
-        group_batches = list(chunked(sorted(group_ids), self.group_query_batch_size))
-
-        for batch_idx, group_batch in enumerate(group_batches, start=1):
-            entity_ids = self.client.fetch_xray_polymer_entity_ids_for_group_ids(
-                group_batch
-            )
-            for entity_batch in chunked(entity_ids, self.config.graphql_batch_size):
-                mappings = self.client.fetch_polymer_entity_group_mapping_for_ids(
-                    entity_batch, similarity_cutoff=self.sequence_identity_percent
-                )
-                if not mappings:
-                    continue
-                unknown_entries = sorted(
-                    {m.entry_id for m in mappings if m.entry_id not in resolution_cache}
-                )
-                for entry_batch in chunked(
-                    unknown_entries, self.config.graphql_batch_size
-                ):
-                    resolution_cache.update(
-                        self.client.fetch_entry_resolution_for_ids(entry_batch)
-                    )
-
-                for mapping in mappings:
-                    if mapping.group_id not in group_ids:
-                        continue
-                    resolution = resolution_cache.get(mapping.entry_id)
-                    if resolution is None:
-                        continue
-                    candidate = (mapping.entry_id, mapping.chain_ids, resolution)
-                    current = best_by_group.get(mapping.group_id)
-                    if (
-                        current is None
-                        or candidate[2] < current[2]
-                        or (
-                            candidate[2] == current[2]
-                            and (candidate[0], candidate[1]) < (current[0], current[1])
-                        )
-                    ):
-                        best_by_group[mapping.group_id] = candidate
-
-            LOGGER.info(
-                "SOLUTION NMR X-ray RMSD %d%%: resolved best analog for group batch %d/%d",
-                self.sequence_identity_percent,
-                batch_idx,
-                len(group_batches),
-            )
-        return best_by_group
-
     def _compute_record(
         self,
-        seed: SolutionNMRMonomerXraySeedRecord,
-        best_xray_by_group: dict[str, tuple[str, tuple[str, ...], float]],
+        homolog: SolutionNMRMonomerXrayHomologRecord,
+        nmr_chain_id: str,
+        candidates: tuple[XrayPolymerEntityCandidateRecord, ...],
     ) -> SolutionNMRMonomerXrayRmsdRecord | None:
-        group_id = (
-            seed.group_id_95
-            if self.sequence_identity_percent == 95
-            else seed.group_id_100
-        )
-        if not group_id:
+        if (
+            homolog.nmr_core_start_seq_id is None
+            or homolog.nmr_core_end_seq_id is None
+            or not candidates
+        ):
             return None
-
-        best = best_xray_by_group.get(group_id)
-        if best is None:
-            return None
-        xray_entry_id, xray_chain_ids, xray_resolution = best
 
         try:
-            nmr_pdb_path = self._download_pdb_if_needed(seed.entry_id)
-            xray_pdb_path = self._download_pdb_if_needed(xray_entry_id)
+            nmr_pdb_path = self._download_pdb_if_needed(homolog.entry_id)
+            nmr_chain_map = load_cached_chain_id_map(self.cache_dir, homolog.entry_id)
+            parsed_nmr_chain_id = nmr_chain_map.get(nmr_chain_id, nmr_chain_id)
 
-            best_chain_result: tuple[str, int, float, int, int, int, int] | None = None
-            for xray_chain_id in xray_chain_ids:
-                rmsd_result = self._compute_ca_rmsd_to_xray(
-                    nmr_pdb_path=nmr_pdb_path,
-                    nmr_chain_id=seed.chain_id,
-                    nmr_core_start_seq_id=seed.core_start_seq_id,
-                    nmr_core_end_seq_id=seed.core_end_seq_id,
-                    xray_pdb_path=xray_pdb_path,
-                    xray_chain_id=xray_chain_id,
-                )
-                if rmsd_result is None:
+            for candidate in candidates:
+                try:
+                    (
+                        xray_pdb_path,
+                        xray_chain_map,
+                    ) = download_pdb_chain_subset_if_needed(
+                        session=self.client.session,
+                        config=self.config,
+                        cache_dir=self.cache_dir,
+                        entry_id=candidate.entry_id,
+                        chain_ids=candidate.chain_ids,
+                    )
+                except Exception as exc:
+                    LOGGER.debug(
+                        "Skipping X-ray RMSD candidate %s for %s: %s",
+                        candidate.polymer_entity_id,
+                        homolog.entry_id,
+                        exc,
+                    )
+                    continue
+                best_chain_result: tuple[
+                    str, int, float, int, int, int, int
+                ] | None = None
+                for xray_chain_id in candidate.chain_ids:
+                    parsed_xray_chain_id = xray_chain_map.get(
+                        xray_chain_id,
+                        xray_chain_id,
+                    )
+                    try:
+                        rmsd_result = self._compute_ca_rmsd_to_xray(
+                            nmr_pdb_path=nmr_pdb_path,
+                            nmr_chain_id=parsed_nmr_chain_id,
+                            nmr_core_start_seq_id=homolog.nmr_core_start_seq_id,
+                            nmr_core_end_seq_id=homolog.nmr_core_end_seq_id,
+                            xray_pdb_path=xray_pdb_path,
+                            xray_chain_id=parsed_xray_chain_id,
+                            sequence_identity_percent=self.sequence_identity_percent,
+                        )
+                    except Exception as exc:
+                        LOGGER.debug(
+                            "Skipping X-ray RMSD chain %s/%s for %s: %s",
+                            candidate.entry_id,
+                            xray_chain_id,
+                            homolog.entry_id,
+                            exc,
+                        )
+                        continue
+                    if rmsd_result is None:
+                        continue
+                    (
+                        n_common_ca,
+                        rmsd_ca,
+                        nmr_core_start,
+                        nmr_core_end,
+                        xray_core_start,
+                        xray_core_end,
+                    ) = rmsd_result
+                    chain_candidate = (
+                        xray_chain_id,
+                        n_common_ca,
+                        rmsd_ca,
+                        nmr_core_start,
+                        nmr_core_end,
+                        xray_core_start,
+                        xray_core_end,
+                    )
+                    if (
+                        best_chain_result is None
+                        or chain_candidate[1] > best_chain_result[1]
+                        or (
+                            chain_candidate[1] == best_chain_result[1]
+                            and chain_candidate[2] < best_chain_result[2]
+                        )
+                    ):
+                        best_chain_result = chain_candidate
+
+                if best_chain_result is None:
                     continue
                 (
-                    n_common_ca,
-                    rmsd_ca,
-                    nmr_core_start,
-                    nmr_core_end,
-                    xray_core_start,
-                    xray_core_end,
-                ) = rmsd_result
-                candidate = (
                     xray_chain_id,
                     n_common_ca,
                     rmsd_ca,
@@ -4755,46 +5166,29 @@ class SolutionNMRMonomerXrayRmsdCollector:
                     nmr_core_end,
                     xray_core_start,
                     xray_core_end,
+                ) = best_chain_result
+                return SolutionNMRMonomerXrayRmsdRecord(
+                    entry_id=homolog.entry_id,
+                    year=homolog.year,
+                    sequence_identity_percent=self.sequence_identity_percent,
+                    nmr_chain_id=nmr_chain_id,
+                    nmr_core_start_seq_id=homolog.nmr_core_start_seq_id,
+                    nmr_core_end_seq_id=homolog.nmr_core_end_seq_id,
+                    nmr_query_sequence_length=homolog.nmr_query_sequence_length,
+                    xray_homolog_entity_id=candidate.polymer_entity_id,
+                    xray_homolog_count=len(homolog.xray_homolog_entity_ids),
+                    xray_entry_id=candidate.entry_id,
+                    xray_chain_id=xray_chain_id,
+                    xray_core_start_seq_id=xray_core_start,
+                    xray_core_end_seq_id=xray_core_end,
+                    xray_resolution_angstrom=candidate.resolution_angstrom,
+                    n_common_ca=n_common_ca,
+                    rmsd_ca_angstrom=rmsd_ca,
                 )
-                if (
-                    best_chain_result is None
-                    or candidate[1] > best_chain_result[1]
-                    or (
-                        candidate[1] == best_chain_result[1]
-                        and candidate[2] < best_chain_result[2]
-                    )
-                ):
-                    best_chain_result = candidate
-
-            if best_chain_result is None:
-                return None
-            (
-                xray_chain_id,
-                n_common_ca,
-                rmsd_ca,
-                nmr_core_start,
-                nmr_core_end,
-                xray_core_start,
-                xray_core_end,
-            ) = best_chain_result
-            return SolutionNMRMonomerXrayRmsdRecord(
-                entry_id=seed.entry_id,
-                year=seed.year,
-                sequence_identity_percent=self.sequence_identity_percent,
-                nmr_chain_id=seed.chain_id,
-                nmr_core_start_seq_id=nmr_core_start,
-                nmr_core_end_seq_id=nmr_core_end,
-                xray_entry_id=xray_entry_id,
-                xray_chain_id=xray_chain_id,
-                xray_core_start_seq_id=xray_core_start,
-                xray_core_end_seq_id=xray_core_end,
-                xray_resolution_angstrom=xray_resolution,
-                n_common_ca=n_common_ca,
-                rmsd_ca_angstrom=rmsd_ca,
-            )
+            return None
         except Exception as exc:
             LOGGER.warning(
-                "X-ray RMSD calculation failed for %s: %s", seed.entry_id, exc
+                "X-ray RMSD calculation failed for %s: %s", homolog.entry_id, exc
             )
             return None
 
@@ -4805,76 +5199,112 @@ class SolutionNMRMonomerXrayRmsdCollector:
         on_record: Callable[[SolutionNMRMonomerXrayRmsdRecord], None] | None = None,
     ) -> list[SolutionNMRMonomerXrayRmsdRecord]:
         skip_entry_ids = skip_entry_ids or set()
-        entry_ids = fetch_solution_nmr_entry_ids(
-            client=self.client,
-            log_label=f"SOLUTION NMR X-ray RMSD {self.sequence_identity_percent}%",
-        )
-
-        batches = list(chunked(entry_ids, self.config.graphql_batch_size))
-        seeds: list[SolutionNMRMonomerXraySeedRecord] = []
-        for batch_seeds in collect_batch_results(
-            batches=batches,
-            max_workers=self.config.max_workers,
-            fetch_fn=self.client.fetch_solution_nmr_monomer_xray_seed_records_for_ids,
-            progress_label="SOLUTION NMR X-ray RMSD base",
-        ):
-            seeds.extend(batch_seeds)
-
-        filtered_seeds = [
-            seed
-            for seed in seeds
-            if seed.entry_id not in skip_entry_ids
-            and (
-                seed.group_id_95 is not None
-                if self.sequence_identity_percent == 95
-                else seed.group_id_100 is not None
-            )
+        filtered_homologs = [
+            record
+            for record in self.homolog_records
+            if record.sequence_identity_percent == self.sequence_identity_percent
+            and record.entry_id not in skip_entry_ids
+            and record.nmr_core_start_seq_id is not None
+            and record.nmr_core_end_seq_id is not None
+            and record.xray_homolog_entity_ids
         ]
-        filtered_seeds = sorted(filtered_seeds, key=lambda s: (s.year, s.entry_id))
-        if max_entries is not None:
-            filtered_seeds = filtered_seeds[: max(0, max_entries)]
-
-        group_ids = {
-            (
-                seed.group_id_95
-                if self.sequence_identity_percent == 95
-                else seed.group_id_100
-            )
-            for seed in filtered_seeds
-        }
-        group_ids = {gid for gid in group_ids if gid}
-        LOGGER.info(
-            "SOLUTION NMR X-ray RMSD %d%%: entries to process=%d, unique groups=%d",
-            self.sequence_identity_percent,
-            len(filtered_seeds),
-            len(group_ids),
+        filtered_homologs = sorted(
+            filtered_homologs, key=lambda r: (r.year, r.entry_id)
         )
+        if max_entries is not None:
+            filtered_homologs = filtered_homologs[: max(0, max_entries)]
 
-        best_xray_by_group = self._resolve_best_xray_analog_by_group(group_ids)
+        entry_ids = sorted({record.entry_id for record in filtered_homologs})
+        chain_by_entry_id: dict[str, str] = {}
+        for batch_seeds in collect_batch_results(
+            batches=list(chunked(entry_ids, self.config.graphql_batch_size)),
+            max_workers=self.config.max_workers,
+            fetch_fn=self.client.fetch_solution_nmr_monomer_xray_homolog_seed_records_for_ids,
+            progress_label="SOLUTION NMR X-ray RMSD NMR chain lookup",
+        ):
+            for seed in batch_seeds:
+                chain_by_entry_id[seed.entry_id] = seed.chain_id
+
+        xray_entity_ids = sorted(
+            {
+                entity_id
+                for record in filtered_homologs
+                for entity_id in record.xray_homolog_entity_ids
+            }
+        )
+        candidate_by_entity_id: dict[str, XrayPolymerEntityCandidateRecord] = {}
+        for batch_candidates in collect_batch_results(
+            batches=list(chunked(xray_entity_ids, self.config.graphql_batch_size)),
+            max_workers=self.config.max_workers,
+            fetch_fn=self.client.fetch_xray_polymer_entity_candidates_for_ids,
+            progress_label="SOLUTION NMR X-ray RMSD X-ray candidate metadata",
+        ):
+            for candidate in batch_candidates:
+                candidate_by_entity_id[candidate.polymer_entity_id] = candidate
+
+        work_items: list[
+            tuple[
+                SolutionNMRMonomerXrayHomologRecord,
+                str,
+                tuple[XrayPolymerEntityCandidateRecord, ...],
+            ]
+        ] = []
+        for homolog in filtered_homologs:
+            nmr_chain_id = chain_by_entry_id.get(homolog.entry_id)
+            if not nmr_chain_id:
+                continue
+            candidates = tuple(
+                sorted(
+                    (
+                        candidate_by_entity_id[entity_id]
+                        for entity_id in homolog.xray_homolog_entity_ids
+                        if entity_id in candidate_by_entity_id
+                    ),
+                    key=lambda c: (
+                        c.resolution_angstrom,
+                        c.entry_id,
+                        c.polymer_entity_id,
+                    ),
+                )
+            )
+            if not candidates:
+                continue
+            work_items.append((homolog, nmr_chain_id, candidates))
+
+        LOGGER.info(
+            "SOLUTION NMR X-ray RMSD %d%%: entries to process=%d, unique X-ray entities=%d",
+            self.sequence_identity_percent,
+            len(work_items),
+            len(candidate_by_entity_id),
+        )
 
         records: list[SolutionNMRMonomerXrayRmsdRecord] = []
         with ThreadPoolExecutor(max_workers=self.rmsd_workers) as executor:
             future_map = {
                 executor.submit(
                     self._compute_record,
-                    seed=seed,
-                    best_xray_by_group=best_xray_by_group,
+                    homolog=homolog,
+                    nmr_chain_id=nmr_chain_id,
+                    candidates=candidates,
                 ): idx
-                for idx, seed in enumerate(filtered_seeds, start=1)
+                for idx, (homolog, nmr_chain_id, candidates) in enumerate(
+                    work_items, start=1
+                )
             }
             total = len(future_map)
+            completed = 0
             for future in as_completed(future_map):
                 record = future.result()
                 if record is not None:
                     records.append(record)
                     if on_record is not None:
                         on_record(record)
-                idx = future_map[future]
-                if total > 0 and (idx % 50 == 0 or idx == total):
+                completed += 1
+                if total > 0 and (completed % 50 == 0 or completed == total):
                     LOGGER.info(
                         "SOLUTION NMR X-ray RMSD %d%%: processed %d/%d entries",
                         self.sequence_identity_percent,
-                        idx,
+                        completed,
                         total,
                     )
 
@@ -6064,6 +6494,55 @@ def write_solution_nmr_monomer_xray_homolog_csv(
     )
 
 
+def read_solution_nmr_monomer_xray_homolog_csv(
+    input_path: Path,
+) -> list[SolutionNMRMonomerXrayHomologRecord]:
+    if not input_path.exists():
+        return []
+    records: list[SolutionNMRMonomerXrayHomologRecord] = []
+    with input_path.open("r", newline="", encoding="utf-8") as csvfile:
+        reader = csv.DictReader(csvfile)
+        for row in reader:
+            if not row:
+                continue
+            nmr_core_start_raw = row.get("nmr_core_start_seq_id")
+            nmr_core_end_raw = row.get("nmr_core_end_seq_id")
+            xray_entry_ids = tuple(
+                item.strip()
+                for item in str(row.get("xray_homolog_entry_ids") or "").split(";")
+                if item.strip()
+            )
+            xray_entity_ids = tuple(
+                item.strip()
+                for item in str(row.get("xray_homolog_entity_ids") or "").split(";")
+                if item.strip()
+            )
+            records.append(
+                SolutionNMRMonomerXrayHomologRecord(
+                    entry_id=str(row["entry_id"]),
+                    year=int(row["year"]),
+                    sequence_identity_percent=int(row["sequence_identity_percent"]),
+                    nmr_core_start_seq_id=(
+                        int(nmr_core_start_raw)
+                        if nmr_core_start_raw not in {None, ""}
+                        else None
+                    ),
+                    nmr_core_end_seq_id=(
+                        int(nmr_core_end_raw)
+                        if nmr_core_end_raw not in {None, ""}
+                        else None
+                    ),
+                    nmr_query_sequence_length=int(
+                        row.get("nmr_query_sequence_length") or 0
+                    ),
+                    xray_homolog_entry_ids=xray_entry_ids,
+                    xray_homolog_entity_ids=xray_entity_ids,
+                    has_xray_homolog=bool(int(row.get("has_xray_homolog") or 0)),
+                )
+            )
+    return records
+
+
 def read_solution_nmr_monomer_xray_rmsd_csv(
     input_path: Path,
 ) -> list[SolutionNMRMonomerXrayRmsdRecord]:
@@ -6095,6 +6574,13 @@ def read_solution_nmr_monomer_xray_rmsd_csv(
                         if nmr_core_end_raw not in {None, ""}
                         else None
                     ),
+                    nmr_query_sequence_length=int(
+                        row.get("nmr_query_sequence_length") or 0
+                    ),
+                    xray_homolog_entity_id=str(
+                        row.get("xray_homolog_entity_id") or ""
+                    ),
+                    xray_homolog_count=int(row.get("xray_homolog_count") or 0),
                     xray_entry_id=str(row["xray_entry_id"]),
                     xray_chain_id=str(row["xray_chain_id"]),
                     xray_core_start_seq_id=(
@@ -6122,6 +6608,9 @@ SOLUTION_NMR_MONOMER_XRAY_RMSD_HEADER: tuple[str, ...] = (
     "nmr_chain_id",
     "nmr_core_start_seq_id",
     "nmr_core_end_seq_id",
+    "nmr_query_sequence_length",
+    "xray_homolog_entity_id",
+    "xray_homolog_count",
     "xray_entry_id",
     "xray_chain_id",
     "xray_core_start_seq_id",
@@ -6142,6 +6631,9 @@ def _solution_nmr_monomer_xray_rmsd_csv_row(
         record.nmr_chain_id,
         record.nmr_core_start_seq_id if record.nmr_core_start_seq_id is not None else "",
         record.nmr_core_end_seq_id if record.nmr_core_end_seq_id is not None else "",
+        record.nmr_query_sequence_length,
+        record.xray_homolog_entity_id,
+        record.xray_homolog_count,
         record.xray_entry_id,
         record.xray_chain_id,
         (
@@ -6470,7 +6962,10 @@ def parse_args() -> argparse.Namespace:
         type=int,
         choices=(95, 100),
         default=100,
-        help="Sequence identity cutoff for selecting X-ray homolog groups (95 or 100).",
+        help=(
+            "Sequence identity cutoff for selecting X-ray homologs from the "
+            "STRIDE-core homolog CSV (95 or 100)."
+        ),
     )
     parser.add_argument(
         "--page-size", type=int, default=10000, help="Search API page size."
@@ -7028,6 +7523,26 @@ def main() -> None:
         valid_existing_records: list[SolutionNMRMonomerXrayRmsdRecord] = []
         skip_entry_ids: set[str] = set()
         xray_rmsd_output_path = Path(args.solution_nmr_monomer_xray_rmsd_output)
+        homolog_input_path = (
+            Path(args.solution_nmr_monomer_xray_homolog_95_output)
+            if args.xray_rmsd_sequence_identity == 95
+            else Path(args.solution_nmr_monomer_xray_homolog_100_output)
+        )
+        homolog_records = read_solution_nmr_monomer_xray_homolog_csv(
+            homolog_input_path
+        )
+        if not homolog_records:
+            raise SystemExit(
+                "No X-ray homolog records found for X-ray RMSD. Run "
+                "solution_nmr_monomer_xray_homologs first or provide the expected "
+                f"homolog CSV at {homolog_input_path}."
+            )
+        LOGGER.info(
+            "SOLUTION NMR X-ray RMSD %d%%: loaded %d homolog records from %s",
+            args.xray_rmsd_sequence_identity,
+            len(homolog_records),
+            homolog_input_path,
+        )
         if (
             not args.xray_rmsd_overwrite
             and xray_rmsd_output_path.exists()
@@ -7047,6 +7562,7 @@ def main() -> None:
                 and record.nmr_core_end_seq_id is not None
                 and record.xray_core_start_seq_id is not None
                 and record.xray_core_end_seq_id is not None
+                and record.xray_homolog_entity_id
             ]
             dropped_existing = len(existing_records) - len(valid_existing_records)
             skip_entry_ids = {record.entry_id for record in valid_existing_records}
@@ -7062,6 +7578,7 @@ def main() -> None:
             config=config,
             cache_dir=Path(args.xray_rmsd_cache_dir),
             rmsd_workers=args.xray_rmsd_workers,
+            homolog_records=homolog_records,
             sequence_identity_percent=args.xray_rmsd_sequence_identity,
         )
         valid_existing_records = sorted(
