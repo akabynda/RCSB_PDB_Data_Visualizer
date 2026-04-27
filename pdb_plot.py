@@ -244,6 +244,10 @@ class PlotConfig:
         "Mean RMSD(CA) of solution NMR monomeric proteins to best-resolution X-ray analogs by year"
     )
     nmr_monomer_xray_rmsd_y_label: str = "Mean RMSD(CA) (Å)"
+    nmr_monomer_xray_median_rmsd_title: str = (
+        "Median RMSD(CA) of solution NMR monomeric proteins to best-resolution X-ray analogs by year"
+    )
+    nmr_monomer_xray_median_rmsd_y_label: str = "Median RMSD(CA) (Å)"
     xray_color: str = "#1f77b4"
     cryoem_color: str = "#d62728"
     nmr_color: str = "#2ca02c"
@@ -2489,21 +2493,38 @@ class PDBScientificPlotter:
         return PDBScientificPlotter._limit_year_column(prepared)
 
     def plot_solution_nmr_monomer_xray_rmsd(
-        self, data_path: Path, output_png: Path, output_svg: Path
+        self,
+        data_path: Path,
+        mean_output_png: Path,
+        mean_output_svg: Path,
+        median_output_png: Path,
+        median_output_svg: Path,
     ) -> None:
         table = self._prepare_monomer_xray_rmsd_table(self._read_csv(data_path))
         self._scientific_style()
-        yearly_mean_rmsd = (
-            table.groupby("year", as_index=True)["rmsd_ca_angstrom"].mean().sort_index()
+        yearly_rmsd = (
+            table.groupby("year", as_index=True)["rmsd_ca_angstrom"]
+            .agg(["mean", "median"])
+            .sort_index()
         )
         self._render_bar_series(
-            output_png=output_png,
-            output_svg=output_svg,
+            output_png=mean_output_png,
+            output_svg=mean_output_svg,
             title=self.config.nmr_monomer_xray_rmsd_title,
             y_label=self.config.nmr_monomer_xray_rmsd_y_label,
-            x_values=yearly_mean_rmsd.index,
-            y_values=yearly_mean_rmsd,
+            x_values=yearly_rmsd.index,
+            y_values=yearly_rmsd["mean"],
             color="#9467bd",
+            y_bottom=0.0,
+        )
+        self._render_bar_series(
+            output_png=median_output_png,
+            output_svg=median_output_svg,
+            title=self.config.nmr_monomer_xray_median_rmsd_title,
+            y_label=self.config.nmr_monomer_xray_median_rmsd_y_label,
+            x_values=yearly_rmsd.index,
+            y_values=yearly_rmsd["median"],
+            color=self.config.median_color,
             y_bottom=0.0,
         )
 
@@ -3149,6 +3170,18 @@ def parse_args() -> argparse.Namespace:
         help="Output SVG for monomer X-ray RMSD(CA) by year plot.",
     )
     parser.add_argument(
+        "--nmr-monomer-xray-median-rmsd-output-png",
+        type=Path,
+        default=Path("figures/solution_nmr_monomer_xray_median_rmsd_by_year.png"),
+        help="Output PNG for monomer X-ray median RMSD(CA) by year plot.",
+    )
+    parser.add_argument(
+        "--nmr-monomer-xray-median-rmsd-output-svg",
+        type=Path,
+        default=Path("figures/solution_nmr_monomer_xray_median_rmsd_by_year.svg"),
+        help="Output SVG for monomer X-ray median RMSD(CA) by year plot.",
+    )
+    parser.add_argument(
         "--no-svg",
         action="store_true",
         help="Disable SVG output generation.",
@@ -3381,8 +3414,10 @@ def main() -> None:
     if PlotKind.SOLUTION_NMR_MONOMER_XRAY_RMSD in args.plots:
         plotter.plot_solution_nmr_monomer_xray_rmsd(
             data_path=args.nmr_monomer_xray_rmsd_input,
-            output_png=args.nmr_monomer_xray_rmsd_output_png,
-            output_svg=args.nmr_monomer_xray_rmsd_output_svg,
+            mean_output_png=args.nmr_monomer_xray_rmsd_output_png,
+            mean_output_svg=args.nmr_monomer_xray_rmsd_output_svg,
+            median_output_png=args.nmr_monomer_xray_median_rmsd_output_png,
+            median_output_svg=args.nmr_monomer_xray_median_rmsd_output_svg,
         )
 
 
