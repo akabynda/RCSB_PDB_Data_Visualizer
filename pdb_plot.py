@@ -248,6 +248,13 @@ class PlotConfig:
         "Median RMSD(CA) of solution NMR monomeric proteins to best-resolution X-ray analogs by year"
     )
     nmr_monomer_xray_median_rmsd_y_label: str = "Median RMSD(CA) (Å)"
+    nmr_monomer_xray_rmsd_extremes_mean_title: str = (
+        "Mean RMSD(CA) to best-resolution, minimum-RMSD, and maximum-RMSD X-ray analogs by year"
+    )
+    nmr_monomer_xray_rmsd_extremes_median_title: str = (
+        "Median RMSD(CA) to best-resolution, minimum-RMSD, and maximum-RMSD X-ray analogs by year"
+    )
+    nmr_monomer_xray_rmsd_extremes_y_label: str = "RMSD(CA) (Å)"
     xray_color: str = "#1f77b4"
     cryoem_color: str = "#d62728"
     nmr_color: str = "#2ca02c"
@@ -634,6 +641,7 @@ class PDBScientificPlotter:
         color: str,
         linewidth: float,
         label: str | None = None,
+        zorder: int | None = None,
     ) -> None:
         ax.stairs(
             values=np.asarray(y_values, dtype=float),
@@ -643,6 +651,7 @@ class PDBScientificPlotter:
             linewidth=linewidth,
             label=label,
             fill=False,
+            zorder=zorder,
         )
 
     def _render_line_series(
@@ -673,6 +682,58 @@ class PDBScientificPlotter:
                 ax.set_xlim(left=x_left)
             if label:
                 self._add_legend(ax, loc="upper left")
+
+        self._render_figure(
+            output_png=output_png,
+            output_svg=output_svg,
+            title=title,
+            y_label=y_label,
+            draw_fn=draw,
+        )
+
+    def _render_multi_line_series(
+        self,
+        output_png: Path,
+        output_svg: Path,
+        title: str,
+        y_label: str,
+        table: pd.DataFrame,
+        colors: dict[str, str],
+        labels: dict[str, str],
+        linewidth: float = 2.2,
+        y_bottom: float | None = None,
+        use_step: bool = False,
+        draw_order: Sequence[str] | None = None,
+    ) -> None:
+        def draw(ax: plt.Axes) -> None:
+            columns = [
+                column
+                for column in (draw_order or list(table.columns))
+                if column in table.columns
+            ]
+            for zorder, column in enumerate(columns, start=2):
+                if use_step:
+                    self._plot_step_series(
+                        ax=ax,
+                        x_values=table.index,
+                        y_values=table[column],
+                        color=colors.get(column),
+                        linewidth=linewidth,
+                        label=labels.get(column, column),
+                        zorder=zorder,
+                    )
+                else:
+                    ax.plot(
+                        table.index,
+                        table[column],
+                        linewidth=linewidth,
+                        color=colors.get(column),
+                        label=labels.get(column, column),
+                        zorder=zorder,
+                    )
+            if y_bottom is not None:
+                ax.set_ylim(bottom=y_bottom)
+            self._add_legend(ax, loc="upper left")
 
         self._render_figure(
             output_png=output_png,
@@ -2492,15 +2553,67 @@ class PDBScientificPlotter:
         )
         return PDBScientificPlotter._limit_year_column(prepared)
 
+    @staticmethod
+    def _prepare_monomer_xray_rmsd_extremes_table(
+        df: pd.DataFrame,
+    ) -> pd.DataFrame:
+        prepared = PDBScientificPlotter._prepare_typed_table(
+            df=df,
+            required_columns={
+                "entry_id",
+                "year",
+                "best_rmsd_ca_angstrom",
+                "worst_rmsd_ca_angstrom",
+            },
+            column_types={
+                "year": int,
+                "best_rmsd_ca_angstrom": float,
+                "worst_rmsd_ca_angstrom": float,
+            },
+            dataset_name="Monomer X-ray RMSD extremes CSV",
+        )
+        return PDBScientificPlotter._limit_year_column(prepared)
+
+    @staticmethod
+    def _xray_rmsd_extremes_yearly_table(
+        rmsd_table: pd.DataFrame,
+        extremes_table: pd.DataFrame,
+        statistic: str,
+    ) -> pd.DataFrame:
+        regular = (
+            rmsd_table.groupby("year", as_index=True)["rmsd_ca_angstrom"]
+            .agg(statistic)
+            .rename("best_resolution_rmsd")
+        )
+        best = (
+            extremes_table.groupby("year", as_index=True)["best_rmsd_ca_angstrom"]
+            .agg(statistic)
+            .rename("best_rmsd")
+        )
+        worst = (
+            extremes_table.groupby("year", as_index=True)["worst_rmsd_ca_angstrom"]
+            .agg(statistic)
+            .rename("worst_rmsd")
+        )
+        return pd.concat([regular, best, worst], axis=1).sort_index()
+
     def plot_solution_nmr_monomer_xray_rmsd(
         self,
         data_path: Path,
+        extremes_data_path: Path,
         mean_output_png: Path,
         mean_output_svg: Path,
         median_output_png: Path,
         median_output_svg: Path,
+        extremes_mean_output_png: Path,
+        extremes_mean_output_svg: Path,
+        extremes_median_output_png: Path,
+        extremes_median_output_svg: Path,
     ) -> None:
         table = self._prepare_monomer_xray_rmsd_table(self._read_csv(data_path))
+        extremes_table = self._prepare_monomer_xray_rmsd_extremes_table(
+            self._read_csv(extremes_data_path)
+        )
         self._scientific_style()
         yearly_rmsd = (
             table.groupby("year", as_index=True)["rmsd_ca_angstrom"]
@@ -2526,6 +2639,49 @@ class PDBScientificPlotter:
             y_values=yearly_rmsd["median"],
             color=self.config.median_color,
             y_bottom=0.0,
+        )
+        colors = {
+            "best_resolution_rmsd": "#9467bd",
+            "best_rmsd": "#2ca02c",
+            "worst_rmsd": "#d62728",
+        }
+        labels = {
+            "best_resolution_rmsd": "Best resolution X-ray",
+            "best_rmsd": "Minimum RMSD X-ray",
+            "worst_rmsd": "Maximum RMSD X-ray",
+        }
+        draw_order = ["worst_rmsd", "best_rmsd", "best_resolution_rmsd"]
+        self._render_multi_line_series(
+            output_png=extremes_mean_output_png,
+            output_svg=extremes_mean_output_svg,
+            title=self.config.nmr_monomer_xray_rmsd_extremes_mean_title,
+            y_label=self.config.nmr_monomer_xray_rmsd_extremes_y_label,
+            table=self._xray_rmsd_extremes_yearly_table(
+                rmsd_table=table,
+                extremes_table=extremes_table,
+                statistic="mean",
+            ),
+            colors=colors,
+            labels=labels,
+            y_bottom=0.0,
+            use_step=True,
+            draw_order=draw_order,
+        )
+        self._render_multi_line_series(
+            output_png=extremes_median_output_png,
+            output_svg=extremes_median_output_svg,
+            title=self.config.nmr_monomer_xray_rmsd_extremes_median_title,
+            y_label=self.config.nmr_monomer_xray_rmsd_extremes_y_label,
+            table=self._xray_rmsd_extremes_yearly_table(
+                rmsd_table=table,
+                extremes_table=extremes_table,
+                statistic="median",
+            ),
+            colors=colors,
+            labels=labels,
+            y_bottom=0.0,
+            use_step=True,
+            draw_order=draw_order,
         )
 
 
@@ -2665,6 +2821,12 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("data/solution_nmr_monomer_xray_rmsd.csv"),
         help="Input CSV for SOLUTION NMR monomer X-ray RMSD plot.",
+    )
+    parser.add_argument(
+        "--nmr-monomer-xray-rmsd-extremes-input",
+        type=Path,
+        default=Path("data/solution_nmr_monomer_xray_rmsd_extremes.csv"),
+        help="Input CSV for SOLUTION NMR monomer X-ray RMSD extremes plots.",
     )
 
     parser.add_argument(
@@ -3182,6 +3344,30 @@ def parse_args() -> argparse.Namespace:
         help="Output SVG for monomer X-ray median RMSD(CA) by year plot.",
     )
     parser.add_argument(
+        "--nmr-monomer-xray-rmsd-extremes-mean-output-png",
+        type=Path,
+        default=Path("figures/solution_nmr_monomer_xray_rmsd_extremes_mean_by_year.png"),
+        help="Output PNG for monomer X-ray RMSD extremes yearly-mean comparison plot.",
+    )
+    parser.add_argument(
+        "--nmr-monomer-xray-rmsd-extremes-mean-output-svg",
+        type=Path,
+        default=Path("figures/solution_nmr_monomer_xray_rmsd_extremes_mean_by_year.svg"),
+        help="Output SVG for monomer X-ray RMSD extremes yearly-mean comparison plot.",
+    )
+    parser.add_argument(
+        "--nmr-monomer-xray-rmsd-extremes-median-output-png",
+        type=Path,
+        default=Path("figures/solution_nmr_monomer_xray_rmsd_extremes_median_by_year.png"),
+        help="Output PNG for monomer X-ray RMSD extremes yearly-median comparison plot.",
+    )
+    parser.add_argument(
+        "--nmr-monomer-xray-rmsd-extremes-median-output-svg",
+        type=Path,
+        default=Path("figures/solution_nmr_monomer_xray_rmsd_extremes_median_by_year.svg"),
+        help="Output SVG for monomer X-ray RMSD extremes yearly-median comparison plot.",
+    )
+    parser.add_argument(
         "--no-svg",
         action="store_true",
         help="Disable SVG output generation.",
@@ -3414,10 +3600,23 @@ def main() -> None:
     if PlotKind.SOLUTION_NMR_MONOMER_XRAY_RMSD in args.plots:
         plotter.plot_solution_nmr_monomer_xray_rmsd(
             data_path=args.nmr_monomer_xray_rmsd_input,
+            extremes_data_path=args.nmr_monomer_xray_rmsd_extremes_input,
             mean_output_png=args.nmr_monomer_xray_rmsd_output_png,
             mean_output_svg=args.nmr_monomer_xray_rmsd_output_svg,
             median_output_png=args.nmr_monomer_xray_median_rmsd_output_png,
             median_output_svg=args.nmr_monomer_xray_median_rmsd_output_svg,
+            extremes_mean_output_png=(
+                args.nmr_monomer_xray_rmsd_extremes_mean_output_png
+            ),
+            extremes_mean_output_svg=(
+                args.nmr_monomer_xray_rmsd_extremes_mean_output_svg
+            ),
+            extremes_median_output_png=(
+                args.nmr_monomer_xray_rmsd_extremes_median_output_png
+            ),
+            extremes_median_output_svg=(
+                args.nmr_monomer_xray_rmsd_extremes_median_output_svg
+            ),
         )
 
 

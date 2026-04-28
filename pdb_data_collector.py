@@ -14,6 +14,7 @@ import warnings
 import requests
 import numpy as np
 from Bio.Align import PairwiseAligner
+from Bio import BiopythonWarning
 from Bio.PDB import MMCIFParser, PDBIO, PDBParser, Select
 from Bio.PDB.DSSP import DSSP as BioDSSP
 from Bio.PDB.PDBExceptions import PDBConstructionWarning
@@ -99,6 +100,9 @@ class DatasetKind(str, Enum):
     SOLUTION_NMR_MONOMER_QUALITY = "solution_nmr_monomer_quality"
     SOLUTION_NMR_MONOMER_XRAY_HOMOLOGS = "solution_nmr_monomer_xray_homologs"
     SOLUTION_NMR_MONOMER_XRAY_RMSD = "solution_nmr_monomer_xray_rmsd"
+    SOLUTION_NMR_MONOMER_XRAY_RMSD_EXTREMES = (
+        "solution_nmr_monomer_xray_rmsd_extremes"
+    )
 
 
 @dataclass(frozen=True)
@@ -396,6 +400,36 @@ class SolutionNMRMonomerXrayRmsdRecord:
 
 
 @dataclass(frozen=True)
+class SolutionNMRMonomerXrayRmsdExtremesRecord:
+    entry_id: str
+    year: int
+    sequence_identity_percent: int
+    nmr_chain_id: str
+    nmr_core_start_seq_id: int | None
+    nmr_core_end_seq_id: int | None
+    nmr_query_sequence_length: int
+    xray_homolog_count: int
+    successful_xray_homolog_count: int
+    best_xray_homolog_entity_id: str
+    best_xray_entry_id: str
+    best_xray_chain_id: str
+    best_xray_resolution_angstrom: float
+    best_xray_core_start_seq_id: int | None
+    best_xray_core_end_seq_id: int | None
+    best_n_common_ca: int
+    best_rmsd_ca_angstrom: float
+    worst_xray_homolog_entity_id: str
+    worst_xray_entry_id: str
+    worst_xray_chain_id: str
+    worst_xray_resolution_angstrom: float
+    worst_xray_core_start_seq_id: int | None
+    worst_xray_core_end_seq_id: int | None
+    worst_n_common_ca: int
+    worst_rmsd_ca_angstrom: float
+    rmsd_delta_angstrom: float
+
+
+@dataclass(frozen=True)
 class XrayPolymerEntityCandidateRecord:
     polymer_entity_id: str
     entry_id: str
@@ -605,9 +639,7 @@ def _coerce_structure_chain_ids_for_pdbio(structure: Any) -> dict[str, str]:
         chain_id_map[original_id] = mapped_id
         used_ids.add(mapped_id)
 
-    for model in structure:
-        for chain in model:
-            chain.id = chain_id_map[str(chain.id)]
+    _apply_chain_id_map_without_transient_conflicts(structure, chain_id_map)
     return {
         original_id: mapped_id
         for original_id, mapped_id in chain_id_map.items()
@@ -648,12 +680,33 @@ def _coerce_selected_structure_chain_ids_for_pdbio(
         chain_id_map[original_id] = mapped_id
         used_ids.add(mapped_id)
 
+    _apply_chain_id_map_without_transient_conflicts(structure, chain_id_map)
+    return chain_id_map, selected_chain_object_ids
+
+
+def _apply_chain_id_map_without_transient_conflicts(
+    structure: Any,
+    chain_id_map: dict[str, str],
+) -> None:
+    chain_objects: list[tuple[Any, str]] = []
     for model in structure:
         for chain in model:
             original_id = str(chain.id)
             if original_id in chain_id_map:
-                chain.id = chain_id_map[original_id]
-    return chain_id_map, selected_chain_object_ids
+                chain_objects.append((chain, original_id))
+
+    temporary_ids: dict[int, str] = {}
+    for index, (chain, _) in enumerate(chain_objects):
+        temporary_id = f"__tmp_chain_{index}__"
+        temporary_ids[id(chain)] = temporary_id
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", BiopythonWarning)
+            chain.id = temporary_id
+
+    for chain, original_id in chain_objects:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", BiopythonWarning)
+            chain.id = chain_id_map[original_id]
 
 
 def load_cached_chain_id_map(cache_dir: Path, entry_id: str) -> dict[str, str]:
@@ -4978,6 +5031,118 @@ class SolutionNMRMonomerXrayRmsdCollector:
             entry_id=entry_id,
         )
 
+    def _compute_candidate_record(
+        self,
+        homolog: SolutionNMRMonomerXrayHomologRecord,
+        nmr_chain_id: str,
+        nmr_pdb_path: Path,
+        parsed_nmr_chain_id: str,
+        candidate: XrayPolymerEntityCandidateRecord,
+    ) -> SolutionNMRMonomerXrayRmsdRecord | None:
+        try:
+            (
+                xray_pdb_path,
+                xray_chain_map,
+            ) = download_pdb_chain_subset_if_needed(
+                session=self.client.session,
+                config=self.config,
+                cache_dir=self.cache_dir,
+                entry_id=candidate.entry_id,
+                chain_ids=candidate.chain_ids,
+            )
+        except Exception as exc:
+            LOGGER.debug(
+                "Skipping X-ray RMSD candidate %s for %s: %s",
+                candidate.polymer_entity_id,
+                homolog.entry_id,
+                exc,
+            )
+            return None
+
+        best_chain_result: tuple[str, int, float, int, int, int, int] | None = None
+        for xray_chain_id in candidate.chain_ids:
+            parsed_xray_chain_id = xray_chain_map.get(
+                xray_chain_id,
+                xray_chain_id,
+            )
+            try:
+                rmsd_result = self._compute_ca_rmsd_to_xray(
+                    nmr_pdb_path=nmr_pdb_path,
+                    nmr_chain_id=parsed_nmr_chain_id,
+                    nmr_core_start_seq_id=homolog.nmr_core_start_seq_id,
+                    nmr_core_end_seq_id=homolog.nmr_core_end_seq_id,
+                    xray_pdb_path=xray_pdb_path,
+                    xray_chain_id=parsed_xray_chain_id,
+                    sequence_identity_percent=self.sequence_identity_percent,
+                )
+            except Exception as exc:
+                LOGGER.debug(
+                    "Skipping X-ray RMSD chain %s/%s for %s: %s",
+                    candidate.entry_id,
+                    xray_chain_id,
+                    homolog.entry_id,
+                    exc,
+                )
+                continue
+            if rmsd_result is None:
+                continue
+            (
+                n_common_ca,
+                rmsd_ca,
+                _nmr_core_start,
+                _nmr_core_end,
+                xray_core_start,
+                xray_core_end,
+            ) = rmsd_result
+            chain_candidate = (
+                xray_chain_id,
+                n_common_ca,
+                rmsd_ca,
+                homolog.nmr_core_start_seq_id,
+                homolog.nmr_core_end_seq_id,
+                xray_core_start,
+                xray_core_end,
+            )
+            if (
+                best_chain_result is None
+                or chain_candidate[1] > best_chain_result[1]
+                or (
+                    chain_candidate[1] == best_chain_result[1]
+                    and chain_candidate[2] < best_chain_result[2]
+                )
+            ):
+                best_chain_result = chain_candidate
+
+        if best_chain_result is None:
+            return None
+        (
+            xray_chain_id,
+            n_common_ca,
+            rmsd_ca,
+            _nmr_core_start,
+            _nmr_core_end,
+            xray_core_start,
+            xray_core_end,
+        ) = best_chain_result
+        return SolutionNMRMonomerXrayRmsdRecord(
+            entry_id=homolog.entry_id,
+            year=homolog.year,
+            sequence_identity_percent=self.sequence_identity_percent,
+            nmr_chain_id=nmr_chain_id,
+            nmr_core_start_seq_id=homolog.nmr_core_start_seq_id,
+            nmr_core_end_seq_id=homolog.nmr_core_end_seq_id,
+            nmr_query_sequence_length=homolog.nmr_query_sequence_length,
+            xray_homolog_entity_id=candidate.polymer_entity_id,
+            xray_homolog_count=len(homolog.xray_homolog_entity_ids),
+            xray_entry_id=candidate.entry_id,
+            xray_chain_id=xray_chain_id,
+            xray_core_start_seq_id=xray_core_start,
+            xray_core_end_seq_id=xray_core_end,
+            xray_resolution_angstrom=candidate.resolution_angstrom,
+            n_common_ca=n_common_ca,
+            rmsd_ca_angstrom=rmsd_ca,
+        )
+
     @staticmethod
     def _compute_ca_rmsd_to_xray(
         nmr_pdb_path: Path,
@@ -5081,110 +5246,15 @@ class SolutionNMRMonomerXrayRmsdCollector:
             parsed_nmr_chain_id = nmr_chain_map.get(nmr_chain_id, nmr_chain_id)
 
             for candidate in candidates:
-                try:
-                    (
-                        xray_pdb_path,
-                        xray_chain_map,
-                    ) = download_pdb_chain_subset_if_needed(
-                        session=self.client.session,
-                        config=self.config,
-                        cache_dir=self.cache_dir,
-                        entry_id=candidate.entry_id,
-                        chain_ids=candidate.chain_ids,
-                    )
-                except Exception as exc:
-                    LOGGER.debug(
-                        "Skipping X-ray RMSD candidate %s for %s: %s",
-                        candidate.polymer_entity_id,
-                        homolog.entry_id,
-                        exc,
-                    )
-                    continue
-                best_chain_result: tuple[
-                    str, int, float, int, int, int, int
-                ] | None = None
-                for xray_chain_id in candidate.chain_ids:
-                    parsed_xray_chain_id = xray_chain_map.get(
-                        xray_chain_id,
-                        xray_chain_id,
-                    )
-                    try:
-                        rmsd_result = self._compute_ca_rmsd_to_xray(
-                            nmr_pdb_path=nmr_pdb_path,
-                            nmr_chain_id=parsed_nmr_chain_id,
-                            nmr_core_start_seq_id=homolog.nmr_core_start_seq_id,
-                            nmr_core_end_seq_id=homolog.nmr_core_end_seq_id,
-                            xray_pdb_path=xray_pdb_path,
-                            xray_chain_id=parsed_xray_chain_id,
-                            sequence_identity_percent=self.sequence_identity_percent,
-                        )
-                    except Exception as exc:
-                        LOGGER.debug(
-                            "Skipping X-ray RMSD chain %s/%s for %s: %s",
-                            candidate.entry_id,
-                            xray_chain_id,
-                            homolog.entry_id,
-                            exc,
-                        )
-                        continue
-                    if rmsd_result is None:
-                        continue
-                    (
-                        n_common_ca,
-                        rmsd_ca,
-                        nmr_core_start,
-                        nmr_core_end,
-                        xray_core_start,
-                        xray_core_end,
-                    ) = rmsd_result
-                    chain_candidate = (
-                        xray_chain_id,
-                        n_common_ca,
-                        rmsd_ca,
-                        nmr_core_start,
-                        nmr_core_end,
-                        xray_core_start,
-                        xray_core_end,
-                    )
-                    if (
-                        best_chain_result is None
-                        or chain_candidate[1] > best_chain_result[1]
-                        or (
-                            chain_candidate[1] == best_chain_result[1]
-                            and chain_candidate[2] < best_chain_result[2]
-                        )
-                    ):
-                        best_chain_result = chain_candidate
-
-                if best_chain_result is None:
-                    continue
-                (
-                    xray_chain_id,
-                    n_common_ca,
-                    rmsd_ca,
-                    nmr_core_start,
-                    nmr_core_end,
-                    xray_core_start,
-                    xray_core_end,
-                ) = best_chain_result
-                return SolutionNMRMonomerXrayRmsdRecord(
-                    entry_id=homolog.entry_id,
-                    year=homolog.year,
-                    sequence_identity_percent=self.sequence_identity_percent,
+                record = self._compute_candidate_record(
+                    homolog=homolog,
                     nmr_chain_id=nmr_chain_id,
-                    nmr_core_start_seq_id=homolog.nmr_core_start_seq_id,
-                    nmr_core_end_seq_id=homolog.nmr_core_end_seq_id,
-                    nmr_query_sequence_length=homolog.nmr_query_sequence_length,
-                    xray_homolog_entity_id=candidate.polymer_entity_id,
-                    xray_homolog_count=len(homolog.xray_homolog_entity_ids),
-                    xray_entry_id=candidate.entry_id,
-                    xray_chain_id=xray_chain_id,
-                    xray_core_start_seq_id=xray_core_start,
-                    xray_core_end_seq_id=xray_core_end,
-                    xray_resolution_angstrom=candidate.resolution_angstrom,
-                    n_common_ca=n_common_ca,
-                    rmsd_ca_angstrom=rmsd_ca,
+                    nmr_pdb_path=nmr_pdb_path,
+                    parsed_nmr_chain_id=parsed_nmr_chain_id,
+                    candidate=candidate,
                 )
+                if record is not None:
+                    return record
             return None
         except Exception as exc:
             LOGGER.warning(
@@ -5192,13 +5262,108 @@ class SolutionNMRMonomerXrayRmsdCollector:
             )
             return None
 
-    def collect(
+    def _compute_extremes_record(
         self,
-        max_entries: int | None = None,
-        skip_entry_ids: set[str] | None = None,
-        on_record: Callable[[SolutionNMRMonomerXrayRmsdRecord], None] | None = None,
-    ) -> list[SolutionNMRMonomerXrayRmsdRecord]:
-        skip_entry_ids = skip_entry_ids or set()
+        homolog: SolutionNMRMonomerXrayHomologRecord,
+        nmr_chain_id: str,
+        candidates: tuple[XrayPolymerEntityCandidateRecord, ...],
+    ) -> SolutionNMRMonomerXrayRmsdExtremesRecord | None:
+        if (
+            homolog.nmr_core_start_seq_id is None
+            or homolog.nmr_core_end_seq_id is None
+            or not candidates
+        ):
+            return None
+
+        try:
+            nmr_pdb_path = self._download_pdb_if_needed(homolog.entry_id)
+            nmr_chain_map = load_cached_chain_id_map(self.cache_dir, homolog.entry_id)
+            parsed_nmr_chain_id = nmr_chain_map.get(nmr_chain_id, nmr_chain_id)
+
+            candidate_records: list[SolutionNMRMonomerXrayRmsdRecord] = []
+            for candidate in candidates:
+                record = self._compute_candidate_record(
+                    homolog=homolog,
+                    nmr_chain_id=nmr_chain_id,
+                    nmr_pdb_path=nmr_pdb_path,
+                    parsed_nmr_chain_id=parsed_nmr_chain_id,
+                    candidate=candidate,
+                )
+                if record is not None:
+                    candidate_records.append(record)
+            if not candidate_records:
+                return None
+
+            best = min(
+                candidate_records,
+                key=lambda record: (
+                    record.rmsd_ca_angstrom,
+                    -record.n_common_ca,
+                    record.xray_resolution_angstrom,
+                    record.xray_entry_id,
+                    record.xray_homolog_entity_id,
+                ),
+            )
+            worst = max(
+                candidate_records,
+                key=lambda record: (
+                    record.rmsd_ca_angstrom,
+                    record.n_common_ca,
+                    -record.xray_resolution_angstrom,
+                    record.xray_entry_id,
+                    record.xray_homolog_entity_id,
+                ),
+            )
+            return SolutionNMRMonomerXrayRmsdExtremesRecord(
+                entry_id=homolog.entry_id,
+                year=homolog.year,
+                sequence_identity_percent=self.sequence_identity_percent,
+                nmr_chain_id=nmr_chain_id,
+                nmr_core_start_seq_id=homolog.nmr_core_start_seq_id,
+                nmr_core_end_seq_id=homolog.nmr_core_end_seq_id,
+                nmr_query_sequence_length=homolog.nmr_query_sequence_length,
+                xray_homolog_count=len(homolog.xray_homolog_entity_ids),
+                successful_xray_homolog_count=len(candidate_records),
+                best_xray_homolog_entity_id=best.xray_homolog_entity_id,
+                best_xray_entry_id=best.xray_entry_id,
+                best_xray_chain_id=best.xray_chain_id,
+                best_xray_resolution_angstrom=best.xray_resolution_angstrom,
+                best_xray_core_start_seq_id=best.xray_core_start_seq_id,
+                best_xray_core_end_seq_id=best.xray_core_end_seq_id,
+                best_n_common_ca=best.n_common_ca,
+                best_rmsd_ca_angstrom=best.rmsd_ca_angstrom,
+                worst_xray_homolog_entity_id=worst.xray_homolog_entity_id,
+                worst_xray_entry_id=worst.xray_entry_id,
+                worst_xray_chain_id=worst.xray_chain_id,
+                worst_xray_resolution_angstrom=worst.xray_resolution_angstrom,
+                worst_xray_core_start_seq_id=worst.xray_core_start_seq_id,
+                worst_xray_core_end_seq_id=worst.xray_core_end_seq_id,
+                worst_n_common_ca=worst.n_common_ca,
+                worst_rmsd_ca_angstrom=worst.rmsd_ca_angstrom,
+                rmsd_delta_angstrom=(
+                    worst.rmsd_ca_angstrom - best.rmsd_ca_angstrom
+                ),
+            )
+        except Exception as exc:
+            LOGGER.warning(
+                "X-ray RMSD extremes calculation failed for %s: %s",
+                homolog.entry_id,
+                exc,
+            )
+            return None
+
+    def _prepare_work_items(
+        self,
+        max_entries: int | None,
+        skip_entry_ids: set[str],
+        progress_prefix: str,
+    ) -> list[
+        tuple[
+            SolutionNMRMonomerXrayHomologRecord,
+            str,
+            tuple[XrayPolymerEntityCandidateRecord, ...],
+        ]
+    ]:
         filtered_homologs = [
             record
             for record in self.homolog_records
@@ -5220,7 +5385,7 @@ class SolutionNMRMonomerXrayRmsdCollector:
             batches=list(chunked(entry_ids, self.config.graphql_batch_size)),
             max_workers=self.config.max_workers,
             fetch_fn=self.client.fetch_solution_nmr_monomer_xray_homolog_seed_records_for_ids,
-            progress_label="SOLUTION NMR X-ray RMSD NMR chain lookup",
+            progress_label=f"{progress_prefix} NMR chain lookup",
         ):
             for seed in batch_seeds:
                 chain_by_entry_id[seed.entry_id] = seed.chain_id
@@ -5237,7 +5402,7 @@ class SolutionNMRMonomerXrayRmsdCollector:
             batches=list(chunked(xray_entity_ids, self.config.graphql_batch_size)),
             max_workers=self.config.max_workers,
             fetch_fn=self.client.fetch_xray_polymer_entity_candidates_for_ids,
-            progress_label="SOLUTION NMR X-ray RMSD X-ray candidate metadata",
+            progress_label=f"{progress_prefix} X-ray candidate metadata",
         ):
             for candidate in batch_candidates:
                 candidate_by_entity_id[candidate.polymer_entity_id] = candidate
@@ -5272,10 +5437,25 @@ class SolutionNMRMonomerXrayRmsdCollector:
             work_items.append((homolog, nmr_chain_id, candidates))
 
         LOGGER.info(
-            "SOLUTION NMR X-ray RMSD %d%%: entries to process=%d, unique X-ray entities=%d",
+            "%s %d%%: entries to process=%d, unique X-ray entities=%d",
+            progress_prefix,
             self.sequence_identity_percent,
             len(work_items),
             len(candidate_by_entity_id),
+        )
+        return work_items
+
+    def collect(
+        self,
+        max_entries: int | None = None,
+        skip_entry_ids: set[str] | None = None,
+        on_record: Callable[[SolutionNMRMonomerXrayRmsdRecord], None] | None = None,
+    ) -> list[SolutionNMRMonomerXrayRmsdRecord]:
+        skip_entry_ids = skip_entry_ids or set()
+        work_items = self._prepare_work_items(
+            max_entries=max_entries,
+            skip_entry_ids=skip_entry_ids,
+            progress_prefix="SOLUTION NMR X-ray RMSD",
         )
 
         records: list[SolutionNMRMonomerXrayRmsdRecord] = []
@@ -5303,6 +5483,52 @@ class SolutionNMRMonomerXrayRmsdCollector:
                 if total > 0 and (completed % 50 == 0 or completed == total):
                     LOGGER.info(
                         "SOLUTION NMR X-ray RMSD %d%%: processed %d/%d entries",
+                        self.sequence_identity_percent,
+                        completed,
+                        total,
+                    )
+
+        return sorted(records, key=lambda r: (r.year, r.entry_id))
+
+    def collect_extremes(
+        self,
+        max_entries: int | None = None,
+        skip_entry_ids: set[str] | None = None,
+        on_record: Callable[[SolutionNMRMonomerXrayRmsdExtremesRecord], None]
+        | None = None,
+    ) -> list[SolutionNMRMonomerXrayRmsdExtremesRecord]:
+        skip_entry_ids = skip_entry_ids or set()
+        work_items = self._prepare_work_items(
+            max_entries=max_entries,
+            skip_entry_ids=skip_entry_ids,
+            progress_prefix="SOLUTION NMR X-ray RMSD extremes",
+        )
+
+        records: list[SolutionNMRMonomerXrayRmsdExtremesRecord] = []
+        with ThreadPoolExecutor(max_workers=self.rmsd_workers) as executor:
+            future_map = {
+                executor.submit(
+                    self._compute_extremes_record,
+                    homolog=homolog,
+                    nmr_chain_id=nmr_chain_id,
+                    candidates=candidates,
+                ): idx
+                for idx, (homolog, nmr_chain_id, candidates) in enumerate(
+                    work_items, start=1
+                )
+            }
+            total = len(future_map)
+            completed = 0
+            for future in as_completed(future_map):
+                record = future.result()
+                if record is not None:
+                    records.append(record)
+                    if on_record is not None:
+                        on_record(record)
+                completed += 1
+                if total > 0 and (completed % 50 == 0 or completed == total):
+                    LOGGER.info(
+                        "SOLUTION NMR X-ray RMSD extremes %d%%: processed %d/%d entries",
                         self.sequence_identity_percent,
                         completed,
                         total,
@@ -6658,6 +6884,184 @@ def write_solution_nmr_monomer_xray_rmsd_csv(
     )
 
 
+SOLUTION_NMR_MONOMER_XRAY_RMSD_EXTREMES_HEADER: tuple[str, ...] = (
+    "entry_id",
+    "year",
+    "sequence_identity_percent",
+    "nmr_chain_id",
+    "nmr_core_start_seq_id",
+    "nmr_core_end_seq_id",
+    "nmr_query_sequence_length",
+    "xray_homolog_count",
+    "successful_xray_homolog_count",
+    "best_xray_homolog_entity_id",
+    "best_xray_entry_id",
+    "best_xray_chain_id",
+    "best_xray_resolution_angstrom",
+    "best_xray_core_start_seq_id",
+    "best_xray_core_end_seq_id",
+    "best_n_common_ca",
+    "best_rmsd_ca_angstrom",
+    "worst_xray_homolog_entity_id",
+    "worst_xray_entry_id",
+    "worst_xray_chain_id",
+    "worst_xray_resolution_angstrom",
+    "worst_xray_core_start_seq_id",
+    "worst_xray_core_end_seq_id",
+    "worst_n_common_ca",
+    "worst_rmsd_ca_angstrom",
+    "rmsd_delta_angstrom",
+)
+
+
+def _solution_nmr_monomer_xray_rmsd_extremes_csv_row(
+    record: SolutionNMRMonomerXrayRmsdExtremesRecord,
+) -> tuple[Any, ...]:
+    return (
+        record.entry_id,
+        record.year,
+        record.sequence_identity_percent,
+        record.nmr_chain_id,
+        record.nmr_core_start_seq_id if record.nmr_core_start_seq_id is not None else "",
+        record.nmr_core_end_seq_id if record.nmr_core_end_seq_id is not None else "",
+        record.nmr_query_sequence_length,
+        record.xray_homolog_count,
+        record.successful_xray_homolog_count,
+        record.best_xray_homolog_entity_id,
+        record.best_xray_entry_id,
+        record.best_xray_chain_id,
+        f"{record.best_xray_resolution_angstrom:.4f}",
+        (
+            record.best_xray_core_start_seq_id
+            if record.best_xray_core_start_seq_id is not None
+            else ""
+        ),
+        (
+            record.best_xray_core_end_seq_id
+            if record.best_xray_core_end_seq_id is not None
+            else ""
+        ),
+        record.best_n_common_ca,
+        f"{record.best_rmsd_ca_angstrom:.4f}",
+        record.worst_xray_homolog_entity_id,
+        record.worst_xray_entry_id,
+        record.worst_xray_chain_id,
+        f"{record.worst_xray_resolution_angstrom:.4f}",
+        (
+            record.worst_xray_core_start_seq_id
+            if record.worst_xray_core_start_seq_id is not None
+            else ""
+        ),
+        (
+            record.worst_xray_core_end_seq_id
+            if record.worst_xray_core_end_seq_id is not None
+            else ""
+        ),
+        record.worst_n_common_ca,
+        f"{record.worst_rmsd_ca_angstrom:.4f}",
+        f"{record.rmsd_delta_angstrom:.4f}",
+    )
+
+
+def read_solution_nmr_monomer_xray_rmsd_extremes_csv(
+    input_path: Path,
+) -> list[SolutionNMRMonomerXrayRmsdExtremesRecord]:
+    if not input_path.exists():
+        return []
+    records: list[SolutionNMRMonomerXrayRmsdExtremesRecord] = []
+    with input_path.open("r", newline="", encoding="utf-8") as csvfile:
+        reader = csv.DictReader(csvfile)
+        for row in reader:
+            if not row:
+                continue
+            nmr_core_start_raw = row.get("nmr_core_start_seq_id")
+            nmr_core_end_raw = row.get("nmr_core_end_seq_id")
+            best_core_start_raw = row.get("best_xray_core_start_seq_id")
+            best_core_end_raw = row.get("best_xray_core_end_seq_id")
+            worst_core_start_raw = row.get("worst_xray_core_start_seq_id")
+            worst_core_end_raw = row.get("worst_xray_core_end_seq_id")
+            records.append(
+                SolutionNMRMonomerXrayRmsdExtremesRecord(
+                    entry_id=str(row["entry_id"]),
+                    year=int(row["year"]),
+                    sequence_identity_percent=int(row["sequence_identity_percent"]),
+                    nmr_chain_id=str(row["nmr_chain_id"]),
+                    nmr_core_start_seq_id=(
+                        int(nmr_core_start_raw)
+                        if nmr_core_start_raw not in {None, ""}
+                        else None
+                    ),
+                    nmr_core_end_seq_id=(
+                        int(nmr_core_end_raw)
+                        if nmr_core_end_raw not in {None, ""}
+                        else None
+                    ),
+                    nmr_query_sequence_length=int(
+                        row.get("nmr_query_sequence_length") or 0
+                    ),
+                    xray_homolog_count=int(row.get("xray_homolog_count") or 0),
+                    successful_xray_homolog_count=int(
+                        row.get("successful_xray_homolog_count") or 0
+                    ),
+                    best_xray_homolog_entity_id=str(
+                        row["best_xray_homolog_entity_id"]
+                    ),
+                    best_xray_entry_id=str(row["best_xray_entry_id"]),
+                    best_xray_chain_id=str(row["best_xray_chain_id"]),
+                    best_xray_resolution_angstrom=float(
+                        row["best_xray_resolution_angstrom"]
+                    ),
+                    best_xray_core_start_seq_id=(
+                        int(best_core_start_raw)
+                        if best_core_start_raw not in {None, ""}
+                        else None
+                    ),
+                    best_xray_core_end_seq_id=(
+                        int(best_core_end_raw)
+                        if best_core_end_raw not in {None, ""}
+                        else None
+                    ),
+                    best_n_common_ca=int(row["best_n_common_ca"]),
+                    best_rmsd_ca_angstrom=float(row["best_rmsd_ca_angstrom"]),
+                    worst_xray_homolog_entity_id=str(
+                        row["worst_xray_homolog_entity_id"]
+                    ),
+                    worst_xray_entry_id=str(row["worst_xray_entry_id"]),
+                    worst_xray_chain_id=str(row["worst_xray_chain_id"]),
+                    worst_xray_resolution_angstrom=float(
+                        row["worst_xray_resolution_angstrom"]
+                    ),
+                    worst_xray_core_start_seq_id=(
+                        int(worst_core_start_raw)
+                        if worst_core_start_raw not in {None, ""}
+                        else None
+                    ),
+                    worst_xray_core_end_seq_id=(
+                        int(worst_core_end_raw)
+                        if worst_core_end_raw not in {None, ""}
+                        else None
+                    ),
+                    worst_n_common_ca=int(row["worst_n_common_ca"]),
+                    worst_rmsd_ca_angstrom=float(row["worst_rmsd_ca_angstrom"]),
+                    rmsd_delta_angstrom=float(row["rmsd_delta_angstrom"]),
+                )
+            )
+    return records
+
+
+def write_solution_nmr_monomer_xray_rmsd_extremes_csv(
+    records: list[SolutionNMRMonomerXrayRmsdExtremesRecord],
+    output_path: Path,
+) -> None:
+    write_csv_rows(
+        output_path=output_path,
+        header=list(SOLUTION_NMR_MONOMER_XRAY_RMSD_EXTREMES_HEADER),
+        rows=(
+            _solution_nmr_monomer_xray_rmsd_extremes_csv_row(r) for r in records
+        ),
+    )
+
+
 def parse_dataset_kinds(raw_value: str) -> list[DatasetKind]:
     if raw_value.strip().lower() == "all":
         return [
@@ -6675,6 +7079,7 @@ def parse_dataset_kinds(raw_value: str) -> list[DatasetKind]:
             DatasetKind.SOLUTION_NMR_MONOMER_QUALITY,
             DatasetKind.SOLUTION_NMR_MONOMER_XRAY_HOMOLOGS,
             DatasetKind.SOLUTION_NMR_MONOMER_XRAY_RMSD,
+            DatasetKind.SOLUTION_NMR_MONOMER_XRAY_RMSD_EXTREMES,
         ]
     raw_items = [item.strip() for item in raw_value.split(",") if item.strip()]
     selected: list[DatasetKind] = []
@@ -6704,7 +7109,7 @@ def parse_args() -> argparse.Namespace:
             DatasetKind.SOLUTION_NMR_MONOMER_SECONDARY,
         ],
         help="Comma-separated dataset kinds or 'all'. "
-        "Available: method_counts, membrane_protein_counts, solution_nmr_program_counts, solution_nmr_monomer_program_clusters, solution_nmr_weights, solution_nmr_monomer_secondary, solution_nmr_monomer_secondary_modeled_first_model, solution_nmr_monomer_stride, solution_nmr_monomer_stride_modeled_first_model, solution_nmr_monomer_precision, solution_nmr_monomer_precision_stride_modeled_first_model, solution_nmr_monomer_quality, solution_nmr_monomer_xray_homologs, solution_nmr_monomer_xray_rmsd (default: the first three).",
+        "Available: method_counts, membrane_protein_counts, solution_nmr_program_counts, solution_nmr_monomer_program_clusters, solution_nmr_weights, solution_nmr_monomer_secondary, solution_nmr_monomer_secondary_modeled_first_model, solution_nmr_monomer_stride, solution_nmr_monomer_stride_modeled_first_model, solution_nmr_monomer_precision, solution_nmr_monomer_precision_stride_modeled_first_model, solution_nmr_monomer_quality, solution_nmr_monomer_xray_homologs, solution_nmr_monomer_xray_rmsd, solution_nmr_monomer_xray_rmsd_extremes (default: the first three).",
     )
     parser.add_argument(
         "--counts-output",
@@ -6910,6 +7315,15 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("data/solution_nmr_monomer_xray_rmsd.csv"),
         help="Output CSV path for solution_nmr_monomer_xray_rmsd dataset.",
+    )
+    parser.add_argument(
+        "--solution-nmr-monomer-xray-rmsd-extremes-output",
+        type=Path,
+        default=Path("data/solution_nmr_monomer_xray_rmsd_extremes.csv"),
+        help=(
+            "Output CSV path for solution_nmr_monomer_xray_rmsd_extremes "
+            "dataset."
+        ),
     )
     parser.add_argument(
         "--precision-cache-dir",
@@ -7606,6 +8020,103 @@ def main() -> None:
             "Saved %d records to %s (new: %d, identity=%d%%)",
             len(valid_existing_records) + len(new_records),
             args.solution_nmr_monomer_xray_rmsd_output,
+            len(new_records),
+            args.xray_rmsd_sequence_identity,
+        )
+
+    if DatasetKind.SOLUTION_NMR_MONOMER_XRAY_RMSD_EXTREMES in args.datasets:
+        existing_records: list[SolutionNMRMonomerXrayRmsdExtremesRecord] = []
+        valid_existing_records: list[SolutionNMRMonomerXrayRmsdExtremesRecord] = []
+        skip_entry_ids: set[str] = set()
+        extremes_output_path = Path(
+            args.solution_nmr_monomer_xray_rmsd_extremes_output
+        )
+        homolog_input_path = (
+            Path(args.solution_nmr_monomer_xray_homolog_95_output)
+            if args.xray_rmsd_sequence_identity == 95
+            else Path(args.solution_nmr_monomer_xray_homolog_100_output)
+        )
+        homolog_records = read_solution_nmr_monomer_xray_homolog_csv(
+            homolog_input_path
+        )
+        if not homolog_records:
+            raise SystemExit(
+                "No X-ray homolog records found for X-ray RMSD extremes. Run "
+                "solution_nmr_monomer_xray_homologs first or provide the expected "
+                f"homolog CSV at {homolog_input_path}."
+            )
+        LOGGER.info(
+            "SOLUTION NMR X-ray RMSD extremes %d%%: loaded %d homolog records from %s",
+            args.xray_rmsd_sequence_identity,
+            len(homolog_records),
+            homolog_input_path,
+        )
+        if (
+            not args.xray_rmsd_overwrite
+            and extremes_output_path.exists()
+        ):
+            existing_records = read_solution_nmr_monomer_xray_rmsd_extremes_csv(
+                extremes_output_path
+            )
+            existing_records = [
+                record
+                for record in existing_records
+                if record.sequence_identity_percent == args.xray_rmsd_sequence_identity
+            ]
+            valid_existing_records = [
+                record
+                for record in existing_records
+                if record.best_xray_homolog_entity_id
+                and record.worst_xray_homolog_entity_id
+            ]
+            dropped_existing = len(existing_records) - len(valid_existing_records)
+            skip_entry_ids = {record.entry_id for record in valid_existing_records}
+            LOGGER.info(
+                "SOLUTION NMR X-ray RMSD extremes %d%%: loaded %d existing records for resume (outdated=%d)",
+                args.xray_rmsd_sequence_identity,
+                len(valid_existing_records),
+                dropped_existing,
+            )
+
+        rmsd_collector = SolutionNMRMonomerXrayRmsdCollector(
+            client=client,
+            config=config,
+            cache_dir=Path(args.xray_rmsd_cache_dir),
+            rmsd_workers=args.xray_rmsd_workers,
+            homolog_records=homolog_records,
+            sequence_identity_percent=args.xray_rmsd_sequence_identity,
+        )
+        valid_existing_records = sorted(
+            valid_existing_records, key=lambda r: (r.year, r.entry_id)
+        )
+        extremes_output_path.parent.mkdir(parents=True, exist_ok=True)
+        with extremes_output_path.open("w", newline="", encoding="utf-8") as csvfile:
+            writer = csv.writer(csvfile)
+            writer.writerow(SOLUTION_NMR_MONOMER_XRAY_RMSD_EXTREMES_HEADER)
+            for record in valid_existing_records:
+                writer.writerow(
+                    _solution_nmr_monomer_xray_rmsd_extremes_csv_row(record)
+                )
+            csvfile.flush()
+
+            def _on_xray_rmsd_extremes_record(
+                record: SolutionNMRMonomerXrayRmsdExtremesRecord,
+            ) -> None:
+                writer.writerow(
+                    _solution_nmr_monomer_xray_rmsd_extremes_csv_row(record)
+                )
+                csvfile.flush()
+
+            new_records = rmsd_collector.collect_extremes(
+                max_entries=args.xray_rmsd_max_entries,
+                skip_entry_ids=skip_entry_ids,
+                on_record=_on_xray_rmsd_extremes_record,
+            )
+
+        LOGGER.info(
+            "Saved %d records to %s (new: %d, identity=%d%%)",
+            len(valid_existing_records) + len(new_records),
+            extremes_output_path,
             len(new_records),
             args.xray_rmsd_sequence_identity,
         )
