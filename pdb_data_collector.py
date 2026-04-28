@@ -13,7 +13,6 @@ import time
 import warnings
 import requests
 import numpy as np
-from Bio.Align import PairwiseAligner
 from Bio import BiopythonWarning
 from Bio.PDB import MMCIFParser, PDBIO, PDBParser, Select
 from Bio.PDB.DSSP import DSSP as BioDSSP
@@ -115,6 +114,13 @@ class CollectorConfig:
     timeout_seconds: int = 60
     retries: int = 4
     backoff_seconds: float = 1.3
+
+
+@dataclass(frozen=True)
+class CAResidueRecord:
+    resid: int
+    identity: str
+    is_standard_atom: bool
 
 
 @dataclass(frozen=True)
@@ -1440,8 +1446,26 @@ def parse_first_model_ca_residue_sequence(
     start_seq_id: int | None = None,
     end_seq_id: int | None = None,
 ) -> list[tuple[int, str]]:
+    return [
+        (record.resid, record.identity)
+        for record in parse_first_model_ca_residues(
+            pdb_path=pdb_path,
+            chain_id=chain_id,
+            start_seq_id=start_seq_id,
+            end_seq_id=end_seq_id,
+        )
+    ]
+
+
+def parse_first_model_ca_residues(
+    pdb_path: Path,
+    chain_id: str,
+    start_seq_id: int | None = None,
+    end_seq_id: int | None = None,
+) -> list[CAResidueRecord]:
     residue_order: list[int] = []
-    candidates: dict[int, tuple[str, float, str, str]] = {}
+    candidates: dict[int, tuple[str, float, str, CAResidueRecord]] = {}
+    modres_identity_by_key = _parse_pdb_modres_identity_map(pdb_path)
     has_model_records = False
     in_model = False
 
@@ -1460,7 +1484,7 @@ def parse_first_model_ca_residue_sequence(
                 continue
             if has_model_records and not in_model:
                 continue
-            if not record.startswith("ATOM"):
+            if not (record.startswith("ATOM") or record.startswith("HETATM")):
                 continue
             atom_name = line[12:16].strip()
             if atom_name != "CA":
@@ -1482,16 +1506,43 @@ def parse_first_model_ca_residue_sequence(
             alt_loc = line[16].strip()
             occupancy = _parse_pdb_occupancy(line)
             resname = line[17:20].strip()
-            aa = seq1(resname, custom_map={"MSE": "M"}, undef_code="X")
+            is_standard_atom = record.startswith("ATOM")
+            if is_standard_atom:
+                identity = seq1(resname, custom_map={"MSE": "M"}, undef_code="X")
+            else:
+                identity = modres_identity_by_key.get(
+                    (atom_chain, resid, insertion_code, resname),
+                    modres_identity_by_key.get(
+                        (atom_chain, resid, "", resname),
+                        f"HET:{resname}",
+                    ),
+                )
+            ca_record = CAResidueRecord(
+                resid=resid,
+                identity=identity,
+                is_standard_atom=is_standard_atom,
+            )
 
             if resid not in candidates:
                 residue_order.append(resid)
-                candidates[resid] = (insertion_code, occupancy, alt_loc, aa)
+                candidates[resid] = (insertion_code, occupancy, alt_loc, ca_record)
                 continue
 
-            existing_insertion_code, existing_occupancy, existing_alt_loc, _ = (
-                candidates[resid]
-            )
+            (
+                existing_insertion_code,
+                existing_occupancy,
+                existing_alt_loc,
+                existing_record,
+            ) = candidates[resid]
+            if ca_record.is_standard_atom != existing_record.is_standard_atom:
+                if ca_record.is_standard_atom:
+                    candidates[resid] = (
+                        insertion_code,
+                        occupancy,
+                        alt_loc,
+                        ca_record,
+                    )
+                continue
             if _is_better_ca_candidate(
                 new_insertion_code=insertion_code,
                 new_occupancy=occupancy,
@@ -1500,57 +1551,159 @@ def parse_first_model_ca_residue_sequence(
                 current_occupancy=existing_occupancy,
                 current_alt_loc=existing_alt_loc,
             ):
-                candidates[resid] = (insertion_code, occupancy, alt_loc, aa)
+                candidates[resid] = (insertion_code, occupancy, alt_loc, ca_record)
 
-    return [(resid, candidates[resid][3]) for resid in residue_order if resid in candidates]
+    return [candidates[resid][3] for resid in residue_order if resid in candidates]
 
 
-def align_modeled_ca_sequences(
-    nmr_residues: list[tuple[int, str]],
-    xray_residues: list[tuple[int, str]],
+def _parse_pdb_modres_identity_map(
+    pdb_path: Path,
+) -> dict[tuple[str, int, str, str], str]:
+    identity_by_key: dict[tuple[str, int, str, str], str] = {}
+    with pdb_path.open("r", encoding="utf-8", errors="ignore") as handle:
+        for line in handle:
+            if not line.startswith("MODRES"):
+                continue
+            resname = line[12:15].strip()
+            chain_id = line[16].strip()
+            seq_num_text = line[18:22].strip()
+            insertion_code = line[22].strip()
+            standard_resname = line[24:27].strip()
+            if not (resname and chain_id and seq_num_text and standard_resname):
+                parts = line.split()
+                if len(parts) < 6:
+                    continue
+                resname = parts[2].strip()
+                chain_id = parts[3].strip()
+                seq_num_text = parts[4].strip()
+                insertion_code = ""
+                standard_resname = parts[5].strip()
+            try:
+                seq_num = int(seq_num_text)
+            except ValueError:
+                continue
+            identity = seq1(
+                standard_resname,
+                custom_map={"MSE": "M"},
+                undef_code="X",
+            )
+            if identity == "X":
+                continue
+            identity_by_key[(chain_id, seq_num, insertion_code, resname)] = identity
+    return identity_by_key
+
+
+def find_modeled_ca_core_identity_matches(
+    nmr_residues: list[CAResidueRecord],
+    xray_residues: list[CAResidueRecord],
     sequence_identity_percent: int,
-    min_query_coverage: float = 0.8,
-) -> list[tuple[int, int]] | None:
+) -> list[list[tuple[CAResidueRecord, CAResidueRecord]]]:
     if not nmr_residues or not xray_residues:
-        return None
-    nmr_sequence = "".join(aa for _, aa in nmr_residues)
-    xray_sequence = "".join(aa for _, aa in xray_residues)
-    if not nmr_sequence or not xray_sequence:
-        return None
+        return []
+    if not 0 <= sequence_identity_percent <= 100:
+        raise ValueError("sequence_identity_percent must be between 0 and 100")
+    nmr_identities = [record.identity for record in nmr_residues]
+    xray_identities = [record.identity for record in xray_residues]
+    query_length = len(nmr_identities)
+    if query_length > len(xray_identities):
+        if sequence_identity_percent == 100:
+            return []
+    if sequence_identity_percent < 100:
+        match = _find_gapped_modeled_ca_core_identity_match(
+            nmr_residues=nmr_residues,
+            xray_residues=xray_residues,
+            sequence_identity_percent=sequence_identity_percent,
+        )
+        return [match] if match else []
+    if query_length > len(xray_identities):
+        return []
 
-    aligner = PairwiseAligner()
-    aligner.mode = "local"
-    aligner.match_score = 2.0
-    aligner.mismatch_score = -1.0
-    aligner.open_gap_score = -10.0
-    aligner.extend_gap_score = -1.0
-
-    alignments = aligner.align(nmr_sequence, xray_sequence)
-    if not alignments:
-        return None
-    alignment = alignments[0]
-
-    pairs: list[tuple[int, int]] = []
-    matches = 0
-    for nmr_block, xray_block in zip(alignment.aligned[0], alignment.aligned[1]):
-        nmr_start, nmr_end = int(nmr_block[0]), int(nmr_block[1])
-        xray_start, xray_end = int(xray_block[0]), int(xray_block[1])
-        if nmr_end - nmr_start != xray_end - xray_start:
+    matches: list[list[tuple[CAResidueRecord, CAResidueRecord]]] = []
+    for start_idx in range(0, len(xray_identities) - query_length + 1):
+        end_idx = start_idx + query_length
+        match_count = sum(
+            1
+            for nmr_identity, xray_identity in zip(
+                nmr_identities,
+                xray_identities[start_idx:end_idx],
+            )
+            if nmr_identity == xray_identity
+        )
+        if match_count * 100 < sequence_identity_percent * query_length:
             continue
-        for nmr_idx, xray_idx in zip(
-            range(nmr_start, nmr_end),
-            range(xray_start, xray_end),
-        ):
-            pairs.append((nmr_residues[nmr_idx][0], xray_residues[xray_idx][0]))
-            if nmr_sequence[nmr_idx] == xray_sequence[xray_idx]:
-                matches += 1
+        matches.append(list(zip(nmr_residues, xray_residues[start_idx:end_idx])))
+    return matches
 
-    aligned_len = len(pairs)
-    if aligned_len < 3:
+
+def _find_gapped_modeled_ca_core_identity_match(
+    nmr_residues: list[CAResidueRecord],
+    xray_residues: list[CAResidueRecord],
+    sequence_identity_percent: int,
+) -> list[tuple[CAResidueRecord, CAResidueRecord]] | None:
+    nmr_len = len(nmr_residues)
+    min_count = (nmr_len * sequence_identity_percent + 99) // 100
+    if min_count <= 0:
         return None
-    if aligned_len / len(nmr_sequence) < min_query_coverage:
+
+    nmr_identities = [record.identity for record in nmr_residues]
+    xray_identities = [record.identity for record in xray_residues]
+    rows = nmr_len + 1
+    cols = len(xray_residues) + 1
+    scores = np.zeros((rows, cols), dtype=float)
+    pointers = np.zeros((rows, cols), dtype=np.int8)
+    best_score = 0.0
+    best_pos: tuple[int, int] | None = None
+
+    for i in range(1, rows):
+        nmr_identity = nmr_identities[i - 1]
+        for j in range(1, cols):
+            xray_identity = xray_identities[j - 1]
+            diag_score = scores[i - 1, j - 1] + (
+                2.0 if nmr_identity == xray_identity else -1.0
+            )
+            up_score = scores[i - 1, j] - 1.0
+            left_score = scores[i, j - 1] - 1.0
+            cell_score = max(0.0, diag_score, up_score, left_score)
+            scores[i, j] = cell_score
+            if cell_score == 0.0:
+                continue
+            if cell_score == diag_score:
+                pointers[i, j] = 1
+            elif cell_score == up_score:
+                pointers[i, j] = 2
+            else:
+                pointers[i, j] = 3
+            if cell_score > best_score:
+                best_score = cell_score
+                best_pos = (i, j)
+
+    if best_pos is None:
         return None
-    if matches * 100 < sequence_identity_percent * aligned_len:
+
+    i, j = best_pos
+    pairs: list[tuple[CAResidueRecord, CAResidueRecord]] = []
+    identity_count = 0
+    while i > 0 and j > 0 and scores[i, j] > 0.0:
+        pointer = pointers[i, j]
+        if pointer == 1:
+            nmr_record = nmr_residues[i - 1]
+            xray_record = xray_residues[j - 1]
+            pairs.append((nmr_record, xray_record))
+            if nmr_record.identity == xray_record.identity:
+                identity_count += 1
+            i -= 1
+            j -= 1
+        elif pointer == 2:
+            i -= 1
+        elif pointer == 3:
+            j -= 1
+        else:
+            break
+
+    pairs.reverse()
+    if len(pairs) < min_count:
+        return None
+    if identity_count < min_count:
         return None
     return pairs
 
@@ -4815,7 +4968,7 @@ class SolutionNMRMonomerXrayHomologCollector:
     def _build_stride_core_query_sequence(
         self,
         seed: SolutionNMRMonomerXrayHomologSeedRecord,
-    ) -> tuple[str, int, int] | None:
+    ) -> tuple[str, int, int, list[CAResidueRecord]] | None:
         pdb_path = download_pdb_if_needed(
             session=self.client.session,
             config=self.config,
@@ -4823,32 +4976,118 @@ class SolutionNMRMonomerXrayHomologCollector:
             entry_id=seed.entry_id,
         )
         chain_map = load_cached_chain_id_map(self.cache_dir, seed.entry_id)
+        parsed_chain_id = chain_map.get(seed.chain_id, seed.chain_id)
         core_range = compute_stride_core_range_for_modeled_auth_seq_ids_in_first_model(
             pdb_path=pdb_path,
-            chain_id=chain_map.get(seed.chain_id, seed.chain_id),
+            chain_id=parsed_chain_id,
             modeled_auth_seq_ids=set(seed.modeled_auth_seq_ids),
             stride_executable=self.stride_executable,
         )
         if core_range is None:
             return None
         core_start, core_end = core_range
+        core_length = core_end - core_start + 1
+        if core_length <= 10:
+            return None
+        nmr_core_residues = parse_first_model_ca_residues(
+            pdb_path=pdb_path,
+            chain_id=parsed_chain_id,
+            start_seq_id=core_start,
+            end_seq_id=core_end,
+        )
+        if len(nmr_core_residues) != core_length:
+            return None
+        if [record.resid for record in nmr_core_residues] != list(
+            range(core_start, core_end + 1)
+        ):
+            return None
         label_seq_ids = self._label_seq_ids_for_auth_range(
             seed=seed,
             core_start_seq_id=core_start,
             core_end_seq_id=core_end,
         )
-        if not label_seq_ids:
+        if len(label_seq_ids) != core_length:
             return None
         query_sequence = "".join(seed.sequence[seq_id - 1] for seq_id in label_seq_ids)
         if not query_sequence:
             return None
-        return query_sequence, core_start, core_end
+        return query_sequence, core_start, core_end, nmr_core_residues
+
+    def _xray_candidate_has_modeled_core_match(
+        self,
+        nmr_core_residues: list[CAResidueRecord],
+        candidate: XrayPolymerEntityCandidateRecord,
+        sequence_identity_percent: int,
+    ) -> bool:
+        try:
+            (
+                xray_pdb_path,
+                xray_chain_map,
+            ) = download_pdb_chain_subset_if_needed(
+                session=self.client.session,
+                config=self.config,
+                cache_dir=self.cache_dir,
+                entry_id=candidate.entry_id,
+                chain_ids=candidate.chain_ids,
+            )
+        except Exception as exc:
+            LOGGER.debug(
+                "Skipping X-ray homolog candidate %s while pruning modeled core: %s",
+                candidate.polymer_entity_id,
+                exc,
+            )
+            return False
+
+        for xray_chain_id in candidate.chain_ids:
+            parsed_xray_chain_id = xray_chain_map.get(xray_chain_id, xray_chain_id)
+            xray_residues = parse_first_model_ca_residues(
+                pdb_path=xray_pdb_path,
+                chain_id=parsed_xray_chain_id,
+            )
+            if find_modeled_ca_core_identity_matches(
+                nmr_residues=nmr_core_residues,
+                xray_residues=xray_residues,
+                sequence_identity_percent=sequence_identity_percent,
+            ):
+                return True
+        return False
+
+    def _filter_modeled_xray_homolog_entity_ids(
+        self,
+        xray_entity_ids: tuple[str, ...],
+        nmr_core_residues: list[CAResidueRecord],
+        sequence_identity_percent: int,
+    ) -> tuple[str, ...]:
+        if not xray_entity_ids:
+            return tuple()
+
+        candidates = self.client.fetch_xray_polymer_entity_candidates_for_ids(
+            list(xray_entity_ids)
+        )
+        candidate_by_entity_id = {
+            candidate.polymer_entity_id: candidate for candidate in candidates
+        }
+
+        filtered_entity_ids: list[str] = []
+        for entity_id in xray_entity_ids:
+            candidate = candidate_by_entity_id.get(entity_id)
+            if candidate is None:
+                continue
+            if self._xray_candidate_has_modeled_core_match(
+                nmr_core_residues=nmr_core_residues,
+                candidate=candidate,
+                sequence_identity_percent=sequence_identity_percent,
+            ):
+                filtered_entity_ids.append(entity_id)
+        return tuple(filtered_entity_ids)
 
     def _build_record(
         self,
         seed: SolutionNMRMonomerXrayHomologSeedRecord,
         sequence_identity_percent: int,
-        core_query: tuple[str, int, int] | None | object = _MISSING,
+        core_query: (
+            tuple[str, int, int, list[CAResidueRecord]] | None | object
+        ) = _MISSING,
     ) -> SolutionNMRMonomerXrayHomologRecord:
         if core_query is _MISSING:
             core_query = self._build_stride_core_query_sequence(seed)
@@ -4864,12 +5103,17 @@ class SolutionNMRMonomerXrayHomologCollector:
                 xray_homolog_entity_ids=tuple(),
                 has_xray_homolog=False,
             )
-        query_sequence, core_start, core_end = core_query
-        xray_entity_ids = tuple(
+        query_sequence, core_start, core_end, nmr_core_residues = core_query
+        raw_xray_entity_ids = tuple(
             self.client.fetch_xray_polymer_entity_ids_by_sequence(
                 sequence=query_sequence,
                 sequence_identity_percent=sequence_identity_percent,
             )
+        )
+        xray_entity_ids = self._filter_modeled_xray_homolog_entity_ids(
+            xray_entity_ids=raw_xray_entity_ids,
+            nmr_core_residues=nmr_core_residues,
+            sequence_identity_percent=sequence_identity_percent,
         )
         xray_entry_ids = self._entry_ids_from_polymer_entity_ids(xray_entity_ids)
         return SolutionNMRMonomerXrayHomologRecord(
@@ -5153,6 +5397,33 @@ class SolutionNMRMonomerXrayRmsdCollector:
         xray_chain_id: str,
         sequence_identity_percent: int,
     ) -> tuple[int, float, int, int, int, int] | None:
+        _ = sequence_identity_percent
+        core_length = nmr_core_end_seq_id - nmr_core_start_seq_id + 1
+        if core_length <= 10:
+            return None
+
+        nmr_residues = parse_first_model_ca_residues(
+            nmr_pdb_path,
+            nmr_chain_id,
+            start_seq_id=nmr_core_start_seq_id,
+            end_seq_id=nmr_core_end_seq_id,
+        )
+        if len(nmr_residues) != core_length:
+            return None
+        if [record.resid for record in nmr_residues] != list(
+            range(nmr_core_start_seq_id, nmr_core_end_seq_id + 1)
+        ):
+            return None
+
+        xray_residues = parse_first_model_ca_residues(xray_pdb_path, xray_chain_id)
+        matched_pair_sets = find_modeled_ca_core_identity_matches(
+            nmr_residues=nmr_residues,
+            xray_residues=xray_residues,
+            sequence_identity_percent=100,
+        )
+        if not matched_pair_sets:
+            return None
+
         nmr_models = parse_models_ca_coords(
             nmr_pdb_path,
             nmr_chain_id,
@@ -5165,67 +5436,57 @@ class SolutionNMRMonomerXrayRmsdCollector:
         if not xray_models:
             return None
 
-        common_nmr_resids = set(nmr_models[0].keys())
-        for model_map in nmr_models[1:]:
-            common_nmr_resids &= set(model_map.keys())
-        if len(common_nmr_resids) < 3:
-            return None
+        best_result: tuple[int, float, int, int, int, int] | None = None
+        for matched_pairs in matched_pair_sets:
+            rmsd_pairs = [
+                (nmr_record.resid, xray_record.resid)
+                for nmr_record, xray_record in matched_pairs
+                if nmr_record.is_standard_atom and xray_record.is_standard_atom
+            ]
+            if len(rmsd_pairs) < 3:
+                continue
 
-        xray_resids = set(xray_models[0].keys())
-        if len(xray_resids) < 3:
-            return None
-
-        nmr_residues = [
-            item
-            for item in parse_first_model_ca_residue_sequence(
-                nmr_pdb_path,
-                nmr_chain_id,
-                start_seq_id=nmr_core_start_seq_id,
-                end_seq_id=nmr_core_end_seq_id,
-            )
-            if item[0] in common_nmr_resids
-        ]
-        xray_residues = [
-            item
-            for item in parse_first_model_ca_residue_sequence(
-                xray_pdb_path,
-                xray_chain_id,
-            )
-            if item[0] in xray_resids
-        ]
-        aligned_pairs = align_modeled_ca_sequences(
-            nmr_residues=nmr_residues,
-            xray_residues=xray_residues,
-            sequence_identity_percent=sequence_identity_percent,
-        )
-        if not aligned_pairs:
-            return None
-
-        nmr_common_resids = [nmr_resid for nmr_resid, _ in aligned_pairs]
-        xray_common_resids = [xray_resid for _, xray_resid in aligned_pairs]
-        nmr_coords = np.asarray(
-            [
-                [model_map[resid] for resid in nmr_common_resids]
+            nmr_common_resids = [nmr_resid for nmr_resid, _ in rmsd_pairs]
+            xray_common_resids = [xray_resid for _, xray_resid in rmsd_pairs]
+            if any(
+                any(resid not in model_map for resid in nmr_common_resids)
                 for model_map in nmr_models
-            ],
-            dtype=float,
-        )
-        xray_coords = np.asarray(
-            [xray_models[0][resid] for resid in xray_common_resids],
-            dtype=float,
-        )
-        per_model_rmsd = [
-            _superposed_rmsd(model_coord, xray_coords) for model_coord in nmr_coords
-        ]
-        rmsd_value = float(np.mean(per_model_rmsd))
-        return (
-            len(aligned_pairs),
-            rmsd_value,
-            min(nmr_common_resids),
-            max(nmr_common_resids),
-            min(xray_common_resids),
-            max(xray_common_resids),
-        )
+            ):
+                continue
+            if any(resid not in xray_models[0] for resid in xray_common_resids):
+                continue
+
+            nmr_coords = np.asarray(
+                [
+                    [model_map[resid] for resid in nmr_common_resids]
+                    for model_map in nmr_models
+                ],
+                dtype=float,
+            )
+            xray_coords = np.asarray(
+                [xray_models[0][resid] for resid in xray_common_resids],
+                dtype=float,
+            )
+            per_model_rmsd = [
+                _superposed_rmsd(model_coord, xray_coords)
+                for model_coord in nmr_coords
+            ]
+            rmsd_value = float(np.mean(per_model_rmsd))
+            xray_matched_resids = [
+                xray_record.resid for _, xray_record in matched_pairs
+            ]
+            result = (
+                len(rmsd_pairs),
+                rmsd_value,
+                nmr_core_start_seq_id,
+                nmr_core_end_seq_id,
+                min(xray_matched_resids),
+                max(xray_matched_resids),
+            )
+            if best_result is None or result[1] < best_result[1]:
+                best_result = result
+
+        return best_result
 
     def _compute_record(
         self,
