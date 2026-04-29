@@ -248,6 +248,14 @@ class PlotConfig:
         "Median RMSD(CA) of solution NMR monomeric proteins to best-resolution X-ray analogs by year"
     )
     nmr_monomer_xray_median_rmsd_y_label: str = "Median RMSD(CA) (Å)"
+    nmr_monomer_xray_min_rmsd_title: str = (
+        "Mean RMSD(CA) of solution NMR monomeric proteins to minimum-RMSD X-ray analogs by year"
+    )
+    nmr_monomer_xray_min_rmsd_y_label: str = "Mean minimum RMSD(CA) (Å)"
+    nmr_monomer_xray_min_median_rmsd_title: str = (
+        "Median RMSD(CA) of solution NMR monomeric proteins to minimum-RMSD X-ray analogs by year"
+    )
+    nmr_monomer_xray_min_median_rmsd_y_label: str = "Median minimum RMSD(CA) (Å)"
     nmr_monomer_xray_rmsd_extremes_mean_title: str = (
         "Mean RMSD(CA) to best-resolution, minimum-RMSD, and maximum-RMSD X-ray analogs by year"
     )
@@ -2605,6 +2613,10 @@ class PDBScientificPlotter:
         mean_output_svg: Path,
         median_output_png: Path,
         median_output_svg: Path,
+        min_mean_output_png: Path,
+        min_mean_output_svg: Path,
+        min_median_output_png: Path,
+        min_median_output_svg: Path,
         extremes_mean_output_png: Path,
         extremes_mean_output_svg: Path,
         extremes_median_output_png: Path,
@@ -2637,6 +2649,31 @@ class PDBScientificPlotter:
             y_label=self.config.nmr_monomer_xray_median_rmsd_y_label,
             x_values=yearly_rmsd.index,
             y_values=yearly_rmsd["median"],
+            color=self.config.median_color,
+            y_bottom=0.0,
+        )
+        yearly_min_rmsd = (
+            extremes_table.groupby("year", as_index=True)["best_rmsd_ca_angstrom"]
+            .agg(["mean", "median"])
+            .sort_index()
+        )
+        self._render_bar_series(
+            output_png=min_mean_output_png,
+            output_svg=min_mean_output_svg,
+            title=self.config.nmr_monomer_xray_min_rmsd_title,
+            y_label=self.config.nmr_monomer_xray_min_rmsd_y_label,
+            x_values=yearly_min_rmsd.index,
+            y_values=yearly_min_rmsd["mean"],
+            color="#2ca02c",
+            y_bottom=0.0,
+        )
+        self._render_bar_series(
+            output_png=min_median_output_png,
+            output_svg=min_median_output_svg,
+            title=self.config.nmr_monomer_xray_min_median_rmsd_title,
+            y_label=self.config.nmr_monomer_xray_min_median_rmsd_y_label,
+            x_values=yearly_min_rmsd.index,
+            y_values=yearly_min_rmsd["median"],
             color=self.config.median_color,
             y_bottom=0.0,
         )
@@ -3344,6 +3381,30 @@ def parse_args() -> argparse.Namespace:
         help="Output SVG for monomer X-ray median RMSD(CA) by year plot.",
     )
     parser.add_argument(
+        "--nmr-monomer-xray-min-rmsd-output-png",
+        type=Path,
+        default=Path("figures/solution_nmr_monomer_xray_min_rmsd_by_year.png"),
+        help="Output PNG for monomer X-ray minimum RMSD(CA) yearly-mean plot.",
+    )
+    parser.add_argument(
+        "--nmr-monomer-xray-min-rmsd-output-svg",
+        type=Path,
+        default=Path("figures/solution_nmr_monomer_xray_min_rmsd_by_year.svg"),
+        help="Output SVG for monomer X-ray minimum RMSD(CA) yearly-mean plot.",
+    )
+    parser.add_argument(
+        "--nmr-monomer-xray-min-median-rmsd-output-png",
+        type=Path,
+        default=Path("figures/solution_nmr_monomer_xray_min_median_rmsd_by_year.png"),
+        help="Output PNG for monomer X-ray minimum RMSD(CA) yearly-median plot.",
+    )
+    parser.add_argument(
+        "--nmr-monomer-xray-min-median-rmsd-output-svg",
+        type=Path,
+        default=Path("figures/solution_nmr_monomer_xray_min_median_rmsd_by_year.svg"),
+        help="Output SVG for monomer X-ray minimum RMSD(CA) yearly-median plot.",
+    )
+    parser.add_argument(
         "--nmr-monomer-xray-rmsd-extremes-mean-output-png",
         type=Path,
         default=Path("figures/solution_nmr_monomer_xray_rmsd_extremes_mean_by_year.png"),
@@ -3605,6 +3666,10 @@ def main() -> None:
             mean_output_svg=args.nmr_monomer_xray_rmsd_output_svg,
             median_output_png=args.nmr_monomer_xray_median_rmsd_output_png,
             median_output_svg=args.nmr_monomer_xray_median_rmsd_output_svg,
+            min_mean_output_png=args.nmr_monomer_xray_min_rmsd_output_png,
+            min_mean_output_svg=args.nmr_monomer_xray_min_rmsd_output_svg,
+            min_median_output_png=args.nmr_monomer_xray_min_median_rmsd_output_png,
+            min_median_output_svg=args.nmr_monomer_xray_min_median_rmsd_output_svg,
             extremes_mean_output_png=(
                 args.nmr_monomer_xray_rmsd_extremes_mean_output_png
             ),
