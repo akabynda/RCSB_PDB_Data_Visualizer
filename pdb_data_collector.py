@@ -4329,7 +4329,7 @@ class MembraneProteinYearlyCollector:
         self.client = client
         self.config = config
 
-    def collect(self) -> list[MembraneYearlyCountRecord]:
+    def _fetch_membrane_entry_ids(self) -> list[str]:
         entry_ids = sorted(
             set(
                 self.client.fetch_entry_ids_for_membrane_annotations(
@@ -4338,6 +4338,13 @@ class MembraneProteinYearlyCollector:
             )
         )
         LOGGER.info("Membrane proteins: total unique IDs collected: %d", len(entry_ids))
+        return entry_ids
+
+    def _count_entry_years(
+        self,
+        entry_ids: list[str],
+        progress_label: str,
+    ) -> Counter[int]:
         year_counter: Counter[int] = Counter()
 
         batches = list(chunked(entry_ids, self.config.graphql_batch_size))
@@ -4345,17 +4352,64 @@ class MembraneProteinYearlyCollector:
             batches=batches,
             max_workers=self.config.max_workers,
             fetch_fn=self.client.fetch_deposit_dates_for_ids,
-            progress_label="Membrane proteins",
+            progress_label=progress_label,
         ):
             years = filter(
                 None, (extract_year(date_value) for date_value in batch_dates)
             )
             year_counter.update(years)
+        return year_counter
+
+    def collect(self) -> list[MembraneYearlyCountRecord]:
+        entry_ids = self._fetch_membrane_entry_ids()
+        year_counter = self._count_entry_years(
+            entry_ids=entry_ids,
+            progress_label="Membrane proteins",
+        )
 
         return [
             MembraneYearlyCountRecord(year=year, count=count)
             for year, count in sorted(year_counter.items())
         ]
+
+    def collect_by_method(
+        self,
+        methods: Iterable[ExperimentalMethod],
+    ) -> list[YearlyCountRecord]:
+        membrane_entry_ids = set(self._fetch_membrane_entry_ids())
+        records: list[YearlyCountRecord] = []
+
+        for method in methods:
+            method_entry_ids = sorted(
+                {
+                    entry_id
+                    for query_value in method.query_values
+                    for entry_id in self.client.fetch_entry_ids_for_method(
+                        method_label=method.label,
+                        query_value=query_value,
+                        require_protein_entities=True,
+                    )
+                }
+            )
+            membrane_method_entry_ids = [
+                entry_id for entry_id in method_entry_ids if entry_id in membrane_entry_ids
+            ]
+            LOGGER.info(
+                "Membrane proteins %s: kept %d/%d method entries",
+                method.label,
+                len(membrane_method_entry_ids),
+                len(method_entry_ids),
+            )
+            year_counter = self._count_entry_years(
+                entry_ids=membrane_method_entry_ids,
+                progress_label=f"Membrane proteins {method.label}",
+            )
+            records.extend(
+                YearlyCountRecord(year=year, method=method.label, count=count)
+                for year, count in sorted(year_counter.items())
+            )
+
+        return sorted(records, key=lambda record: (record.year, record.method))
 
 
 class SolutionNMRWeightCollector:
@@ -7385,6 +7439,15 @@ def parse_args() -> argparse.Namespace:
         help="Output CSV path for membrane_protein_counts dataset.",
     )
     parser.add_argument(
+        "--membrane-method-counts-output",
+        type=Path,
+        default=Path("data/membrane_protein_method_counts_by_year.csv"),
+        help=(
+            "Output CSV path for membrane protein counts split by experimental "
+            "method."
+        ),
+    )
+    parser.add_argument(
         "--solution-nmr-output",
         type=Path,
         default=Path("data/solution_nmr_structure_weights.csv"),
@@ -7693,10 +7756,26 @@ def main() -> None:
         write_membrane_counts_csv(
             records=membrane_records, output_path=args.membrane_counts_output
         )
+        membrane_method_records = membrane_collector.collect_by_method(
+            [
+                ExperimentalMethod.X_RAY,
+                ExperimentalMethod.CRYO_EM,
+                ExperimentalMethod.NMR,
+            ]
+        )
+        write_method_counts_csv(
+            records=membrane_method_records,
+            output_path=args.membrane_method_counts_output,
+        )
         LOGGER.info(
             "Saved %d records to %s",
             len(membrane_records),
             args.membrane_counts_output,
+        )
+        LOGGER.info(
+            "Saved %d records to %s",
+            len(membrane_method_records),
+            args.membrane_method_counts_output,
         )
 
     if DatasetKind.SOLUTION_NMR_PROGRAM_COUNTS in args.datasets:

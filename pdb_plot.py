@@ -94,6 +94,12 @@ class PlotConfig:
     membrane_cumulative_y_label: str = (
         "Cumulative number of deposited membrane protein structures"
     )
+    membrane_method_annual_title: str = (
+        "Number of annually deposited membrane protein structures by experimental method"
+    )
+    membrane_method_cumulative_title: str = (
+        "Cumulative number of deposited membrane protein structures by experimental method"
+    )
     nmr_program_annual_title: str = (
         "Number of annually deposited solution NMR structures by refinement program"
     )
@@ -1264,6 +1270,62 @@ class PDBScientificPlotter:
             lambda ax: draw(ax, cumulative_table, use_step=False),
         )
 
+    def _plot_method_count_table(
+        self,
+        table: pd.DataFrame,
+        annual_output_png: Path,
+        annual_output_svg: Path,
+        cumulative_output_png: Path,
+        cumulative_output_svg: Path,
+        annual_title: str,
+        annual_y_label: str,
+        cumulative_title: str,
+        cumulative_y_label: str,
+    ) -> None:
+        cumulative_table = table.cumsum()
+        self._scientific_style()
+
+        def draw(ax: plt.Axes, source: pd.DataFrame, use_step: bool) -> None:
+            for col, color in [
+                ("X-ray", self.config.xray_color),
+                ("NMR", self.config.nmr_color),
+                ("cryo-EM", self.config.cryoem_color),
+            ]:
+                if col in source.columns:
+                    if use_step:
+                        self._plot_step_series(
+                            ax=ax,
+                            x_values=source.index,
+                            y_values=source[col],
+                            color=color,
+                            linewidth=2.0,
+                            label=col,
+                        )
+                    else:
+                        ax.plot(
+                            source.index,
+                            source[col],
+                            color=color,
+                            linewidth=2.0,
+                            label=col,
+                        )
+            self._add_legend(ax, loc="upper left")
+
+        self._render_figure(
+            annual_output_png,
+            annual_output_svg,
+            annual_title,
+            annual_y_label,
+            lambda ax: draw(ax, table, use_step=True),
+        )
+        self._render_figure(
+            cumulative_output_png,
+            cumulative_output_svg,
+            cumulative_title,
+            cumulative_y_label,
+            lambda ax: draw(ax, cumulative_table, use_step=False),
+        )
+
     def plot_solution_nmr_program_counts(
         self,
         data_path: Path,
@@ -1401,10 +1463,15 @@ class PDBScientificPlotter:
     def plot_membrane_protein_counts(
         self,
         data_path: Path,
+        method_data_path: Path,
         annual_output_png: Path,
         annual_output_svg: Path,
         cumulative_output_png: Path,
         cumulative_output_svg: Path,
+        method_annual_output_png: Path,
+        method_annual_output_svg: Path,
+        method_cumulative_output_png: Path,
+        method_cumulative_output_svg: Path,
     ) -> None:
         table = self._prepare_membrane_count_table(self._read_csv(data_path))
         cumulative = table.copy()
@@ -1428,6 +1495,18 @@ class PDBScientificPlotter:
             x_values=cumulative["year"],
             y_values=cumulative["count"],
             color="#17becf",
+        )
+        method_table = self._prepare_method_count_table(self._read_csv(method_data_path))
+        self._plot_method_count_table(
+            table=method_table,
+            annual_output_png=method_annual_output_png,
+            annual_output_svg=method_annual_output_svg,
+            cumulative_output_png=method_cumulative_output_png,
+            cumulative_output_svg=method_cumulative_output_svg,
+            annual_title=self.config.membrane_method_annual_title,
+            annual_y_label=self.config.membrane_annual_y_label,
+            cumulative_title=self.config.membrane_method_cumulative_title,
+            cumulative_y_label=self.config.membrane_cumulative_y_label,
         )
 
     def plot_solution_nmr_period_boxplot(
@@ -2968,6 +3047,12 @@ def parse_args() -> argparse.Namespace:
         help="Input CSV for membrane_protein_counts plot.",
     )
     parser.add_argument(
+        "--membrane-method-counts-input",
+        type=Path,
+        default=Path("data/membrane_protein_method_counts_by_year.csv"),
+        help="Input CSV for membrane-protein counts split by experimental method.",
+    )
+    parser.add_argument(
         "--nmr-weights-input",
         type=Path,
         default=Path("data/solution_nmr_structure_weights.csv"),
@@ -3108,6 +3193,30 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("figures/membrane_protein_counts_cumulative_by_year.svg"),
         help="Output SVG for cumulative membrane-protein count figure.",
+    )
+    parser.add_argument(
+        "--membrane-method-annual-output-png",
+        type=Path,
+        default=Path("figures/membrane_protein_method_counts_by_year.png"),
+        help="Output PNG for annual membrane-protein method-count figure.",
+    )
+    parser.add_argument(
+        "--membrane-method-annual-output-svg",
+        type=Path,
+        default=Path("figures/membrane_protein_method_counts_by_year.svg"),
+        help="Output SVG for annual membrane-protein method-count figure.",
+    )
+    parser.add_argument(
+        "--membrane-method-cumulative-output-png",
+        type=Path,
+        default=Path("figures/membrane_protein_method_counts_cumulative_by_year.png"),
+        help="Output PNG for cumulative membrane-protein method-count figure.",
+    )
+    parser.add_argument(
+        "--membrane-method-cumulative-output-svg",
+        type=Path,
+        default=Path("figures/membrane_protein_method_counts_cumulative_by_year.svg"),
+        help="Output SVG for cumulative membrane-protein method-count figure.",
     )
     parser.add_argument(
         "--nmr-program-annual-output-png",
@@ -3696,10 +3805,15 @@ def main() -> None:
     if PlotKind.MEMBRANE_PROTEIN_COUNTS in args.plots:
         plotter.plot_membrane_protein_counts(
             data_path=args.membrane_counts_input,
+            method_data_path=args.membrane_method_counts_input,
             annual_output_png=args.membrane_annual_output_png,
             annual_output_svg=args.membrane_annual_output_svg,
             cumulative_output_png=args.membrane_cumulative_output_png,
             cumulative_output_svg=args.membrane_cumulative_output_svg,
+            method_annual_output_png=args.membrane_method_annual_output_png,
+            method_annual_output_svg=args.membrane_method_annual_output_svg,
+            method_cumulative_output_png=args.membrane_method_cumulative_output_png,
+            method_cumulative_output_svg=args.membrane_method_cumulative_output_svg,
         )
 
     if PlotKind.SOLUTION_NMR_PROGRAM_COUNTS in args.plots:
