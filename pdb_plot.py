@@ -69,6 +69,9 @@ class PlotKind(str, Enum):
     SOLUTION_NMR_MONOMER_QUALITY = "solution_nmr_monomer_quality"
     SOLUTION_NMR_MONOMER_XRAY_HOMOLOGS = "solution_nmr_monomer_xray_homologs"
     SOLUTION_NMR_MONOMER_XRAY_RMSD = "solution_nmr_monomer_xray_rmsd"
+    SOLUTION_NMR_MONOMER_XRAY_RMSD_PRECISION_CORRELATION = (
+        "solution_nmr_monomer_xray_rmsd_precision_correlation"
+    )
 
 
 @dataclass(frozen=True)
@@ -263,6 +266,15 @@ class PlotConfig:
         "Median RMSD(CA) to best-resolution, minimum-RMSD, and maximum-RMSD X-ray analogs by year"
     )
     nmr_monomer_xray_rmsd_extremes_y_label: str = "RMSD(CA) (Å)"
+    nmr_monomer_xray_rmsd_precision_scatter_title: str = (
+        "Minimum X-ray RMSD(CA) vs solution NMR ensemble precision"
+    )
+    nmr_monomer_xray_rmsd_precision_yearly_corr_title: str = (
+        "Within-year correlation between minimum X-ray RMSD(CA) and NMR precision"
+    )
+    nmr_monomer_xray_rmsd_precision_cumulative_corr_title: str = (
+        "Cumulative correlation between minimum X-ray RMSD(CA) and NMR precision"
+    )
     xray_color: str = "#1f77b4"
     cryoem_color: str = "#d62728"
     nmr_color: str = "#2ca02c"
@@ -355,6 +367,7 @@ def parse_plot_kinds(raw_value: str) -> list[PlotKind]:
             PlotKind.SOLUTION_NMR_MONOMER_QUALITY,
             PlotKind.SOLUTION_NMR_MONOMER_XRAY_HOMOLOGS,
             PlotKind.SOLUTION_NMR_MONOMER_XRAY_RMSD,
+            PlotKind.SOLUTION_NMR_MONOMER_XRAY_RMSD_PRECISION_CORRELATION,
         ]
     raw_items = [item.strip() for item in raw_value.split(",") if item.strip()]
     selected: list[PlotKind] = []
@@ -850,11 +863,13 @@ class PDBScientificPlotter:
                 ax.set_ylim(*y_limits)
             if x_left is not None or x_right is not None:
                 current_left, current_right = ax.get_xlim()
+                effective_left = x_left if x_left is not None else current_left
                 effective_right = x_right if x_right is not None else current_right
                 if use_step_segments and x_step_edges is not None:
+                    effective_left = min(effective_left, float(x_step_edges[0]))
                     effective_right = max(effective_right, float(x_step_edges[-1]))
                 ax.set_xlim(
-                    left=x_left if x_left is not None else current_left,
+                    left=effective_left,
                     right=effective_right,
                 )
             self._add_legend(ax, loc="upper left", title="Weight category")
@@ -1021,11 +1036,13 @@ class PDBScientificPlotter:
                 ax.set_ylim(*y_limits)
             if x_left is not None or x_right is not None:
                 current_left, current_right = ax.get_xlim()
+                effective_left = x_left if x_left is not None else current_left
                 effective_right = x_right if x_right is not None else current_right
                 if use_step_segments and x_step_edges is not None:
+                    effective_left = min(effective_left, float(x_step_edges[0]))
                     effective_right = max(effective_right, float(x_step_edges[-1]))
                 ax.set_xlim(
-                    left=x_left if x_left is not None else current_left,
+                    left=effective_left,
                     right=effective_right,
                 )
             if legend_outside:
@@ -2721,6 +2738,183 @@ class PDBScientificPlotter:
             draw_order=draw_order,
         )
 
+    @staticmethod
+    def _prepare_xray_rmsd_precision_correlation_table(
+        precision_df: pd.DataFrame,
+        extremes_df: pd.DataFrame,
+    ) -> pd.DataFrame:
+        precision = PDBScientificPlotter._prepare_monomer_precision_table(
+            precision_df
+        )[["entry_id", "year", "mean_rmsd_angstrom"]].copy()
+        extremes = PDBScientificPlotter._prepare_monomer_xray_rmsd_extremes_table(
+            extremes_df
+        )[["entry_id", "best_rmsd_ca_angstrom"]].copy()
+        precision = precision.drop_duplicates(subset=["entry_id"], keep="first")
+        extremes = extremes.drop_duplicates(subset=["entry_id"], keep="first")
+        merged = precision.merge(extremes, on="entry_id", how="inner")
+        merged = merged.rename(
+            columns={
+                "mean_rmsd_angstrom": "precision_rmsd",
+                "best_rmsd_ca_angstrom": "min_xray_rmsd",
+            }
+        )
+        merged = merged.replace([np.inf, -np.inf], np.nan).dropna(
+            subset=["year", "precision_rmsd", "min_xray_rmsd"]
+        )
+        return PDBScientificPlotter._limit_year_column(merged)
+
+    def plot_solution_nmr_monomer_xray_rmsd_precision_correlation(
+        self,
+        precision_data_path: Path,
+        extremes_data_path: Path,
+        scatter_output_png: Path,
+        scatter_output_svg: Path,
+        yearly_correlation_output_png: Path,
+        yearly_correlation_output_svg: Path,
+        cumulative_correlation_output_png: Path,
+        cumulative_correlation_output_svg: Path,
+        yearly_min_count: int = 3,
+    ) -> None:
+        table = self._prepare_xray_rmsd_precision_correlation_table(
+            precision_df=self._read_csv(precision_data_path),
+            extremes_df=self._read_csv(extremes_data_path),
+        )
+        if table.empty:
+            raise ValueError(
+                "No overlapping entries between precision and X-ray RMSD extremes CSVs."
+            )
+        self._scientific_style()
+
+        pearson = float(table["precision_rmsd"].corr(table["min_xray_rmsd"]))
+        spearman = float(
+            table["precision_rmsd"].rank().corr(table["min_xray_rmsd"].rank())
+        )
+        x = table["precision_rmsd"].to_numpy(dtype=float)
+        y = table["min_xray_rmsd"].to_numpy(dtype=float)
+        origin_slope = float(np.dot(x, y) / np.dot(x, x))
+
+        def draw_scatter(ax: plt.Axes) -> None:
+            ax.scatter(
+                table["precision_rmsd"],
+                table["min_xray_rmsd"],
+                s=12,
+                alpha=0.28,
+                color="#4c78a8",
+                edgecolors="none",
+            )
+            if len(table) >= 2:
+                x_values = np.linspace(
+                    0.0,
+                    float(table["precision_rmsd"].max()),
+                    100,
+                )
+                ax.plot(
+                    x_values,
+                    origin_slope * x_values,
+                    color="#d62728",
+                    linewidth=2.0,
+                    label="Fit y = kx",
+                )
+                ax.set_xlim(left=0.0)
+                self._add_legend(ax, loc="upper left")
+            ax.text(
+                0.98,
+                0.04,
+                f"n={len(table)}\nk={origin_slope:.3f}\nPearson r={pearson:.3f}\nSpearman rho={spearman:.3f}",
+                transform=ax.transAxes,
+                ha="right",
+                va="bottom",
+                fontsize=8,
+                bbox={
+                    "boxstyle": "square,pad=0.25",
+                    "facecolor": "white",
+                    "edgecolor": "black",
+                    "linewidth": 0.6,
+                    "alpha": 0.95,
+                },
+            )
+
+        self._render_figure(
+            output_png=scatter_output_png,
+            output_svg=scatter_output_svg,
+            title=self.config.nmr_monomer_xray_rmsd_precision_scatter_title,
+            y_label="Minimum X-ray RMSD(CA) (Å)",
+            x_label="NMR ensemble precision RMSD(CA) (Å)",
+            draw_fn=draw_scatter,
+            use_year_x_ticks=False,
+        )
+
+        yearly_correlations: dict[int, float] = {}
+        for year, group in table.groupby("year"):
+            if len(group) < yearly_min_count:
+                continue
+            if (
+                group["precision_rmsd"].nunique() < 2
+                or group["min_xray_rmsd"].nunique() < 2
+            ):
+                continue
+            yearly_correlations[int(year)] = float(
+                group["precision_rmsd"].corr(group["min_xray_rmsd"])
+            )
+        yearly_corr = pd.Series(yearly_correlations, dtype=float).sort_index()
+
+        def draw_yearly_corr(ax: plt.Axes) -> None:
+            ax.axhline(0.0, color="black", linewidth=0.8, alpha=0.5)
+            self._plot_step_series(
+                ax=ax,
+                x_values=yearly_corr.index,
+                y_values=yearly_corr.values,
+                color="#9467bd",
+                linewidth=2.2,
+                label=f"Pearson r, n>={yearly_min_count}",
+            )
+            ax.set_ylim(-1.0, 1.0)
+            self._add_legend(ax, loc="lower right")
+
+        self._render_figure(
+            output_png=yearly_correlation_output_png,
+            output_svg=yearly_correlation_output_svg,
+            title=self.config.nmr_monomer_xray_rmsd_precision_yearly_corr_title,
+            y_label="Pearson correlation",
+            draw_fn=draw_yearly_corr,
+        )
+
+        cumulative_correlations: dict[int, float] = {}
+        for year in sorted(table["year"].unique()):
+            subset = table.loc[table["year"] <= year]
+            if len(subset) < yearly_min_count:
+                continue
+            if (
+                subset["precision_rmsd"].nunique() < 2
+                or subset["min_xray_rmsd"].nunique() < 2
+            ):
+                continue
+            cumulative_correlations[int(year)] = float(
+                subset["precision_rmsd"].corr(subset["min_xray_rmsd"])
+            )
+        cumulative_corr = pd.Series(cumulative_correlations, dtype=float).sort_index()
+
+        def draw_cumulative_corr(ax: plt.Axes) -> None:
+            ax.axhline(0.0, color="black", linewidth=0.8, alpha=0.5)
+            self._plot_step_series(
+                ax=ax,
+                x_values=cumulative_corr.index,
+                y_values=cumulative_corr.values,
+                color="#2ca02c",
+                linewidth=2.2,
+                label=f"Cumulative Pearson r, n>={yearly_min_count}",
+            )
+            ax.set_ylim(-1.0, 1.0)
+            self._add_legend(ax, loc="lower right")
+
+        self._render_figure(
+            output_png=cumulative_correlation_output_png,
+            output_svg=cumulative_correlation_output_svg,
+            title=self.config.nmr_monomer_xray_rmsd_precision_cumulative_corr_title,
+            y_label="Pearson correlation",
+            draw_fn=draw_cumulative_corr,
+        )
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -2757,8 +2951,9 @@ def parse_args() -> argparse.Namespace:
             PlotKind.SOLUTION_NMR_MONOMER_QUALITY,
             PlotKind.SOLUTION_NMR_MONOMER_XRAY_HOMOLOGS,
             PlotKind.SOLUTION_NMR_MONOMER_XRAY_RMSD,
+            PlotKind.SOLUTION_NMR_MONOMER_XRAY_RMSD_PRECISION_CORRELATION,
         ],
-        help="Comma-separated plot kinds or 'all'. Available: method_counts, membrane_protein_counts, solution_nmr_program_counts, solution_nmr_monomer_program_clusters, solution_nmr_weight_stats, solution_nmr_period_boxplot, solution_nmr_period_area, solution_nmr_period_area_share, solution_nmr_period_area_cumulative_share, solution_nmr_monomer_secondary, solution_nmr_monomer_secondary_comparison, solution_nmr_monomer_secondary_comparison_cumulative, solution_nmr_monomer_stride_modeled_first_model, solution_nmr_monomer_secondary_modeled_first_model_comparison, solution_nmr_monomer_secondary_modeled_first_model_comparison_cumulative, solution_nmr_monomer_stride_comparison, solution_nmr_monomer_stride_comparison_cumulative, solution_nmr_monomer_stride_modeled_first_model_comparison, solution_nmr_monomer_stride_modeled_first_model_comparison_cumulative, solution_nmr_monomer_three_way_comparison, solution_nmr_monomer_three_way_comparison_cumulative, solution_nmr_monomer_precision, solution_nmr_monomer_precision_stride_modeled_first_model_mean, solution_nmr_monomer_precision_stride_modeled_first_model_median, solution_nmr_monomer_quality, solution_nmr_monomer_xray_homologs, solution_nmr_monomer_xray_rmsd (default: all).",
+        help="Comma-separated plot kinds or 'all'. Available: method_counts, membrane_protein_counts, solution_nmr_program_counts, solution_nmr_monomer_program_clusters, solution_nmr_weight_stats, solution_nmr_period_boxplot, solution_nmr_period_area, solution_nmr_period_area_share, solution_nmr_period_area_cumulative_share, solution_nmr_monomer_secondary, solution_nmr_monomer_secondary_comparison, solution_nmr_monomer_secondary_comparison_cumulative, solution_nmr_monomer_stride_modeled_first_model, solution_nmr_monomer_secondary_modeled_first_model_comparison, solution_nmr_monomer_secondary_modeled_first_model_comparison_cumulative, solution_nmr_monomer_stride_comparison, solution_nmr_monomer_stride_comparison_cumulative, solution_nmr_monomer_stride_modeled_first_model_comparison, solution_nmr_monomer_stride_modeled_first_model_comparison_cumulative, solution_nmr_monomer_three_way_comparison, solution_nmr_monomer_three_way_comparison_cumulative, solution_nmr_monomer_precision, solution_nmr_monomer_precision_stride_modeled_first_model_mean, solution_nmr_monomer_precision_stride_modeled_first_model_median, solution_nmr_monomer_quality, solution_nmr_monomer_xray_homologs, solution_nmr_monomer_xray_rmsd, solution_nmr_monomer_xray_rmsd_precision_correlation (default: all).",
     )
     parser.add_argument(
         "--counts-input",
@@ -3429,6 +3624,54 @@ def parse_args() -> argparse.Namespace:
         help="Output SVG for monomer X-ray RMSD extremes yearly-median comparison plot.",
     )
     parser.add_argument(
+        "--nmr-monomer-xray-rmsd-precision-scatter-output-png",
+        type=Path,
+        default=Path(
+            "figures/solution_nmr_monomer_xray_min_rmsd_precision_correlation.png"
+        ),
+        help="Output PNG for minimum X-ray RMSD vs STRIDE-core precision scatter plot.",
+    )
+    parser.add_argument(
+        "--nmr-monomer-xray-rmsd-precision-scatter-output-svg",
+        type=Path,
+        default=Path(
+            "figures/solution_nmr_monomer_xray_min_rmsd_precision_correlation.svg"
+        ),
+        help="Output SVG for minimum X-ray RMSD vs STRIDE-core precision scatter plot.",
+    )
+    parser.add_argument(
+        "--nmr-monomer-xray-rmsd-precision-yearly-correlation-output-png",
+        type=Path,
+        default=Path(
+            "figures/solution_nmr_monomer_xray_min_rmsd_precision_yearly_correlation.png"
+        ),
+        help="Output PNG for yearly correlation between minimum X-ray RMSD and precision.",
+    )
+    parser.add_argument(
+        "--nmr-monomer-xray-rmsd-precision-yearly-correlation-output-svg",
+        type=Path,
+        default=Path(
+            "figures/solution_nmr_monomer_xray_min_rmsd_precision_yearly_correlation.svg"
+        ),
+        help="Output SVG for yearly correlation between minimum X-ray RMSD and precision.",
+    )
+    parser.add_argument(
+        "--nmr-monomer-xray-rmsd-precision-cumulative-correlation-output-png",
+        type=Path,
+        default=Path(
+            "figures/solution_nmr_monomer_xray_min_rmsd_precision_cumulative_correlation.png"
+        ),
+        help="Output PNG for cumulative correlation between minimum X-ray RMSD and precision.",
+    )
+    parser.add_argument(
+        "--nmr-monomer-xray-rmsd-precision-cumulative-correlation-output-svg",
+        type=Path,
+        default=Path(
+            "figures/solution_nmr_monomer_xray_min_rmsd_precision_cumulative_correlation.svg"
+        ),
+        help="Output SVG for cumulative correlation between minimum X-ray RMSD and precision.",
+    )
+    parser.add_argument(
         "--no-svg",
         action="store_true",
         help="Disable SVG output generation.",
@@ -3681,6 +3924,32 @@ def main() -> None:
             ),
             extremes_median_output_svg=(
                 args.nmr_monomer_xray_rmsd_extremes_median_output_svg
+            ),
+        )
+
+    if PlotKind.SOLUTION_NMR_MONOMER_XRAY_RMSD_PRECISION_CORRELATION in args.plots:
+        plotter.plot_solution_nmr_monomer_xray_rmsd_precision_correlation(
+            precision_data_path=(
+                args.nmr_monomer_precision_stride_modeled_first_model_input
+            ),
+            extremes_data_path=args.nmr_monomer_xray_rmsd_extremes_input,
+            scatter_output_png=(
+                args.nmr_monomer_xray_rmsd_precision_scatter_output_png
+            ),
+            scatter_output_svg=(
+                args.nmr_monomer_xray_rmsd_precision_scatter_output_svg
+            ),
+            yearly_correlation_output_png=(
+                args.nmr_monomer_xray_rmsd_precision_yearly_correlation_output_png
+            ),
+            yearly_correlation_output_svg=(
+                args.nmr_monomer_xray_rmsd_precision_yearly_correlation_output_svg
+            ),
+            cumulative_correlation_output_png=(
+                args.nmr_monomer_xray_rmsd_precision_cumulative_correlation_output_png
+            ),
+            cumulative_correlation_output_svg=(
+                args.nmr_monomer_xray_rmsd_precision_cumulative_correlation_output_svg
             ),
         )
 
