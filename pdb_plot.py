@@ -12,7 +12,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from matplotlib import font_manager
-from matplotlib.ticker import AutoMinorLocator, MultipleLocator
+from matplotlib.ticker import AutoMinorLocator, FuncFormatter, MultipleLocator
 
 
 class PlotKind(str, Enum):
@@ -68,7 +68,16 @@ class PlotKind(str, Enum):
     )
     SOLUTION_NMR_MONOMER_QUALITY = "solution_nmr_monomer_quality"
     SOLUTION_NMR_MONOMER_XRAY_HOMOLOGS = "solution_nmr_monomer_xray_homologs"
+    SOLUTION_NMR_MONOMER_XRAY_HOMOLOGS_HISTORICAL = (
+        "solution_nmr_monomer_xray_homologs_historical"
+    )
+    SOLUTION_NMR_MONOMER_XRAY_HOMOLOG_TIMING_SHARE = (
+        "solution_nmr_monomer_xray_homolog_timing_share"
+    )
     SOLUTION_NMR_MONOMER_XRAY_RMSD = "solution_nmr_monomer_xray_rmsd"
+    SOLUTION_NMR_MONOMER_XRAY_RMSD_HISTORICAL = (
+        "solution_nmr_monomer_xray_rmsd_historical"
+    )
     SOLUTION_NMR_MONOMER_XRAY_RMSD_PRECISION_CORRELATION = (
         "solution_nmr_monomer_xray_rmsd_precision_correlation"
     )
@@ -243,12 +252,31 @@ class PlotConfig:
         "Share of solution NMR monomeric proteins with X-ray analogs (100% sequence identity) by year"
     )
     nmr_monomer_xray_homolog_y_label: str = "Structures with X-ray analog (%)"
+    nmr_monomer_xray_homolog_95_historical_title: str = (
+        "Share of solution NMR monomeric proteins with already-deposited X-ray analogs (95% sequence identity) by year"
+    )
+    nmr_monomer_xray_homolog_100_historical_title: str = (
+        "Share of solution NMR monomeric proteins with already-deposited X-ray analogs (100% sequence identity) by year"
+    )
     nmr_monomer_xray_homolog_95_cumulative_title: str = (
         "Cumulative share of solution NMR monomeric proteins with X-ray analogs (95% sequence identity)"
     )
     nmr_monomer_xray_homolog_100_cumulative_title: str = (
         "Cumulative share of solution NMR monomeric proteins with X-ray analogs (100% sequence identity)"
     )
+    nmr_monomer_xray_homolog_95_historical_cumulative_title: str = (
+        "Cumulative share of solution NMR monomeric proteins with already-deposited X-ray analogs (95% sequence identity)"
+    )
+    nmr_monomer_xray_homolog_100_historical_cumulative_title: str = (
+        "Cumulative share of solution NMR monomeric proteins with already-deposited X-ray analogs (100% sequence identity)"
+    )
+    nmr_monomer_xray_homolog_95_timing_share_title: str = (
+        "Share of solution NMR monomeric proteins by X-ray analog deposition timing (95% sequence identity)"
+    )
+    nmr_monomer_xray_homolog_100_timing_share_title: str = (
+        "Share of solution NMR monomeric proteins by X-ray analog deposition timing (100% sequence identity)"
+    )
+    nmr_monomer_xray_homolog_timing_share_y_label: str = "Share of structures (%)"
     nmr_monomer_xray_rmsd_title: str = (
         "Mean RMSD(CA) of solution NMR monomeric proteins to best-resolution X-ray analogs by year"
     )
@@ -291,10 +319,20 @@ class PlotConfig:
     middle_color: str = "#54a24b"
     after_color: str = "#e45756"
     area_colors: tuple[str, str, str] = ("#4c78a8", "#f58518", "#54a24b")
+    homolog_timing_colors: tuple[str, str, str] = (
+        "#4c78a8",
+        "#f58518",
+        "#bab0ac",
+    )
 
 
 NMR_WEIGHT_BINS: tuple[float, ...] = (0.0, 10.0, 20.0, float("inf"))
 NMR_WEIGHT_LABELS: tuple[str, ...] = ("<10 kDa", "10-20 kDa", ">20 kDa")
+XRAY_HOMOLOG_TIMING_LABELS: tuple[str, str, str] = (
+    "Already-deposited X-ray analog",
+    "Later-deposited X-ray analog",
+    "No X-ray analog",
+)
 MAX_PLOT_YEAR: int = 2024
 NMR_PROGRAM_TOP_N: int = 8
 NMR_MONOMER_PROGRAM_CLUSTER_ORDER: tuple[str, ...] = (
@@ -372,7 +410,10 @@ def parse_plot_kinds(raw_value: str) -> list[PlotKind]:
             PlotKind.SOLUTION_NMR_MONOMER_PRECISION_STRIDE_MODELED_FIRST_MODEL_MEDIAN,
             PlotKind.SOLUTION_NMR_MONOMER_QUALITY,
             PlotKind.SOLUTION_NMR_MONOMER_XRAY_HOMOLOGS,
+            PlotKind.SOLUTION_NMR_MONOMER_XRAY_HOMOLOGS_HISTORICAL,
+            PlotKind.SOLUTION_NMR_MONOMER_XRAY_HOMOLOG_TIMING_SHARE,
             PlotKind.SOLUTION_NMR_MONOMER_XRAY_RMSD,
+            PlotKind.SOLUTION_NMR_MONOMER_XRAY_RMSD_HISTORICAL,
             PlotKind.SOLUTION_NMR_MONOMER_XRAY_RMSD_PRECISION_CORRELATION,
         ]
     raw_items = [item.strip() for item in raw_value.split(",") if item.strip()]
@@ -430,6 +471,16 @@ class PDBScientificPlotter:
     @staticmethod
     def _configure_year_axis_ticks(ax: plt.Axes) -> None:
         ax.xaxis.set_major_locator(MultipleLocator(YEAR_MAJOR_TICK_STEP))
+        ax.xaxis.set_major_formatter(
+            FuncFormatter(
+                lambda value, _pos: (
+                    f"{int(value)}"
+                    if abs(value - round(value)) < 1e-6
+                    and int(round(value)) <= MAX_PLOT_YEAR
+                    else ""
+                )
+            )
+        )
         ax.xaxis.set_minor_locator(MultipleLocator(YEAR_MINOR_TICK_STEP))
         ax.tick_params(axis="x", which="major", length=5)
         ax.tick_params(axis="x", which="minor", length=3)
@@ -588,7 +639,7 @@ class PDBScientificPlotter:
         ax.set_ylabel(y_label)
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
-        ax.margins(x=0.01)
+        ax.margins(x=0)
         if tight_layout_rect is None:
             fig.tight_layout()
         else:
@@ -885,6 +936,43 @@ class PDBScientificPlotter:
             output_svg=output_svg,
             title=title,
             y_label=y_label,
+            draw_fn=draw,
+        )
+
+    def _render_homolog_timing_stackplot(
+        self,
+        table: pd.DataFrame,
+        output_png: Path,
+        output_svg: Path,
+        title: str,
+    ) -> None:
+        def draw(ax: plt.Axes) -> None:
+            base = pd.Series(0.0, index=table.index, dtype=float)
+            x_step_edges = self._step_edges(table.index)
+            for idx, label in enumerate(XRAY_HOMOLOG_TIMING_LABELS):
+                values = table[label].astype(float)
+                top = base + values
+                ax.fill_between(
+                    x_step_edges,
+                    self._step_values(base),
+                    self._step_values(top),
+                    step="post",
+                    color=self.config.homolog_timing_colors[
+                        idx % len(self.config.homolog_timing_colors)
+                    ],
+                    alpha=0.85,
+                    label=label,
+                )
+                base = top
+            ax.set_ylim(0.0, 100.0)
+            ax.set_xlim(float(x_step_edges[0]), float(x_step_edges[-1]))
+            self._add_legend(ax, loc="upper left", title="X-ray analog status")
+
+        self._render_figure(
+            output_png=output_png,
+            output_svg=output_svg,
+            title=title,
+            y_label=self.config.nmr_monomer_xray_homolog_timing_share_y_label,
             draw_fn=draw,
         )
 
@@ -2647,6 +2735,185 @@ class PDBScientificPlotter:
             y_limits=(0.0, 100.0),
         )
 
+    def plot_solution_nmr_monomer_xray_homologs_historical(
+        self,
+        data_95_path: Path,
+        data_100_path: Path,
+        output_95_png: Path,
+        output_95_svg: Path,
+        output_100_png: Path,
+        output_100_svg: Path,
+        cumulative_output_95_png: Path,
+        cumulative_output_95_svg: Path,
+        cumulative_output_100_png: Path,
+        cumulative_output_100_svg: Path,
+    ) -> None:
+        table_95 = self._prepare_monomer_xray_homolog_table(
+            self._read_csv(data_95_path)
+        )
+        table_100 = self._prepare_monomer_xray_homolog_table(
+            self._read_csv(data_100_path)
+        )
+        self._scientific_style()
+
+        yearly_95, cumulative_share_95 = self._homolog_share_series(table_95)
+        yearly_100, cumulative_share_100 = self._homolog_share_series(table_100)
+
+        self._render_bar_series(
+            output_png=output_95_png,
+            output_svg=output_95_svg,
+            title=self.config.nmr_monomer_xray_homolog_95_historical_title,
+            y_label=self.config.nmr_monomer_xray_homolog_y_label,
+            x_values=yearly_95.index,
+            y_values=yearly_95,
+            color="#1f77b4",
+            y_limits=(0.0, 100.0),
+        )
+        self._render_bar_series(
+            output_png=output_100_png,
+            output_svg=output_100_svg,
+            title=self.config.nmr_monomer_xray_homolog_100_historical_title,
+            y_label=self.config.nmr_monomer_xray_homolog_y_label,
+            x_values=yearly_100.index,
+            y_values=yearly_100,
+            color="#2ca02c",
+            y_limits=(0.0, 100.0),
+        )
+        self._render_line_series(
+            output_png=cumulative_output_95_png,
+            output_svg=cumulative_output_95_svg,
+            title=self.config.nmr_monomer_xray_homolog_95_historical_cumulative_title,
+            y_label=self.config.nmr_monomer_xray_homolog_y_label,
+            x_values=cumulative_share_95.index,
+            y_values=cumulative_share_95,
+            color="#1f77b4",
+            y_limits=(0.0, 100.0),
+        )
+        self._render_line_series(
+            output_png=cumulative_output_100_png,
+            output_svg=cumulative_output_100_svg,
+            title=self.config.nmr_monomer_xray_homolog_100_historical_cumulative_title,
+            y_label=self.config.nmr_monomer_xray_homolog_y_label,
+            x_values=cumulative_share_100.index,
+            y_values=cumulative_share_100,
+            color="#2ca02c",
+            y_limits=(0.0, 100.0),
+        )
+
+    def plot_solution_nmr_monomer_xray_homolog_timing_share(
+        self,
+        regular_data_95_path: Path,
+        regular_data_100_path: Path,
+        historical_data_95_path: Path,
+        historical_data_100_path: Path,
+        counts_output_95_csv: Path,
+        counts_output_100_csv: Path,
+        output_95_png: Path,
+        output_95_svg: Path,
+        output_100_png: Path,
+        output_100_svg: Path,
+    ) -> None:
+        self._scientific_style()
+
+        counts_95 = self._build_xray_homolog_timing_count_table(
+            regular_table=self._prepare_monomer_xray_homolog_table(
+                self._read_csv(regular_data_95_path)
+            ),
+            historical_table=self._prepare_monomer_xray_homolog_table(
+                self._read_csv(historical_data_95_path)
+            ),
+        )
+        counts_100 = self._build_xray_homolog_timing_count_table(
+            regular_table=self._prepare_monomer_xray_homolog_table(
+                self._read_csv(regular_data_100_path)
+            ),
+            historical_table=self._prepare_monomer_xray_homolog_table(
+                self._read_csv(historical_data_100_path)
+            ),
+        )
+        self._write_xray_homolog_timing_counts_csv(
+            counts_95,
+            counts_output_95_csv,
+        )
+        self._write_xray_homolog_timing_counts_csv(
+            counts_100,
+            counts_output_100_csv,
+        )
+
+        self._render_homolog_timing_stackplot(
+            table=self._xray_homolog_timing_share_from_counts(counts_95),
+            output_png=output_95_png,
+            output_svg=output_95_svg,
+            title=self.config.nmr_monomer_xray_homolog_95_timing_share_title,
+        )
+        self._render_homolog_timing_stackplot(
+            table=self._xray_homolog_timing_share_from_counts(counts_100),
+            output_png=output_100_png,
+            output_svg=output_100_svg,
+            title=self.config.nmr_monomer_xray_homolog_100_timing_share_title,
+        )
+
+    @staticmethod
+    def _build_xray_homolog_timing_count_table(
+        regular_table: pd.DataFrame,
+        historical_table: pd.DataFrame,
+    ) -> pd.DataFrame:
+        regular = regular_table[["entry_id", "year", "has_xray_homolog"]].rename(
+            columns={"has_xray_homolog": "has_any_xray_homolog"}
+        )
+        historical = historical_table[["entry_id", "has_xray_homolog"]].rename(
+            columns={"has_xray_homolog": "has_historical_xray_homolog"}
+        )
+        merged = regular.merge(historical, on="entry_id", how="left")
+        merged["has_historical_xray_homolog"] = (
+            merged["has_historical_xray_homolog"].fillna(0).astype(int)
+        )
+        merged["status"] = XRAY_HOMOLOG_TIMING_LABELS[2]
+        merged.loc[
+            merged["has_any_xray_homolog"].astype(bool),
+            "status",
+        ] = XRAY_HOMOLOG_TIMING_LABELS[1]
+        merged.loc[
+            merged["has_historical_xray_homolog"].astype(bool),
+            "status",
+        ] = XRAY_HOMOLOG_TIMING_LABELS[0]
+
+        counts = (
+            merged.groupby(["year", "status"], observed=False)
+            .size()
+            .unstack(fill_value=0)
+            .reindex(columns=XRAY_HOMOLOG_TIMING_LABELS, fill_value=0)
+            .sort_index()
+        )
+        return counts
+
+    @staticmethod
+    def _xray_homolog_timing_share_from_counts(counts: pd.DataFrame) -> pd.DataFrame:
+        return counts.div(counts.sum(axis=1), axis=0).fillna(0.0) * 100.0
+
+    @staticmethod
+    def _write_xray_homolog_timing_counts_csv(
+        counts: pd.DataFrame,
+        output_path: Path,
+    ) -> None:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output = (
+            counts.rename(
+                columns={
+                    XRAY_HOMOLOG_TIMING_LABELS[0]: (
+                        "already_deposited_xray_homolog_count"
+                    ),
+                    XRAY_HOMOLOG_TIMING_LABELS[1]: (
+                        "later_deposited_xray_homolog_count"
+                    ),
+                    XRAY_HOMOLOG_TIMING_LABELS[2]: "no_xray_homolog_count",
+                }
+            )
+            .reset_index()
+            .rename(columns={"index": "year"})
+        )
+        output.to_csv(output_path, index=False)
+
     @staticmethod
     def _prepare_monomer_xray_rmsd_table(df: pd.DataFrame) -> pd.DataFrame:
         prepared = PDBScientificPlotter._prepare_typed_table(
@@ -2717,10 +2984,16 @@ class PDBScientificPlotter:
         extremes_mean_output_svg: Path,
         extremes_median_output_png: Path,
         extremes_median_output_svg: Path,
+        title_suffix: str = "",
     ) -> None:
         table = self._prepare_monomer_xray_rmsd_table(self._read_csv(data_path))
         extremes_table = self._prepare_monomer_xray_rmsd_extremes_table(
             self._read_csv(extremes_data_path)
+        )
+        title = (
+            (lambda value: f"{value} {title_suffix}")
+            if title_suffix
+            else (lambda value: value)
         )
         self._scientific_style()
         yearly_rmsd = (
@@ -2731,7 +3004,7 @@ class PDBScientificPlotter:
         self._render_bar_series(
             output_png=mean_output_png,
             output_svg=mean_output_svg,
-            title=self.config.nmr_monomer_xray_rmsd_title,
+            title=title(self.config.nmr_monomer_xray_rmsd_title),
             y_label=self.config.nmr_monomer_xray_rmsd_y_label,
             x_values=yearly_rmsd.index,
             y_values=yearly_rmsd["mean"],
@@ -2741,7 +3014,7 @@ class PDBScientificPlotter:
         self._render_bar_series(
             output_png=median_output_png,
             output_svg=median_output_svg,
-            title=self.config.nmr_monomer_xray_median_rmsd_title,
+            title=title(self.config.nmr_monomer_xray_median_rmsd_title),
             y_label=self.config.nmr_monomer_xray_median_rmsd_y_label,
             x_values=yearly_rmsd.index,
             y_values=yearly_rmsd["median"],
@@ -2756,7 +3029,7 @@ class PDBScientificPlotter:
         self._render_bar_series(
             output_png=min_mean_output_png,
             output_svg=min_mean_output_svg,
-            title=self.config.nmr_monomer_xray_min_rmsd_title,
+            title=title(self.config.nmr_monomer_xray_min_rmsd_title),
             y_label=self.config.nmr_monomer_xray_min_rmsd_y_label,
             x_values=yearly_min_rmsd.index,
             y_values=yearly_min_rmsd["mean"],
@@ -2766,7 +3039,7 @@ class PDBScientificPlotter:
         self._render_bar_series(
             output_png=min_median_output_png,
             output_svg=min_median_output_svg,
-            title=self.config.nmr_monomer_xray_min_median_rmsd_title,
+            title=title(self.config.nmr_monomer_xray_min_median_rmsd_title),
             y_label=self.config.nmr_monomer_xray_min_median_rmsd_y_label,
             x_values=yearly_min_rmsd.index,
             y_values=yearly_min_rmsd["median"],
@@ -2787,7 +3060,7 @@ class PDBScientificPlotter:
         self._render_multi_line_series(
             output_png=extremes_mean_output_png,
             output_svg=extremes_mean_output_svg,
-            title=self.config.nmr_monomer_xray_rmsd_extremes_mean_title,
+            title=title(self.config.nmr_monomer_xray_rmsd_extremes_mean_title),
             y_label=self.config.nmr_monomer_xray_rmsd_extremes_y_label,
             table=self._xray_rmsd_extremes_yearly_table(
                 rmsd_table=table,
@@ -2803,7 +3076,7 @@ class PDBScientificPlotter:
         self._render_multi_line_series(
             output_png=extremes_median_output_png,
             output_svg=extremes_median_output_svg,
-            title=self.config.nmr_monomer_xray_rmsd_extremes_median_title,
+            title=title(self.config.nmr_monomer_xray_rmsd_extremes_median_title),
             y_label=self.config.nmr_monomer_xray_rmsd_extremes_y_label,
             table=self._xray_rmsd_extremes_yearly_table(
                 rmsd_table=table,
@@ -3029,10 +3302,13 @@ def parse_args() -> argparse.Namespace:
             PlotKind.SOLUTION_NMR_MONOMER_PRECISION_STRIDE_MODELED_FIRST_MODEL_MEDIAN,
             PlotKind.SOLUTION_NMR_MONOMER_QUALITY,
             PlotKind.SOLUTION_NMR_MONOMER_XRAY_HOMOLOGS,
+            PlotKind.SOLUTION_NMR_MONOMER_XRAY_HOMOLOGS_HISTORICAL,
+            PlotKind.SOLUTION_NMR_MONOMER_XRAY_HOMOLOG_TIMING_SHARE,
             PlotKind.SOLUTION_NMR_MONOMER_XRAY_RMSD,
+            PlotKind.SOLUTION_NMR_MONOMER_XRAY_RMSD_HISTORICAL,
             PlotKind.SOLUTION_NMR_MONOMER_XRAY_RMSD_PRECISION_CORRELATION,
         ],
-        help="Comma-separated plot kinds or 'all'. Available: method_counts, membrane_protein_counts, solution_nmr_program_counts, solution_nmr_monomer_program_clusters, solution_nmr_weight_stats, solution_nmr_period_boxplot, solution_nmr_period_area, solution_nmr_period_area_share, solution_nmr_period_area_cumulative_share, solution_nmr_monomer_secondary, solution_nmr_monomer_secondary_comparison, solution_nmr_monomer_secondary_comparison_cumulative, solution_nmr_monomer_stride_modeled_first_model, solution_nmr_monomer_secondary_modeled_first_model_comparison, solution_nmr_monomer_secondary_modeled_first_model_comparison_cumulative, solution_nmr_monomer_stride_comparison, solution_nmr_monomer_stride_comparison_cumulative, solution_nmr_monomer_stride_modeled_first_model_comparison, solution_nmr_monomer_stride_modeled_first_model_comparison_cumulative, solution_nmr_monomer_three_way_comparison, solution_nmr_monomer_three_way_comparison_cumulative, solution_nmr_monomer_precision, solution_nmr_monomer_precision_stride_modeled_first_model_mean, solution_nmr_monomer_precision_stride_modeled_first_model_median, solution_nmr_monomer_quality, solution_nmr_monomer_xray_homologs, solution_nmr_monomer_xray_rmsd, solution_nmr_monomer_xray_rmsd_precision_correlation (default: all).",
+        help="Comma-separated plot kinds or 'all'. Available: method_counts, membrane_protein_counts, solution_nmr_program_counts, solution_nmr_monomer_program_clusters, solution_nmr_weight_stats, solution_nmr_period_boxplot, solution_nmr_period_area, solution_nmr_period_area_share, solution_nmr_period_area_cumulative_share, solution_nmr_monomer_secondary, solution_nmr_monomer_secondary_comparison, solution_nmr_monomer_secondary_comparison_cumulative, solution_nmr_monomer_stride_modeled_first_model, solution_nmr_monomer_secondary_modeled_first_model_comparison, solution_nmr_monomer_secondary_modeled_first_model_comparison_cumulative, solution_nmr_monomer_stride_comparison, solution_nmr_monomer_stride_comparison_cumulative, solution_nmr_monomer_stride_modeled_first_model_comparison, solution_nmr_monomer_stride_modeled_first_model_comparison_cumulative, solution_nmr_monomer_three_way_comparison, solution_nmr_monomer_three_way_comparison_cumulative, solution_nmr_monomer_precision, solution_nmr_monomer_precision_stride_modeled_first_model_mean, solution_nmr_monomer_precision_stride_modeled_first_model_median, solution_nmr_monomer_quality, solution_nmr_monomer_xray_homologs, solution_nmr_monomer_xray_homologs_historical, solution_nmr_monomer_xray_homolog_timing_share, solution_nmr_monomer_xray_rmsd, solution_nmr_monomer_xray_rmsd_historical, solution_nmr_monomer_xray_rmsd_precision_correlation (default: all).",
     )
     parser.add_argument(
         "--counts-input",
@@ -3134,16 +3410,46 @@ def parse_args() -> argparse.Namespace:
         help="Input CSV for SOLUTION NMR monomer X-ray homologs at 100%% sequence identity.",
     )
     parser.add_argument(
+        "--nmr-monomer-xray-homolog-95-historical-input",
+        type=Path,
+        default=Path("data/solution_nmr_monomer_xray_homologs_95_historical.csv"),
+        help=(
+            "Input CSV for 95%% X-ray homologs deposited at least 183 days "
+            "before the NMR entry."
+        ),
+    )
+    parser.add_argument(
+        "--nmr-monomer-xray-homolog-100-historical-input",
+        type=Path,
+        default=Path("data/solution_nmr_monomer_xray_homologs_100_historical.csv"),
+        help=(
+            "Input CSV for 100%% X-ray homologs deposited at least 183 days "
+            "before the NMR entry."
+        ),
+    )
+    parser.add_argument(
         "--nmr-monomer-xray-rmsd-input",
         type=Path,
         default=Path("data/solution_nmr_monomer_xray_rmsd.csv"),
         help="Input CSV for SOLUTION NMR monomer X-ray RMSD plot.",
     )
     parser.add_argument(
+        "--nmr-monomer-xray-rmsd-historical-input",
+        type=Path,
+        default=Path("data/solution_nmr_monomer_xray_rmsd_historical.csv"),
+        help="Input CSV for historical SOLUTION NMR monomer X-ray RMSD plot.",
+    )
+    parser.add_argument(
         "--nmr-monomer-xray-rmsd-extremes-input",
         type=Path,
         default=Path("data/solution_nmr_monomer_xray_rmsd_extremes.csv"),
         help="Input CSV for SOLUTION NMR monomer X-ray RMSD extremes plots.",
+    )
+    parser.add_argument(
+        "--nmr-monomer-xray-rmsd-extremes-historical-input",
+        type=Path,
+        default=Path("data/solution_nmr_monomer_xray_rmsd_extremes_historical.csv"),
+        help="Input CSV for historical SOLUTION NMR monomer X-ray RMSD extremes plots.",
     )
 
     parser.add_argument(
@@ -3661,6 +3967,110 @@ def parse_args() -> argparse.Namespace:
         help="Output SVG for cumulative monomer X-ray homolog share plot at 100%% sequence identity.",
     )
     parser.add_argument(
+        "--nmr-monomer-xray-homolog-95-historical-output-png",
+        type=Path,
+        default=Path("figures/solution_nmr_monomer_xray_homologs_95_historical_by_year.png"),
+        help="Output PNG for historical monomer X-ray homolog share plot at 95%% sequence identity.",
+    )
+    parser.add_argument(
+        "--nmr-monomer-xray-homolog-95-historical-output-svg",
+        type=Path,
+        default=Path("figures/solution_nmr_monomer_xray_homologs_95_historical_by_year.svg"),
+        help="Output SVG for historical monomer X-ray homolog share plot at 95%% sequence identity.",
+    )
+    parser.add_argument(
+        "--nmr-monomer-xray-homolog-100-historical-output-png",
+        type=Path,
+        default=Path("figures/solution_nmr_monomer_xray_homologs_100_historical_by_year.png"),
+        help="Output PNG for historical monomer X-ray homolog share plot at 100%% sequence identity.",
+    )
+    parser.add_argument(
+        "--nmr-monomer-xray-homolog-100-historical-output-svg",
+        type=Path,
+        default=Path("figures/solution_nmr_monomer_xray_homologs_100_historical_by_year.svg"),
+        help="Output SVG for historical monomer X-ray homolog share plot at 100%% sequence identity.",
+    )
+    parser.add_argument(
+        "--nmr-monomer-xray-homolog-95-historical-cumulative-output-png",
+        type=Path,
+        default=Path(
+            "figures/solution_nmr_monomer_xray_homologs_95_historical_cumulative_share_by_year.png"
+        ),
+        help="Output PNG for cumulative historical monomer X-ray homolog share plot at 95%% sequence identity.",
+    )
+    parser.add_argument(
+        "--nmr-monomer-xray-homolog-95-historical-cumulative-output-svg",
+        type=Path,
+        default=Path(
+            "figures/solution_nmr_monomer_xray_homologs_95_historical_cumulative_share_by_year.svg"
+        ),
+        help="Output SVG for cumulative historical monomer X-ray homolog share plot at 95%% sequence identity.",
+    )
+    parser.add_argument(
+        "--nmr-monomer-xray-homolog-100-historical-cumulative-output-png",
+        type=Path,
+        default=Path(
+            "figures/solution_nmr_monomer_xray_homologs_100_historical_cumulative_share_by_year.png"
+        ),
+        help="Output PNG for cumulative historical monomer X-ray homolog share plot at 100%% sequence identity.",
+    )
+    parser.add_argument(
+        "--nmr-monomer-xray-homolog-100-historical-cumulative-output-svg",
+        type=Path,
+        default=Path(
+            "figures/solution_nmr_monomer_xray_homologs_100_historical_cumulative_share_by_year.svg"
+        ),
+        help="Output SVG for cumulative historical monomer X-ray homolog share plot at 100%% sequence identity.",
+    )
+    parser.add_argument(
+        "--nmr-monomer-xray-homolog-95-timing-share-output-png",
+        type=Path,
+        default=Path(
+            "figures/solution_nmr_monomer_xray_homologs_95_timing_share_by_year.png"
+        ),
+        help="Output PNG for monomer X-ray homolog timing share plot at 95%% sequence identity.",
+    )
+    parser.add_argument(
+        "--nmr-monomer-xray-homolog-95-timing-share-output-svg",
+        type=Path,
+        default=Path(
+            "figures/solution_nmr_monomer_xray_homologs_95_timing_share_by_year.svg"
+        ),
+        help="Output SVG for monomer X-ray homolog timing share plot at 95%% sequence identity.",
+    )
+    parser.add_argument(
+        "--nmr-monomer-xray-homolog-100-timing-share-output-png",
+        type=Path,
+        default=Path(
+            "figures/solution_nmr_monomer_xray_homologs_100_timing_share_by_year.png"
+        ),
+        help="Output PNG for monomer X-ray homolog timing share plot at 100%% sequence identity.",
+    )
+    parser.add_argument(
+        "--nmr-monomer-xray-homolog-100-timing-share-output-svg",
+        type=Path,
+        default=Path(
+            "figures/solution_nmr_monomer_xray_homologs_100_timing_share_by_year.svg"
+        ),
+        help="Output SVG for monomer X-ray homolog timing share plot at 100%% sequence identity.",
+    )
+    parser.add_argument(
+        "--nmr-monomer-xray-homolog-95-timing-counts-output-csv",
+        type=Path,
+        default=Path(
+            "data/solution_nmr_monomer_xray_homologs_95_timing_counts_by_year.csv"
+        ),
+        help="Output CSV for yearly monomer X-ray homolog timing counts at 95%% sequence identity.",
+    )
+    parser.add_argument(
+        "--nmr-monomer-xray-homolog-100-timing-counts-output-csv",
+        type=Path,
+        default=Path(
+            "data/solution_nmr_monomer_xray_homologs_100_timing_counts_by_year.csv"
+        ),
+        help="Output CSV for yearly monomer X-ray homolog timing counts at 100%% sequence identity.",
+    )
+    parser.add_argument(
         "--nmr-monomer-xray-rmsd-output-png",
         type=Path,
         default=Path("figures/solution_nmr_monomer_xray_rmsd_by_year.png"),
@@ -3731,6 +4141,78 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("figures/solution_nmr_monomer_xray_rmsd_extremes_median_by_year.svg"),
         help="Output SVG for monomer X-ray RMSD extremes yearly-median comparison plot.",
+    )
+    parser.add_argument(
+        "--nmr-monomer-xray-rmsd-historical-output-png",
+        type=Path,
+        default=Path("figures/solution_nmr_monomer_xray_rmsd_historical_by_year.png"),
+        help="Output PNG for historical monomer X-ray RMSD(CA) by year plot.",
+    )
+    parser.add_argument(
+        "--nmr-monomer-xray-rmsd-historical-output-svg",
+        type=Path,
+        default=Path("figures/solution_nmr_monomer_xray_rmsd_historical_by_year.svg"),
+        help="Output SVG for historical monomer X-ray RMSD(CA) by year plot.",
+    )
+    parser.add_argument(
+        "--nmr-monomer-xray-median-rmsd-historical-output-png",
+        type=Path,
+        default=Path("figures/solution_nmr_monomer_xray_median_rmsd_historical_by_year.png"),
+        help="Output PNG for historical monomer X-ray median RMSD(CA) by year plot.",
+    )
+    parser.add_argument(
+        "--nmr-monomer-xray-median-rmsd-historical-output-svg",
+        type=Path,
+        default=Path("figures/solution_nmr_monomer_xray_median_rmsd_historical_by_year.svg"),
+        help="Output SVG for historical monomer X-ray median RMSD(CA) by year plot.",
+    )
+    parser.add_argument(
+        "--nmr-monomer-xray-min-rmsd-historical-output-png",
+        type=Path,
+        default=Path("figures/solution_nmr_monomer_xray_min_rmsd_historical_by_year.png"),
+        help="Output PNG for historical monomer X-ray minimum RMSD(CA) yearly-mean plot.",
+    )
+    parser.add_argument(
+        "--nmr-monomer-xray-min-rmsd-historical-output-svg",
+        type=Path,
+        default=Path("figures/solution_nmr_monomer_xray_min_rmsd_historical_by_year.svg"),
+        help="Output SVG for historical monomer X-ray minimum RMSD(CA) yearly-mean plot.",
+    )
+    parser.add_argument(
+        "--nmr-monomer-xray-min-median-rmsd-historical-output-png",
+        type=Path,
+        default=Path("figures/solution_nmr_monomer_xray_min_median_rmsd_historical_by_year.png"),
+        help="Output PNG for historical monomer X-ray minimum RMSD(CA) yearly-median plot.",
+    )
+    parser.add_argument(
+        "--nmr-monomer-xray-min-median-rmsd-historical-output-svg",
+        type=Path,
+        default=Path("figures/solution_nmr_monomer_xray_min_median_rmsd_historical_by_year.svg"),
+        help="Output SVG for historical monomer X-ray minimum RMSD(CA) yearly-median plot.",
+    )
+    parser.add_argument(
+        "--nmr-monomer-xray-rmsd-extremes-historical-mean-output-png",
+        type=Path,
+        default=Path("figures/solution_nmr_monomer_xray_rmsd_extremes_historical_mean_by_year.png"),
+        help="Output PNG for historical monomer X-ray RMSD extremes yearly-mean comparison plot.",
+    )
+    parser.add_argument(
+        "--nmr-monomer-xray-rmsd-extremes-historical-mean-output-svg",
+        type=Path,
+        default=Path("figures/solution_nmr_monomer_xray_rmsd_extremes_historical_mean_by_year.svg"),
+        help="Output SVG for historical monomer X-ray RMSD extremes yearly-mean comparison plot.",
+    )
+    parser.add_argument(
+        "--nmr-monomer-xray-rmsd-extremes-historical-median-output-png",
+        type=Path,
+        default=Path("figures/solution_nmr_monomer_xray_rmsd_extremes_historical_median_by_year.png"),
+        help="Output PNG for historical monomer X-ray RMSD extremes yearly-median comparison plot.",
+    )
+    parser.add_argument(
+        "--nmr-monomer-xray-rmsd-extremes-historical-median-output-svg",
+        type=Path,
+        default=Path("figures/solution_nmr_monomer_xray_rmsd_extremes_historical_median_by_year.svg"),
+        help="Output SVG for historical monomer X-ray RMSD extremes yearly-median comparison plot.",
     )
     parser.add_argument(
         "--nmr-monomer-xray-rmsd-precision-scatter-output-png",
@@ -4015,6 +4497,38 @@ def main() -> None:
             cumulative_output_100_svg=args.nmr_monomer_xray_homolog_100_cumulative_output_svg,
         )
 
+    if PlotKind.SOLUTION_NMR_MONOMER_XRAY_HOMOLOGS_HISTORICAL in args.plots:
+        plotter.plot_solution_nmr_monomer_xray_homologs_historical(
+            data_95_path=args.nmr_monomer_xray_homolog_95_historical_input,
+            data_100_path=args.nmr_monomer_xray_homolog_100_historical_input,
+            output_95_png=args.nmr_monomer_xray_homolog_95_historical_output_png,
+            output_95_svg=args.nmr_monomer_xray_homolog_95_historical_output_svg,
+            output_100_png=args.nmr_monomer_xray_homolog_100_historical_output_png,
+            output_100_svg=args.nmr_monomer_xray_homolog_100_historical_output_svg,
+            cumulative_output_95_png=args.nmr_monomer_xray_homolog_95_historical_cumulative_output_png,
+            cumulative_output_95_svg=args.nmr_monomer_xray_homolog_95_historical_cumulative_output_svg,
+            cumulative_output_100_png=args.nmr_monomer_xray_homolog_100_historical_cumulative_output_png,
+            cumulative_output_100_svg=args.nmr_monomer_xray_homolog_100_historical_cumulative_output_svg,
+        )
+
+    if PlotKind.SOLUTION_NMR_MONOMER_XRAY_HOMOLOG_TIMING_SHARE in args.plots:
+        plotter.plot_solution_nmr_monomer_xray_homolog_timing_share(
+            regular_data_95_path=args.nmr_monomer_xray_homolog_95_input,
+            regular_data_100_path=args.nmr_monomer_xray_homolog_100_input,
+            historical_data_95_path=args.nmr_monomer_xray_homolog_95_historical_input,
+            historical_data_100_path=args.nmr_monomer_xray_homolog_100_historical_input,
+            counts_output_95_csv=(
+                args.nmr_monomer_xray_homolog_95_timing_counts_output_csv
+            ),
+            counts_output_100_csv=(
+                args.nmr_monomer_xray_homolog_100_timing_counts_output_csv
+            ),
+            output_95_png=args.nmr_monomer_xray_homolog_95_timing_share_output_png,
+            output_95_svg=args.nmr_monomer_xray_homolog_95_timing_share_output_svg,
+            output_100_png=args.nmr_monomer_xray_homolog_100_timing_share_output_png,
+            output_100_svg=args.nmr_monomer_xray_homolog_100_timing_share_output_svg,
+        )
+
     if PlotKind.SOLUTION_NMR_MONOMER_XRAY_RMSD in args.plots:
         plotter.plot_solution_nmr_monomer_xray_rmsd(
             data_path=args.nmr_monomer_xray_rmsd_input,
@@ -4039,6 +4553,37 @@ def main() -> None:
             extremes_median_output_svg=(
                 args.nmr_monomer_xray_rmsd_extremes_median_output_svg
             ),
+        )
+
+    if PlotKind.SOLUTION_NMR_MONOMER_XRAY_RMSD_HISTORICAL in args.plots:
+        plotter.plot_solution_nmr_monomer_xray_rmsd(
+            data_path=args.nmr_monomer_xray_rmsd_historical_input,
+            extremes_data_path=args.nmr_monomer_xray_rmsd_extremes_historical_input,
+            mean_output_png=args.nmr_monomer_xray_rmsd_historical_output_png,
+            mean_output_svg=args.nmr_monomer_xray_rmsd_historical_output_svg,
+            median_output_png=args.nmr_monomer_xray_median_rmsd_historical_output_png,
+            median_output_svg=args.nmr_monomer_xray_median_rmsd_historical_output_svg,
+            min_mean_output_png=args.nmr_monomer_xray_min_rmsd_historical_output_png,
+            min_mean_output_svg=args.nmr_monomer_xray_min_rmsd_historical_output_svg,
+            min_median_output_png=(
+                args.nmr_monomer_xray_min_median_rmsd_historical_output_png
+            ),
+            min_median_output_svg=(
+                args.nmr_monomer_xray_min_median_rmsd_historical_output_svg
+            ),
+            extremes_mean_output_png=(
+                args.nmr_monomer_xray_rmsd_extremes_historical_mean_output_png
+            ),
+            extremes_mean_output_svg=(
+                args.nmr_monomer_xray_rmsd_extremes_historical_mean_output_svg
+            ),
+            extremes_median_output_png=(
+                args.nmr_monomer_xray_rmsd_extremes_historical_median_output_png
+            ),
+            extremes_median_output_svg=(
+                args.nmr_monomer_xray_rmsd_extremes_historical_median_output_svg
+            ),
+            title_suffix="(already-deposited X-ray analogs)",
         )
 
     if PlotKind.SOLUTION_NMR_MONOMER_XRAY_RMSD_PRECISION_CORRELATION in args.plots:

@@ -21,6 +21,7 @@ from Bio.SeqUtils import molecular_weight as sequence_molecular_weight, seq1
 from collections import Counter
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Sequence, TypeVar
@@ -31,6 +32,7 @@ LOGGER = logging.getLogger(__name__)
 T = TypeVar("T")
 _MISSING = object()
 PDB_CHAIN_ID_POOL = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+HISTORICAL_XRAY_DEPOSIT_LAG = timedelta(days=183)
 
 
 class ChainSubsetSelect(Select):
@@ -98,9 +100,18 @@ class DatasetKind(str, Enum):
     )
     SOLUTION_NMR_MONOMER_QUALITY = "solution_nmr_monomer_quality"
     SOLUTION_NMR_MONOMER_XRAY_HOMOLOGS = "solution_nmr_monomer_xray_homologs"
+    SOLUTION_NMR_MONOMER_XRAY_HOMOLOGS_HISTORICAL = (
+        "solution_nmr_monomer_xray_homologs_historical"
+    )
     SOLUTION_NMR_MONOMER_XRAY_RMSD = "solution_nmr_monomer_xray_rmsd"
+    SOLUTION_NMR_MONOMER_XRAY_RMSD_HISTORICAL = (
+        "solution_nmr_monomer_xray_rmsd_historical"
+    )
     SOLUTION_NMR_MONOMER_XRAY_RMSD_EXTREMES = (
         "solution_nmr_monomer_xray_rmsd_extremes"
+    )
+    SOLUTION_NMR_MONOMER_XRAY_RMSD_EXTREMES_HISTORICAL = (
+        "solution_nmr_monomer_xray_rmsd_extremes_historical"
     )
 
 
@@ -454,6 +465,15 @@ def extract_year(deposit_date: str | None) -> int | None:
     try:
         return int(deposit_date[:4])
     except (TypeError, ValueError):
+        return None
+
+
+def parse_rcsb_datetime(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
         return None
 
 
@@ -2457,6 +2477,37 @@ class RCSBClient:
                 continue
             entry_year_by_id[str(entry_id)] = year
         return entry_year_by_id
+
+    def fetch_deposit_date_by_entry_id_for_ids(
+        self, entry_ids: list[str]
+    ) -> dict[str, str]:
+        if not entry_ids:
+            return {}
+        query = """
+        query($ids:[String!]!) {
+          entries(entry_ids:$ids) {
+            rcsb_id
+            rcsb_accession_info {
+              deposit_date
+            }
+          }
+        }
+        """
+        payload = {"query": query, "variables": {"ids": entry_ids}}
+        data = self._post_json(self.config.graphql_url, payload)
+        entries = data.get("data", {}).get("entries", [])
+        entry_date_by_id: dict[str, str] = {}
+        for entry in entries:
+            if not entry:
+                continue
+            entry_id = entry.get("rcsb_id")
+            deposit_date = (
+                entry.get("rcsb_accession_info", {}) or {}
+            ).get("deposit_date")
+            if not entry_id or not deposit_date:
+                continue
+            entry_date_by_id[str(entry_id)] = str(deposit_date)
+        return entry_date_by_id
 
     def fetch_entry_resolution_for_ids(self, entry_ids: list[str]) -> dict[str, float]:
         query = """
@@ -7084,6 +7135,100 @@ def read_solution_nmr_monomer_xray_homolog_csv(
     return records
 
 
+def filter_xray_homolog_records_by_deposit_date(
+    records: list[SolutionNMRMonomerXrayHomologRecord],
+    client: RCSBClient,
+    config: CollectorConfig,
+) -> list[SolutionNMRMonomerXrayHomologRecord]:
+    xray_entity_ids = sorted(
+        {
+            entity_id
+            for record in records
+            for entity_id in record.xray_homolog_entity_ids
+        }
+    )
+    if not xray_entity_ids:
+        return [
+            SolutionNMRMonomerXrayHomologRecord(
+                entry_id=record.entry_id,
+                year=record.year,
+                sequence_identity_percent=record.sequence_identity_percent,
+                nmr_core_start_seq_id=record.nmr_core_start_seq_id,
+                nmr_core_end_seq_id=record.nmr_core_end_seq_id,
+                nmr_query_sequence_length=record.nmr_query_sequence_length,
+                xray_homolog_entry_ids=tuple(),
+                xray_homolog_entity_ids=tuple(),
+                has_xray_homolog=False,
+            )
+            for record in records
+        ]
+
+    xray_entry_id_by_entity_id = {
+        entity_id: str(entity_id).split("_", 1)[0].strip()
+        for entity_id in xray_entity_ids
+    }
+    entry_ids = sorted(
+        {
+            record.entry_id
+            for record in records
+        }
+        | {
+            entry_id
+            for entry_id in xray_entry_id_by_entity_id.values()
+            if entry_id
+        }
+    )
+    deposit_date_by_entry_id: dict[str, str] = {}
+    for batch_dates in collect_batch_results(
+        batches=list(chunked(entry_ids, config.graphql_batch_size)),
+        max_workers=config.max_workers,
+        fetch_fn=client.fetch_deposit_date_by_entry_id_for_ids,
+        progress_label="Historical homolog deposit dates",
+    ):
+        deposit_date_by_entry_id.update(batch_dates)
+
+    historical_records: list[SolutionNMRMonomerXrayHomologRecord] = []
+    for record in records:
+        nmr_deposit_date = parse_rcsb_datetime(
+            deposit_date_by_entry_id.get(record.entry_id)
+        )
+        kept_entity_ids_list: list[str] = []
+        if nmr_deposit_date is not None:
+            for entity_id in record.xray_homolog_entity_ids:
+                xray_entry_id = xray_entry_id_by_entity_id.get(entity_id)
+                if not xray_entry_id:
+                    continue
+                xray_deposit_date = deposit_date_by_entry_id.get(xray_entry_id)
+                if xray_deposit_date is None:
+                    continue
+                parsed_xray_deposit_date = parse_rcsb_datetime(xray_deposit_date)
+                if parsed_xray_deposit_date is None:
+                    continue
+                if (
+                    parsed_xray_deposit_date + HISTORICAL_XRAY_DEPOSIT_LAG
+                    <= nmr_deposit_date
+                ):
+                    kept_entity_ids_list.append(entity_id)
+        kept_entity_ids = tuple(kept_entity_ids_list)
+        kept_entry_ids = SolutionNMRMonomerXrayHomologCollector._entry_ids_from_polymer_entity_ids(
+            kept_entity_ids
+        )
+        historical_records.append(
+            SolutionNMRMonomerXrayHomologRecord(
+                entry_id=record.entry_id,
+                year=record.year,
+                sequence_identity_percent=record.sequence_identity_percent,
+                nmr_core_start_seq_id=record.nmr_core_start_seq_id,
+                nmr_core_end_seq_id=record.nmr_core_end_seq_id,
+                nmr_query_sequence_length=record.nmr_query_sequence_length,
+                xray_homolog_entry_ids=kept_entry_ids,
+                xray_homolog_entity_ids=kept_entity_ids,
+                has_xray_homolog=bool(kept_entity_ids),
+            )
+        )
+    return historical_records
+
+
 def read_solution_nmr_monomer_xray_rmsd_csv(
     input_path: Path,
 ) -> list[SolutionNMRMonomerXrayRmsdRecord]:
@@ -7377,6 +7522,195 @@ def write_solution_nmr_monomer_xray_rmsd_extremes_csv(
     )
 
 
+def collect_solution_nmr_monomer_xray_rmsd_to_csv(
+    client: RCSBClient,
+    config: CollectorConfig,
+    homolog_input_path: Path,
+    output_path: Path,
+    cache_dir: Path,
+    rmsd_workers: int,
+    sequence_identity_percent: int,
+    max_entries: int | None,
+    overwrite: bool,
+    log_label: str,
+) -> None:
+    existing_records: list[SolutionNMRMonomerXrayRmsdRecord] = []
+    valid_existing_records: list[SolutionNMRMonomerXrayRmsdRecord] = []
+    skip_entry_ids: set[str] = set()
+    homolog_records = read_solution_nmr_monomer_xray_homolog_csv(
+        homolog_input_path
+    )
+    if not homolog_records:
+        raise SystemExit(
+            f"No X-ray homolog records found for {log_label}. Run the matching "
+            f"homolog dataset first or provide the expected CSV at {homolog_input_path}."
+        )
+    LOGGER.info(
+        "%s %d%%: loaded %d homolog records from %s",
+        log_label,
+        sequence_identity_percent,
+        len(homolog_records),
+        homolog_input_path,
+    )
+    if not overwrite and output_path.exists():
+        existing_records = read_solution_nmr_monomer_xray_rmsd_csv(output_path)
+        existing_records = [
+            record
+            for record in existing_records
+            if record.sequence_identity_percent == sequence_identity_percent
+        ]
+        valid_existing_records = [
+            record
+            for record in existing_records
+            if record.nmr_core_start_seq_id is not None
+            and record.nmr_core_end_seq_id is not None
+            and record.xray_core_start_seq_id is not None
+            and record.xray_core_end_seq_id is not None
+            and record.xray_homolog_entity_id
+        ]
+        dropped_existing = len(existing_records) - len(valid_existing_records)
+        skip_entry_ids = {record.entry_id for record in valid_existing_records}
+        LOGGER.info(
+            "%s %d%%: loaded %d existing records for resume (outdated=%d)",
+            log_label,
+            sequence_identity_percent,
+            len(valid_existing_records),
+            dropped_existing,
+        )
+
+    rmsd_collector = SolutionNMRMonomerXrayRmsdCollector(
+        client=client,
+        config=config,
+        cache_dir=cache_dir,
+        rmsd_workers=rmsd_workers,
+        homolog_records=homolog_records,
+        sequence_identity_percent=sequence_identity_percent,
+    )
+    valid_existing_records = sorted(
+        valid_existing_records, key=lambda r: (r.year, r.entry_id)
+    )
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w", newline="", encoding="utf-8") as csvfile:
+        writer = csv.writer(csvfile)
+        writer.writerow(SOLUTION_NMR_MONOMER_XRAY_RMSD_HEADER)
+        for record in valid_existing_records:
+            writer.writerow(_solution_nmr_monomer_xray_rmsd_csv_row(record))
+        csvfile.flush()
+
+        def _on_xray_rmsd_record(record: SolutionNMRMonomerXrayRmsdRecord) -> None:
+            writer.writerow(_solution_nmr_monomer_xray_rmsd_csv_row(record))
+            csvfile.flush()
+
+        new_records = rmsd_collector.collect(
+            max_entries=max_entries,
+            skip_entry_ids=skip_entry_ids,
+            on_record=_on_xray_rmsd_record,
+        )
+
+    LOGGER.info(
+        "Saved %d records to %s (new: %d, identity=%d%%)",
+        len(valid_existing_records) + len(new_records),
+        output_path,
+        len(new_records),
+        sequence_identity_percent,
+    )
+
+
+def collect_solution_nmr_monomer_xray_rmsd_extremes_to_csv(
+    client: RCSBClient,
+    config: CollectorConfig,
+    homolog_input_path: Path,
+    output_path: Path,
+    cache_dir: Path,
+    rmsd_workers: int,
+    sequence_identity_percent: int,
+    max_entries: int | None,
+    overwrite: bool,
+    log_label: str,
+) -> None:
+    existing_records: list[SolutionNMRMonomerXrayRmsdExtremesRecord] = []
+    valid_existing_records: list[SolutionNMRMonomerXrayRmsdExtremesRecord] = []
+    skip_entry_ids: set[str] = set()
+    homolog_records = read_solution_nmr_monomer_xray_homolog_csv(
+        homolog_input_path
+    )
+    if not homolog_records:
+        raise SystemExit(
+            f"No X-ray homolog records found for {log_label}. Run the matching "
+            f"homolog dataset first or provide the expected CSV at {homolog_input_path}."
+        )
+    LOGGER.info(
+        "%s %d%%: loaded %d homolog records from %s",
+        log_label,
+        sequence_identity_percent,
+        len(homolog_records),
+        homolog_input_path,
+    )
+    if not overwrite and output_path.exists():
+        existing_records = read_solution_nmr_monomer_xray_rmsd_extremes_csv(
+            output_path
+        )
+        existing_records = [
+            record
+            for record in existing_records
+            if record.sequence_identity_percent == sequence_identity_percent
+        ]
+        valid_existing_records = [
+            record
+            for record in existing_records
+            if record.best_xray_homolog_entity_id
+            and record.worst_xray_homolog_entity_id
+        ]
+        dropped_existing = len(existing_records) - len(valid_existing_records)
+        skip_entry_ids = {record.entry_id for record in valid_existing_records}
+        LOGGER.info(
+            "%s %d%%: loaded %d existing records for resume (outdated=%d)",
+            log_label,
+            sequence_identity_percent,
+            len(valid_existing_records),
+            dropped_existing,
+        )
+
+    rmsd_collector = SolutionNMRMonomerXrayRmsdCollector(
+        client=client,
+        config=config,
+        cache_dir=cache_dir,
+        rmsd_workers=rmsd_workers,
+        homolog_records=homolog_records,
+        sequence_identity_percent=sequence_identity_percent,
+    )
+    valid_existing_records = sorted(
+        valid_existing_records, key=lambda r: (r.year, r.entry_id)
+    )
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w", newline="", encoding="utf-8") as csvfile:
+        writer = csv.writer(csvfile)
+        writer.writerow(SOLUTION_NMR_MONOMER_XRAY_RMSD_EXTREMES_HEADER)
+        for record in valid_existing_records:
+            writer.writerow(_solution_nmr_monomer_xray_rmsd_extremes_csv_row(record))
+        csvfile.flush()
+
+        def _on_xray_rmsd_extremes_record(
+            record: SolutionNMRMonomerXrayRmsdExtremesRecord,
+        ) -> None:
+            writer.writerow(_solution_nmr_monomer_xray_rmsd_extremes_csv_row(record))
+            csvfile.flush()
+
+        new_records = rmsd_collector.collect_extremes(
+            max_entries=max_entries,
+            skip_entry_ids=skip_entry_ids,
+            on_record=_on_xray_rmsd_extremes_record,
+        )
+
+    LOGGER.info(
+        "Saved %d records to %s (new: %d, identity=%d%%)",
+        len(valid_existing_records) + len(new_records),
+        output_path,
+        len(new_records),
+        sequence_identity_percent,
+    )
+
+
 def parse_dataset_kinds(raw_value: str) -> list[DatasetKind]:
     if raw_value.strip().lower() == "all":
         return [
@@ -7393,8 +7727,11 @@ def parse_dataset_kinds(raw_value: str) -> list[DatasetKind]:
             DatasetKind.SOLUTION_NMR_MONOMER_PRECISION_STRIDE_MODELED_FIRST_MODEL,
             DatasetKind.SOLUTION_NMR_MONOMER_QUALITY,
             DatasetKind.SOLUTION_NMR_MONOMER_XRAY_HOMOLOGS,
+            DatasetKind.SOLUTION_NMR_MONOMER_XRAY_HOMOLOGS_HISTORICAL,
             DatasetKind.SOLUTION_NMR_MONOMER_XRAY_RMSD,
+            DatasetKind.SOLUTION_NMR_MONOMER_XRAY_RMSD_HISTORICAL,
             DatasetKind.SOLUTION_NMR_MONOMER_XRAY_RMSD_EXTREMES,
+            DatasetKind.SOLUTION_NMR_MONOMER_XRAY_RMSD_EXTREMES_HISTORICAL,
         ]
     raw_items = [item.strip() for item in raw_value.split(",") if item.strip()]
     selected: list[DatasetKind] = []
@@ -7424,7 +7761,7 @@ def parse_args() -> argparse.Namespace:
             DatasetKind.SOLUTION_NMR_MONOMER_SECONDARY,
         ],
         help="Comma-separated dataset kinds or 'all'. "
-        "Available: method_counts, membrane_protein_counts, solution_nmr_program_counts, solution_nmr_monomer_program_clusters, solution_nmr_weights, solution_nmr_monomer_secondary, solution_nmr_monomer_secondary_modeled_first_model, solution_nmr_monomer_stride, solution_nmr_monomer_stride_modeled_first_model, solution_nmr_monomer_precision, solution_nmr_monomer_precision_stride_modeled_first_model, solution_nmr_monomer_quality, solution_nmr_monomer_xray_homologs, solution_nmr_monomer_xray_rmsd, solution_nmr_monomer_xray_rmsd_extremes (default: the first three).",
+        "Available: method_counts, membrane_protein_counts, solution_nmr_program_counts, solution_nmr_monomer_program_clusters, solution_nmr_weights, solution_nmr_monomer_secondary, solution_nmr_monomer_secondary_modeled_first_model, solution_nmr_monomer_stride, solution_nmr_monomer_stride_modeled_first_model, solution_nmr_monomer_precision, solution_nmr_monomer_precision_stride_modeled_first_model, solution_nmr_monomer_quality, solution_nmr_monomer_xray_homologs, solution_nmr_monomer_xray_homologs_historical, solution_nmr_monomer_xray_rmsd, solution_nmr_monomer_xray_rmsd_historical, solution_nmr_monomer_xray_rmsd_extremes, solution_nmr_monomer_xray_rmsd_extremes_historical (default: the first three).",
     )
     parser.add_argument(
         "--counts-output",
@@ -7635,10 +7972,37 @@ def parse_args() -> argparse.Namespace:
         help="Output CSV path for solution_nmr_monomer_xray_homologs dataset at 100%% sequence identity.",
     )
     parser.add_argument(
+        "--solution-nmr-monomer-xray-homolog-95-historical-output",
+        type=Path,
+        default=Path("data/solution_nmr_monomer_xray_homologs_95_historical.csv"),
+        help=(
+            "Output CSV path for 95%% X-ray homologs deposited at least "
+            "183 days before the NMR entry deposit date."
+        ),
+    )
+    parser.add_argument(
+        "--solution-nmr-monomer-xray-homolog-100-historical-output",
+        type=Path,
+        default=Path("data/solution_nmr_monomer_xray_homologs_100_historical.csv"),
+        help=(
+            "Output CSV path for 100%% X-ray homologs deposited at least "
+            "183 days before the NMR entry deposit date."
+        ),
+    )
+    parser.add_argument(
         "--solution-nmr-monomer-xray-rmsd-output",
         type=Path,
         default=Path("data/solution_nmr_monomer_xray_rmsd.csv"),
         help="Output CSV path for solution_nmr_monomer_xray_rmsd dataset.",
+    )
+    parser.add_argument(
+        "--solution-nmr-monomer-xray-rmsd-historical-output",
+        type=Path,
+        default=Path("data/solution_nmr_monomer_xray_rmsd_historical.csv"),
+        help=(
+            "Output CSV path for X-ray RMSD calculated from already-deposited "
+            "historical homologs."
+        ),
     )
     parser.add_argument(
         "--solution-nmr-monomer-xray-rmsd-extremes-output",
@@ -7647,6 +8011,15 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Output CSV path for solution_nmr_monomer_xray_rmsd_extremes "
             "dataset."
+        ),
+    )
+    parser.add_argument(
+        "--solution-nmr-monomer-xray-rmsd-extremes-historical-output",
+        type=Path,
+        default=Path("data/solution_nmr_monomer_xray_rmsd_extremes_historical.csv"),
+        help=(
+            "Output CSV path for X-ray RMSD extremes calculated from "
+            "already-deposited historical homologs."
         ),
     )
     parser.add_argument(
@@ -8272,193 +8645,135 @@ def main() -> None:
             homolog_100_output_path,
         )
 
+    if DatasetKind.SOLUTION_NMR_MONOMER_XRAY_HOMOLOGS_HISTORICAL in args.datasets:
+        homolog_95_input_path = Path(args.solution_nmr_monomer_xray_homolog_95_output)
+        homolog_100_input_path = Path(args.solution_nmr_monomer_xray_homolog_100_output)
+        records_95 = read_solution_nmr_monomer_xray_homolog_csv(
+            homolog_95_input_path
+        )
+        records_100 = read_solution_nmr_monomer_xray_homolog_csv(
+            homolog_100_input_path
+        )
+        if not records_95 or not records_100:
+            raise SystemExit(
+                "No X-ray homolog records found for historical filtering. Run "
+                "solution_nmr_monomer_xray_homologs first or provide the expected "
+                f"homolog CSVs at {homolog_95_input_path} and {homolog_100_input_path}."
+            )
+        historical_records_95 = filter_xray_homolog_records_by_deposit_date(
+            records=records_95,
+            client=client,
+            config=config,
+        )
+        historical_records_100 = filter_xray_homolog_records_by_deposit_date(
+            records=records_100,
+            client=client,
+            config=config,
+        )
+        homolog_95_historical_output_path = Path(
+            args.solution_nmr_monomer_xray_homolog_95_historical_output
+        )
+        homolog_100_historical_output_path = Path(
+            args.solution_nmr_monomer_xray_homolog_100_historical_output
+        )
+        write_solution_nmr_monomer_xray_homolog_csv(
+            records=historical_records_95,
+            output_path=homolog_95_historical_output_path,
+        )
+        write_solution_nmr_monomer_xray_homolog_csv(
+            records=historical_records_100,
+            output_path=homolog_100_historical_output_path,
+        )
+        LOGGER.info(
+            "Saved %d historical records to %s",
+            len(historical_records_95),
+            homolog_95_historical_output_path,
+        )
+        LOGGER.info(
+            "Saved %d historical records to %s",
+            len(historical_records_100),
+            homolog_100_historical_output_path,
+        )
+
     if DatasetKind.SOLUTION_NMR_MONOMER_XRAY_RMSD in args.datasets:
-        existing_records: list[SolutionNMRMonomerXrayRmsdRecord] = []
-        valid_existing_records: list[SolutionNMRMonomerXrayRmsdRecord] = []
-        skip_entry_ids: set[str] = set()
-        xray_rmsd_output_path = Path(args.solution_nmr_monomer_xray_rmsd_output)
         homolog_input_path = (
             Path(args.solution_nmr_monomer_xray_homolog_95_output)
             if args.xray_rmsd_sequence_identity == 95
             else Path(args.solution_nmr_monomer_xray_homolog_100_output)
         )
-        homolog_records = read_solution_nmr_monomer_xray_homolog_csv(
-            homolog_input_path
-        )
-        if not homolog_records:
-            raise SystemExit(
-                "No X-ray homolog records found for X-ray RMSD. Run "
-                "solution_nmr_monomer_xray_homologs first or provide the expected "
-                f"homolog CSV at {homolog_input_path}."
-            )
-        LOGGER.info(
-            "SOLUTION NMR X-ray RMSD %d%%: loaded %d homolog records from %s",
-            args.xray_rmsd_sequence_identity,
-            len(homolog_records),
-            homolog_input_path,
-        )
-        if (
-            not args.xray_rmsd_overwrite
-            and xray_rmsd_output_path.exists()
-        ):
-            existing_records = read_solution_nmr_monomer_xray_rmsd_csv(
-                xray_rmsd_output_path
-            )
-            existing_records = [
-                record
-                for record in existing_records
-                if record.sequence_identity_percent == args.xray_rmsd_sequence_identity
-            ]
-            valid_existing_records = [
-                record
-                for record in existing_records
-                if record.nmr_core_start_seq_id is not None
-                and record.nmr_core_end_seq_id is not None
-                and record.xray_core_start_seq_id is not None
-                and record.xray_core_end_seq_id is not None
-                and record.xray_homolog_entity_id
-            ]
-            dropped_existing = len(existing_records) - len(valid_existing_records)
-            skip_entry_ids = {record.entry_id for record in valid_existing_records}
-            LOGGER.info(
-                "SOLUTION NMR X-ray RMSD %d%%: loaded %d existing records for resume (outdated=%d)",
-                args.xray_rmsd_sequence_identity,
-                len(valid_existing_records),
-                dropped_existing,
-            )
-
-        rmsd_collector = SolutionNMRMonomerXrayRmsdCollector(
+        collect_solution_nmr_monomer_xray_rmsd_to_csv(
             client=client,
             config=config,
+            homolog_input_path=homolog_input_path,
+            output_path=Path(args.solution_nmr_monomer_xray_rmsd_output),
             cache_dir=Path(args.xray_rmsd_cache_dir),
             rmsd_workers=args.xray_rmsd_workers,
-            homolog_records=homolog_records,
             sequence_identity_percent=args.xray_rmsd_sequence_identity,
+            max_entries=args.xray_rmsd_max_entries,
+            overwrite=args.xray_rmsd_overwrite,
+            log_label="SOLUTION NMR X-ray RMSD",
         )
-        valid_existing_records = sorted(
-            valid_existing_records, key=lambda r: (r.year, r.entry_id)
+
+    if DatasetKind.SOLUTION_NMR_MONOMER_XRAY_RMSD_HISTORICAL in args.datasets:
+        homolog_input_path = (
+            Path(args.solution_nmr_monomer_xray_homolog_95_historical_output)
+            if args.xray_rmsd_sequence_identity == 95
+            else Path(args.solution_nmr_monomer_xray_homolog_100_historical_output)
         )
-        xray_rmsd_output_path.parent.mkdir(parents=True, exist_ok=True)
-        with xray_rmsd_output_path.open("w", newline="", encoding="utf-8") as csvfile:
-            writer = csv.writer(csvfile)
-            writer.writerow(SOLUTION_NMR_MONOMER_XRAY_RMSD_HEADER)
-            for record in valid_existing_records:
-                writer.writerow(_solution_nmr_monomer_xray_rmsd_csv_row(record))
-            csvfile.flush()
-
-            def _on_xray_rmsd_record(record: SolutionNMRMonomerXrayRmsdRecord) -> None:
-                writer.writerow(_solution_nmr_monomer_xray_rmsd_csv_row(record))
-                csvfile.flush()
-
-            new_records = rmsd_collector.collect(
-                max_entries=args.xray_rmsd_max_entries,
-                skip_entry_ids=skip_entry_ids,
-                on_record=_on_xray_rmsd_record,
-            )
-
-        LOGGER.info(
-            "Saved %d records to %s (new: %d, identity=%d%%)",
-            len(valid_existing_records) + len(new_records),
-            args.solution_nmr_monomer_xray_rmsd_output,
-            len(new_records),
-            args.xray_rmsd_sequence_identity,
+        collect_solution_nmr_monomer_xray_rmsd_to_csv(
+            client=client,
+            config=config,
+            homolog_input_path=homolog_input_path,
+            output_path=Path(args.solution_nmr_monomer_xray_rmsd_historical_output),
+            cache_dir=Path(args.xray_rmsd_cache_dir),
+            rmsd_workers=args.xray_rmsd_workers,
+            sequence_identity_percent=args.xray_rmsd_sequence_identity,
+            max_entries=args.xray_rmsd_max_entries,
+            overwrite=args.xray_rmsd_overwrite,
+            log_label="SOLUTION NMR historical X-ray RMSD",
         )
 
     if DatasetKind.SOLUTION_NMR_MONOMER_XRAY_RMSD_EXTREMES in args.datasets:
-        existing_records: list[SolutionNMRMonomerXrayRmsdExtremesRecord] = []
-        valid_existing_records: list[SolutionNMRMonomerXrayRmsdExtremesRecord] = []
-        skip_entry_ids: set[str] = set()
-        extremes_output_path = Path(
-            args.solution_nmr_monomer_xray_rmsd_extremes_output
-        )
         homolog_input_path = (
             Path(args.solution_nmr_monomer_xray_homolog_95_output)
             if args.xray_rmsd_sequence_identity == 95
             else Path(args.solution_nmr_monomer_xray_homolog_100_output)
         )
-        homolog_records = read_solution_nmr_monomer_xray_homolog_csv(
-            homolog_input_path
-        )
-        if not homolog_records:
-            raise SystemExit(
-                "No X-ray homolog records found for X-ray RMSD extremes. Run "
-                "solution_nmr_monomer_xray_homologs first or provide the expected "
-                f"homolog CSV at {homolog_input_path}."
-            )
-        LOGGER.info(
-            "SOLUTION NMR X-ray RMSD extremes %d%%: loaded %d homolog records from %s",
-            args.xray_rmsd_sequence_identity,
-            len(homolog_records),
-            homolog_input_path,
-        )
-        if (
-            not args.xray_rmsd_overwrite
-            and extremes_output_path.exists()
-        ):
-            existing_records = read_solution_nmr_monomer_xray_rmsd_extremes_csv(
-                extremes_output_path
-            )
-            existing_records = [
-                record
-                for record in existing_records
-                if record.sequence_identity_percent == args.xray_rmsd_sequence_identity
-            ]
-            valid_existing_records = [
-                record
-                for record in existing_records
-                if record.best_xray_homolog_entity_id
-                and record.worst_xray_homolog_entity_id
-            ]
-            dropped_existing = len(existing_records) - len(valid_existing_records)
-            skip_entry_ids = {record.entry_id for record in valid_existing_records}
-            LOGGER.info(
-                "SOLUTION NMR X-ray RMSD extremes %d%%: loaded %d existing records for resume (outdated=%d)",
-                args.xray_rmsd_sequence_identity,
-                len(valid_existing_records),
-                dropped_existing,
-            )
-
-        rmsd_collector = SolutionNMRMonomerXrayRmsdCollector(
+        collect_solution_nmr_monomer_xray_rmsd_extremes_to_csv(
             client=client,
             config=config,
+            homolog_input_path=homolog_input_path,
+            output_path=Path(args.solution_nmr_monomer_xray_rmsd_extremes_output),
             cache_dir=Path(args.xray_rmsd_cache_dir),
             rmsd_workers=args.xray_rmsd_workers,
-            homolog_records=homolog_records,
             sequence_identity_percent=args.xray_rmsd_sequence_identity,
+            max_entries=args.xray_rmsd_max_entries,
+            overwrite=args.xray_rmsd_overwrite,
+            log_label="SOLUTION NMR X-ray RMSD extremes",
         )
-        valid_existing_records = sorted(
-            valid_existing_records, key=lambda r: (r.year, r.entry_id)
+
+    if (
+        DatasetKind.SOLUTION_NMR_MONOMER_XRAY_RMSD_EXTREMES_HISTORICAL
+        in args.datasets
+    ):
+        homolog_input_path = (
+            Path(args.solution_nmr_monomer_xray_homolog_95_historical_output)
+            if args.xray_rmsd_sequence_identity == 95
+            else Path(args.solution_nmr_monomer_xray_homolog_100_historical_output)
         )
-        extremes_output_path.parent.mkdir(parents=True, exist_ok=True)
-        with extremes_output_path.open("w", newline="", encoding="utf-8") as csvfile:
-            writer = csv.writer(csvfile)
-            writer.writerow(SOLUTION_NMR_MONOMER_XRAY_RMSD_EXTREMES_HEADER)
-            for record in valid_existing_records:
-                writer.writerow(
-                    _solution_nmr_monomer_xray_rmsd_extremes_csv_row(record)
-                )
-            csvfile.flush()
-
-            def _on_xray_rmsd_extremes_record(
-                record: SolutionNMRMonomerXrayRmsdExtremesRecord,
-            ) -> None:
-                writer.writerow(
-                    _solution_nmr_monomer_xray_rmsd_extremes_csv_row(record)
-                )
-                csvfile.flush()
-
-            new_records = rmsd_collector.collect_extremes(
-                max_entries=args.xray_rmsd_max_entries,
-                skip_entry_ids=skip_entry_ids,
-                on_record=_on_xray_rmsd_extremes_record,
-            )
-
-        LOGGER.info(
-            "Saved %d records to %s (new: %d, identity=%d%%)",
-            len(valid_existing_records) + len(new_records),
-            extremes_output_path,
-            len(new_records),
-            args.xray_rmsd_sequence_identity,
+        collect_solution_nmr_monomer_xray_rmsd_extremes_to_csv(
+            client=client,
+            config=config,
+            homolog_input_path=homolog_input_path,
+            output_path=Path(
+                args.solution_nmr_monomer_xray_rmsd_extremes_historical_output
+            ),
+            cache_dir=Path(args.xray_rmsd_cache_dir),
+            rmsd_workers=args.xray_rmsd_workers,
+            sequence_identity_percent=args.xray_rmsd_sequence_identity,
+            max_entries=args.xray_rmsd_max_entries,
+            overwrite=args.xray_rmsd_overwrite,
+            log_label="SOLUTION NMR historical X-ray RMSD extremes",
         )
 
 
