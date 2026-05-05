@@ -253,10 +253,10 @@ class PlotConfig:
     )
     nmr_monomer_xray_homolog_y_label: str = "Structures with X-ray analog (%)"
     nmr_monomer_xray_homolog_95_historical_title: str = (
-        "Share of solution NMR monomeric proteins with already-deposited X-ray analogs (95% sequence identity) by year"
+        "Share of solution NMR monomeric proteins with already-released X-ray analogs (95% sequence identity) by year"
     )
     nmr_monomer_xray_homolog_100_historical_title: str = (
-        "Share of solution NMR monomeric proteins with already-deposited X-ray analogs (100% sequence identity) by year"
+        "Share of solution NMR monomeric proteins with already-released X-ray analogs (100% sequence identity) by year"
     )
     nmr_monomer_xray_homolog_95_cumulative_title: str = (
         "Cumulative share of solution NMR monomeric proteins with X-ray analogs (95% sequence identity)"
@@ -265,16 +265,16 @@ class PlotConfig:
         "Cumulative share of solution NMR monomeric proteins with X-ray analogs (100% sequence identity)"
     )
     nmr_monomer_xray_homolog_95_historical_cumulative_title: str = (
-        "Cumulative share of solution NMR monomeric proteins with already-deposited X-ray analogs (95% sequence identity)"
+        "Cumulative share of solution NMR monomeric proteins with already-released X-ray analogs (95% sequence identity)"
     )
     nmr_monomer_xray_homolog_100_historical_cumulative_title: str = (
-        "Cumulative share of solution NMR monomeric proteins with already-deposited X-ray analogs (100% sequence identity)"
+        "Cumulative share of solution NMR monomeric proteins with already-released X-ray analogs (100% sequence identity)"
     )
     nmr_monomer_xray_homolog_95_timing_share_title: str = (
-        "Share of solution NMR monomeric proteins by X-ray analog deposition timing (95% sequence identity)"
+        "Share of solution NMR monomeric proteins by X-ray analog release timing (95% sequence identity)"
     )
     nmr_monomer_xray_homolog_100_timing_share_title: str = (
-        "Share of solution NMR monomeric proteins by X-ray analog deposition timing (100% sequence identity)"
+        "Share of solution NMR monomeric proteins by X-ray analog release timing (100% sequence identity)"
     )
     nmr_monomer_xray_homolog_timing_share_y_label: str = "Share of structures (%)"
     nmr_monomer_xray_rmsd_title: str = (
@@ -329,8 +329,8 @@ class PlotConfig:
 NMR_WEIGHT_BINS: tuple[float, ...] = (0.0, 10.0, 20.0, float("inf"))
 NMR_WEIGHT_LABELS: tuple[str, ...] = ("<10 kDa", "10-20 kDa", ">20 kDa")
 XRAY_HOMOLOG_TIMING_LABELS: tuple[str, str, str] = (
-    "Already-deposited X-ray analog",
-    "Later-deposited X-ray analog",
+    "Already-released X-ray analog",
+    "Later-released X-ray analog",
     "No X-ray analog",
 )
 MAX_PLOT_YEAR: int = 2024
@@ -2901,10 +2901,10 @@ class PDBScientificPlotter:
             counts.rename(
                 columns={
                     XRAY_HOMOLOG_TIMING_LABELS[0]: (
-                        "already_deposited_xray_homolog_count"
+                        "already_released_xray_homolog_count"
                     ),
                     XRAY_HOMOLOG_TIMING_LABELS[1]: (
-                        "later_deposited_xray_homolog_count"
+                        "later_released_xray_homolog_count"
                     ),
                     XRAY_HOMOLOG_TIMING_LABELS[2]: "no_xray_homolog_count",
                 }
@@ -3414,8 +3414,8 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("data/solution_nmr_monomer_xray_homologs_95_historical.csv"),
         help=(
-            "Input CSV for 95%% X-ray homologs deposited at least 183 days "
-            "before the NMR entry."
+            "Input CSV for 95%% X-ray homologs released no later than the "
+            "NMR entry deposit date."
         ),
     )
     parser.add_argument(
@@ -3423,8 +3423,8 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("data/solution_nmr_monomer_xray_homologs_100_historical.csv"),
         help=(
-            "Input CSV for 100%% X-ray homologs deposited at least 183 days "
-            "before the NMR entry."
+            "Input CSV for 100%% X-ray homologs released no later than the "
+            "NMR entry deposit date."
         ),
     )
     parser.add_argument(
@@ -4583,7 +4583,7 @@ def main() -> None:
             extremes_median_output_svg=(
                 args.nmr_monomer_xray_rmsd_extremes_historical_median_output_svg
             ),
-            title_suffix="(already-deposited X-ray analogs)",
+            title_suffix="(already-released X-ray analogs)",
         )
 
     if PlotKind.SOLUTION_NMR_MONOMER_XRAY_RMSD_PRECISION_CORRELATION in args.plots:

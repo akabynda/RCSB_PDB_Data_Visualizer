@@ -21,7 +21,7 @@ from Bio.SeqUtils import molecular_weight as sequence_molecular_weight, seq1
 from collections import Counter
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Sequence, TypeVar
@@ -32,7 +32,6 @@ LOGGER = logging.getLogger(__name__)
 T = TypeVar("T")
 _MISSING = object()
 PDB_CHAIN_ID_POOL = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
-HISTORICAL_XRAY_DEPOSIT_LAG = timedelta(days=183)
 
 
 class ChainSubsetSelect(Select):
@@ -2508,6 +2507,39 @@ class RCSBClient:
                 continue
             entry_date_by_id[str(entry_id)] = str(deposit_date)
         return entry_date_by_id
+
+    def fetch_accession_dates_by_entry_id_for_ids(
+        self, entry_ids: list[str]
+    ) -> dict[str, tuple[str | None, str | None]]:
+        if not entry_ids:
+            return {}
+        query = """
+        query($ids:[String!]!) {
+          entries(entry_ids:$ids) {
+            rcsb_id
+            rcsb_accession_info {
+              deposit_date
+              initial_release_date
+            }
+          }
+        }
+        """
+        payload = {"query": query, "variables": {"ids": entry_ids}}
+        data = self._post_json(self.config.graphql_url, payload)
+        entries = data.get("data", {}).get("entries", [])
+        entry_dates_by_id: dict[str, tuple[str | None, str | None]] = {}
+        for entry in entries:
+            if not entry:
+                continue
+            entry_id = entry.get("rcsb_id")
+            accession_info = entry.get("rcsb_accession_info", {}) or {}
+            if not entry_id:
+                continue
+            entry_dates_by_id[str(entry_id)] = (
+                accession_info.get("deposit_date"),
+                accession_info.get("initial_release_date"),
+            )
+        return entry_dates_by_id
 
     def fetch_entry_resolution_for_ids(self, entry_ids: list[str]) -> dict[str, float]:
         query = """
@@ -7178,19 +7210,19 @@ def filter_xray_homolog_records_by_deposit_date(
             if entry_id
         }
     )
-    deposit_date_by_entry_id: dict[str, str] = {}
+    accession_dates_by_entry_id: dict[str, tuple[str | None, str | None]] = {}
     for batch_dates in collect_batch_results(
         batches=list(chunked(entry_ids, config.graphql_batch_size)),
         max_workers=config.max_workers,
-        fetch_fn=client.fetch_deposit_date_by_entry_id_for_ids,
-        progress_label="Historical homolog deposit dates",
+        fetch_fn=client.fetch_accession_dates_by_entry_id_for_ids,
+        progress_label="Historical homolog accession dates",
     ):
-        deposit_date_by_entry_id.update(batch_dates)
+        accession_dates_by_entry_id.update(batch_dates)
 
     historical_records: list[SolutionNMRMonomerXrayHomologRecord] = []
     for record in records:
         nmr_deposit_date = parse_rcsb_datetime(
-            deposit_date_by_entry_id.get(record.entry_id)
+            (accession_dates_by_entry_id.get(record.entry_id) or (None, None))[0]
         )
         kept_entity_ids_list: list[str] = []
         if nmr_deposit_date is not None:
@@ -7198,16 +7230,13 @@ def filter_xray_homolog_records_by_deposit_date(
                 xray_entry_id = xray_entry_id_by_entity_id.get(entity_id)
                 if not xray_entry_id:
                     continue
-                xray_deposit_date = deposit_date_by_entry_id.get(xray_entry_id)
-                if xray_deposit_date is None:
+                xray_release_date = (
+                    accession_dates_by_entry_id.get(xray_entry_id) or (None, None)
+                )[1]
+                parsed_xray_release_date = parse_rcsb_datetime(xray_release_date)
+                if parsed_xray_release_date is None:
                     continue
-                parsed_xray_deposit_date = parse_rcsb_datetime(xray_deposit_date)
-                if parsed_xray_deposit_date is None:
-                    continue
-                if (
-                    parsed_xray_deposit_date + HISTORICAL_XRAY_DEPOSIT_LAG
-                    <= nmr_deposit_date
-                ):
+                if parsed_xray_release_date <= nmr_deposit_date:
                     kept_entity_ids_list.append(entity_id)
         kept_entity_ids = tuple(kept_entity_ids_list)
         kept_entry_ids = SolutionNMRMonomerXrayHomologCollector._entry_ids_from_polymer_entity_ids(
@@ -7976,8 +8005,8 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("data/solution_nmr_monomer_xray_homologs_95_historical.csv"),
         help=(
-            "Output CSV path for 95%% X-ray homologs deposited at least "
-            "183 days before the NMR entry deposit date."
+            "Output CSV path for 95%% X-ray homologs released no later than "
+            "the NMR entry deposit date."
         ),
     )
     parser.add_argument(
@@ -7985,8 +8014,8 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("data/solution_nmr_monomer_xray_homologs_100_historical.csv"),
         help=(
-            "Output CSV path for 100%% X-ray homologs deposited at least "
-            "183 days before the NMR entry deposit date."
+            "Output CSV path for 100%% X-ray homologs released no later than "
+            "the NMR entry deposit date."
         ),
     )
     parser.add_argument(
@@ -8000,7 +8029,7 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("data/solution_nmr_monomer_xray_rmsd_historical.csv"),
         help=(
-            "Output CSV path for X-ray RMSD calculated from already-deposited "
+            "Output CSV path for X-ray RMSD calculated from already-released "
             "historical homologs."
         ),
     )
@@ -8019,7 +8048,7 @@ def parse_args() -> argparse.Namespace:
         default=Path("data/solution_nmr_monomer_xray_rmsd_extremes_historical.csv"),
         help=(
             "Output CSV path for X-ray RMSD extremes calculated from "
-            "already-deposited historical homologs."
+            "already-released historical homologs."
         ),
     )
     parser.add_argument(
