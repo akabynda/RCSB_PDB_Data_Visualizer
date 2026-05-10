@@ -782,6 +782,8 @@ class PDBScientificPlotter:
         x_left: float | None = None,
         x_right: float | None = None,
         use_step_segments: bool = False,
+        expand_step_xlim: bool = True,
+        legend_loc: str = "upper left",
     ) -> None:
         def draw(ax: plt.Axes) -> None:
             x_step_edges: np.ndarray | None = None
@@ -816,14 +818,14 @@ class PDBScientificPlotter:
                 current_left, current_right = ax.get_xlim()
                 effective_left = x_left if x_left is not None else current_left
                 effective_right = x_right if x_right is not None else current_right
-                if use_step_segments and x_step_edges is not None:
+                if expand_step_xlim and use_step_segments and x_step_edges is not None:
                     effective_left = min(effective_left, float(x_step_edges[0]))
                     effective_right = max(effective_right, float(x_step_edges[-1]))
                 ax.set_xlim(
                     left=effective_left,
                     right=effective_right,
                 )
-            self._add_legend(ax, loc="upper left", title="Weight category")
+            self._add_legend(ax, loc=legend_loc, title="Weight category")
 
         self._render_figure(
             output_png=output_png,
@@ -1556,9 +1558,10 @@ class PDBScientificPlotter:
             title=self.config.nmr_area_share_title,
             y_label=self.config.nmr_area_share_y_label,
             y_limits=(0.0, 100.0),
-            x_left=1979,
+            x_left=float(yearly_share.index.min()),
             x_right=float(yearly_share.index.max()),
             use_step_segments=True,
+            legend_loc="lower right",
         )
 
     def plot_solution_nmr_period_area_cumulative_share(
