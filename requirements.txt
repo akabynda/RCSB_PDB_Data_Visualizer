@@ -1,0 +1,6 @@
+biopython==1.86
+MDAnalysis==2.9.0
+matplotlib==3.10.8
+numpy==2.2.6
+pandas==2.3.3
+requests==2.32.5

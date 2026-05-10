@@ -1,11 +1,5 @@
 # RCSB PDB Data Visualizer
 
-Run commands from the repository root:
-
-```bash
-python pdb_data_collector.py
-```
-
 The collector writes CSV files to `data/` and uses `data/pdb_cache/` for cached
 PDB coordinate files. Large datasets need network access and enough disk space
 for the cache.
@@ -18,17 +12,14 @@ Show all available collector options:
 python pdb_data_collector.py --help
 ```
 
-Run the default dataset set:
+Run every available dataset:
 
 ```bash
-python pdb_data_collector.py
+python pdb_data_collector.py --datasets all
 ```
 
-The default run collects:
-
-- `method_counts`
-- `solution_nmr_weights`
-- `solution_nmr_monomer_stride_modeled_first_model`
+`all` can take a long time. Some datasets download PDB files, run STRIDE, and
+compute RMSD values.
 
 Run one dataset:
 
@@ -42,15 +33,6 @@ Run several datasets:
 python pdb_data_collector.py \
   --datasets method_counts,membrane_protein_counts,solution_nmr_weights
 ```
-
-Run every available dataset:
-
-```bash
-python pdb_data_collector.py --datasets all
-```
-
-`all` can take a long time. Some datasets download PDB files, run STRIDE, and
-compute RMSD values.
 
 ## Dataset Selection
 
@@ -319,12 +301,6 @@ Output:
 
 - `data/solution_nmr_monomer_precision_stride_modeled_first_model.csv`
 
-Useful options:
-
-- `--precision-max-entries`
-- `--precision-workers`
-- `--precision-overwrite`
-
 ### `solution_nmr_monomer_quality`
 
 Collects validation metrics for eligible SOLUTION NMR protein monomers:
@@ -433,11 +409,7 @@ Output:
 
 ## Plot Generation
 
-After the CSV files are ready, build figures with `pdb_plot.py`:
-
-```bash
-python pdb_plot.py
-```
+After the CSV files are ready, build figures with `pdb_plot.py`.
 
 By default, `pdb_plot.py` reads the standard CSV paths in `data/` and writes
 PNG/SVG figures to `figures/`.
