@@ -18,12 +18,13 @@ from Bio.PDB import MMCIFParser, PDBIO, PDBParser, Select
 from Bio.PDB.PDBExceptions import PDBConstructionWarning
 from Bio.SeqUtils import molecular_weight as sequence_molecular_weight, seq1
 from collections import Counter
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any, Callable, Iterable, Iterator, Sequence, TypeVar
+from typing import Any, TypeVar
 from MDAnalysis.analysis.align import rotation_matrix as mda_rotation_matrix
 from MDAnalysis.analysis.rms import rmsd as mda_rmsd
 
@@ -399,7 +400,7 @@ def collect_batch_results(
     return results
 
 
-def fetch_solution_nmr_entry_ids(client: "RCSBClient", log_label: str) -> list[str]:
+def fetch_solution_nmr_entry_ids(client: RCSBClient, log_label: str) -> list[str]:
     """Fetch all entry IDs assigned to the SOLUTION NMR method."""
     entry_ids = sorted(
         set(
@@ -4289,7 +4290,9 @@ class SolutionNMRMonomerXrayHomologCollector:
             len(records_100),
         )
 
-        key_fn = lambda r: (r.year, r.entry_id)
+        def key_fn(record):
+            return record.year, record.entry_id
+
         return sorted(records_95, key=key_fn), sorted(records_100, key=key_fn)
 
 
