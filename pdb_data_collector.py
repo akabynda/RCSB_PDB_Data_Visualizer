@@ -35,9 +35,11 @@ PDB_CHAIN_ID_POOL = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456
 
 class ChainSubsetSelect(Select):
     def __init__(self, chain_object_ids: set[int]) -> None:
+        """Store the selected Biopython chain object identities."""
         self.chain_object_ids = chain_object_ids
 
     def accept_chain(self, chain: Any) -> bool:
+        """Return whether a chain should be written by PDBIO."""
         return id(chain) in self.chain_object_ids
 
 SOLUTION_NMR_METHOD = "SOLUTION NMR"
@@ -69,10 +71,12 @@ class ExperimentalMethod(Enum):
 
     @property
     def label(self) -> str:
+        """Return the display label for the experimental method."""
         return self.value[0]
 
     @property
     def query_values(self) -> tuple[str, ...]:
+        """Return the RCSB method values used in search queries."""
         return self.value[1]
 
 
@@ -346,11 +350,13 @@ class XrayPolymerEntityCandidateRecord:
 
 
 def chunked(items: list[str], size: int) -> Iterator[list[str]]:
+    """Yield fixed-size batches from a list of item identifiers."""
     for i in range(0, len(items), size):
         yield items[i : i + size]
 
 
 def extract_year(deposit_date: str | None) -> int | None:
+    """Extract a deposit year from an RCSB date string."""
     if not deposit_date:
         return None
     try:
@@ -360,6 +366,7 @@ def extract_year(deposit_date: str | None) -> int | None:
 
 
 def parse_rcsb_datetime(value: str | None) -> datetime | None:
+    """Parse an RCSB date or datetime string into a datetime object."""
     if not value:
         return None
     try:
@@ -374,6 +381,7 @@ def collect_batch_results(
     fetch_fn: Callable[[list[str]], T],
     progress_label: str,
 ) -> list[T]:
+    """Run batched collection work in parallel and collect successful records."""
     if not batches:
         return []
     results: list[T] = []
@@ -392,6 +400,7 @@ def collect_batch_results(
 
 
 def fetch_solution_nmr_entry_ids(client: "RCSBClient", log_label: str) -> list[str]:
+    """Fetch all entry IDs assigned to the SOLUTION NMR method."""
     entry_ids = sorted(
         set(
             client.fetch_entry_ids_for_method(
@@ -405,6 +414,7 @@ def fetch_solution_nmr_entry_ids(client: "RCSBClient", log_label: str) -> list[s
 
 
 def resolve_stride_executable(explicit_value: str) -> str | None:
+    """Resolve the STRIDE executable path from arguments, PATH, or local builds."""
     explicit_path = explicit_value.strip()
     if explicit_path:
         path = Path(explicit_path).expanduser()
@@ -428,6 +438,7 @@ def download_pdb_if_needed(
     cache_dir: Path,
     entry_id: str,
 ) -> Path:
+    """Download and cache a PDB-format coordinate file if it is missing."""
     cache_dir.mkdir(parents=True, exist_ok=True)
     path = cache_dir / f"{entry_id}.pdb"
     if path.exists() and path.stat().st_size > 0:
@@ -492,6 +503,7 @@ def download_pdb_if_needed(
 
 
 def parse_mmcif_structure(entry_id: str, cif_path: Path) -> Any:
+    """Parse an mmCIF coordinate file into a Biopython structure."""
     parser = MMCIFParser(QUIET=True)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", PDBConstructionWarning)
@@ -499,6 +511,7 @@ def parse_mmcif_structure(entry_id: str, cif_path: Path) -> Any:
 
 
 def parse_pdb_structure(entry_id: str, pdb_path: str | Path) -> Any:
+    """Parse a PDB coordinate file into a Biopython structure."""
     parser = PDBParser(QUIET=True)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", PDBConstructionWarning)
@@ -506,6 +519,7 @@ def parse_pdb_structure(entry_id: str, pdb_path: str | Path) -> Any:
 
 
 def _coerce_structure_chain_ids_for_pdbio(structure: Any) -> dict[str, str]:
+    """Assign temporary PDB-compatible chain IDs before PDBIO output."""
     original_chain_ids: list[str] = []
     seen_original_ids: set[str] = set()
     for model in structure:
@@ -549,6 +563,7 @@ def _coerce_selected_structure_chain_ids_for_pdbio(
     structure: Any,
     selected_chain_ids: set[str],
 ) -> tuple[dict[str, str], set[int]]:
+    """Assign temporary PDB-compatible IDs only for selected chains."""
     selected_chain_object_ids: set[int] = set()
     existing_chain_ids: set[str] = set()
     for model in structure:
@@ -586,6 +601,7 @@ def _apply_chain_id_map_without_transient_conflicts(
     structure: Any,
     chain_id_map: dict[str, str],
 ) -> None:
+    """Apply a chain-ID mapping without creating temporary ID collisions."""
     chain_objects: list[tuple[Any, str]] = []
     for model in structure:
         for chain in model:
@@ -608,6 +624,7 @@ def _apply_chain_id_map_without_transient_conflicts(
 
 
 def load_cached_chain_id_map(cache_dir: Path, entry_id: str) -> dict[str, str]:
+    """Load the cached original-to-PDB chain ID mapping for an entry."""
     map_path = cache_dir / f"{entry_id}.chain_map.csv"
     if not map_path.exists():
         return {}
@@ -623,6 +640,7 @@ def load_cached_chain_id_map(cache_dir: Path, entry_id: str) -> dict[str, str]:
 
 
 def _chain_subset_cache_stem(entry_id: str, chain_ids: Sequence[str]) -> str:
+    """Build a deterministic cache key for a chain subset file."""
     normalized = ",".join(sorted(str(chain_id) for chain_id in chain_ids))
     digest = hashlib.sha1(normalized.encode("utf-8")).hexdigest()[:12]
     return f"{entry_id}.chains_{digest}"
@@ -635,6 +653,7 @@ def download_pdb_chain_subset_if_needed(
     entry_id: str,
     chain_ids: Sequence[str],
 ) -> tuple[Path, dict[str, str]]:
+    """Create or reuse a cached PDB file containing only selected chains."""
     selected_chain_ids = {str(chain_id) for chain_id in chain_ids if str(chain_id)}
     if not selected_chain_ids:
         raise RuntimeError(f"No chain IDs selected for {entry_id}")
@@ -694,6 +713,7 @@ def download_pdb_chain_subset_if_needed(
 
 
 def load_chain_id_map(map_path: Path) -> dict[str, str]:
+    """Read a JSON chain-ID mapping file from disk."""
     if not map_path.exists():
         return {}
     chain_id_map: dict[str, str] = {}
@@ -712,6 +732,7 @@ def write_csv_rows(
     header: Sequence[str],
     rows: Iterable[Sequence[Any]],
 ) -> None:
+    """Write dataclass records to CSV with the requested field order."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("w", newline="", encoding="utf-8") as csvfile:
         writer = csv.writer(csvfile)
@@ -755,6 +776,7 @@ PROGRAM_CLUSTER_NAME_BY_ID: dict[str, str] = dict(PROGRAM_CLUSTER_DEFINITIONS)
 
 
 def _normalize_refinement_program_name(raw_value: str) -> str | None:
+    """Normalize raw refinement program text to a canonical program label."""
     token = raw_value.strip().upper()
     if not token:
         return None
@@ -780,6 +802,7 @@ def _normalize_refinement_program_name(raw_value: str) -> str | None:
 
 
 def extract_raw_refinement_program_text_from_pdb(pdb_path: Path) -> str:
+    """Extract the raw refinement program remark text from a PDB file."""
     values: list[str] = []
     with pdb_path.open("r", encoding="utf-8", errors="ignore") as handle:
         for line in handle:
@@ -793,6 +816,7 @@ def extract_raw_refinement_program_text_from_pdb(pdb_path: Path) -> str:
 
 
 def extract_refinement_programs_from_pdb(pdb_path: Path) -> set[str]:
+    """Extract canonical refinement program names from PDB remarks."""
     programs: set[str] = set()
     with pdb_path.open("r", encoding="utf-8", errors="ignore") as handle:
         for line in handle:
@@ -812,6 +836,7 @@ def extract_refinement_programs_from_pdb(pdb_path: Path) -> set[str]:
 def classify_solution_nmr_program_cluster(
     program_text: str | None,
 ) -> tuple[str, str]:
+    """Assign refinement program text to a broad SOLUTION NMR software cluster."""
     text = (program_text or "").upper()
     if "AMBER" in text:
         return "CLUSTER1", PROGRAM_CLUSTER_NAME_BY_ID["CLUSTER1"]
@@ -838,6 +863,7 @@ def classify_solution_nmr_program_cluster(
 
 
 def extract_model_pdb_texts(pdb_path: Path) -> list[str]:
+    """Split a PDB file into separate text blocks for each model."""
     model_texts: list[str] = []
     model_lines: list[str] = []
     saw_model = False
@@ -878,6 +904,7 @@ def extract_model_pdb_texts(pdb_path: Path) -> list[str]:
 
 
 def _parse_stride_state_by_chain(stdout: str) -> dict[str, dict[int, str]]:
+    """Parse STRIDE output into residue state codes grouped by chain."""
     state_by_chain: dict[str, dict[int, str]] = {}
     for line in stdout.splitlines():
         if not line.startswith("ASG"):
@@ -908,6 +935,7 @@ def _select_stride_chain_states(
     state_by_chain: dict[str, dict[int, str]],
     chain_id: str,
 ) -> dict[int, str] | None:
+    """Select STRIDE residue states for the best matching chain identifier."""
     chain_states = state_by_chain.get(chain_id)
     if not chain_states and len(state_by_chain) == 1:
         chain_states = next(iter(state_by_chain.values()))
@@ -918,6 +946,7 @@ def _run_stride_for_model_text(
     model_text: str,
     stride_executable: str,
 ) -> dict[str, dict[int, str]] | None:
+    """Run STRIDE on a single MODEL text block and return parsed states."""
     with tempfile.NamedTemporaryFile(
         "w", suffix=".pdb", encoding="utf-8", delete=True
     ) as handle:
@@ -939,6 +968,7 @@ def _extract_stride_core_range_for_modeled_auth_seq_ids(
     chain_states: dict[int, str],
     modeled_auth_seq_ids: set[int],
 ) -> tuple[int, int] | None:
+    """Find the contiguous modeled residue range covered by STRIDE core states."""
     structured_auth_seq_ids = sorted(
         auth_seq_id
         for auth_seq_id in modeled_auth_seq_ids
@@ -959,6 +989,7 @@ def compute_stride_state_coverages_for_chain_modeled_first_model(
     modeled_auth_seq_ids: set[int],
     stride_executable: str,
 ) -> tuple[dict[str, float], int, int]:
+    """Compute first-model STRIDE secondary-structure coverage for one chain."""
     default_coverages = {state: -1.0 for state in STRIDE_STATE_CODES}
     if modeled_sequence_length <= 0 or not modeled_auth_seq_ids:
         return default_coverages, 0, 0
@@ -1018,6 +1049,7 @@ def compute_stride_core_range_for_modeled_auth_seq_ids_in_first_model(
     modeled_auth_seq_ids: set[int],
     stride_executable: str,
 ) -> tuple[int, int] | None:
+    """Return the modeled first-model residue range supported by STRIDE core states."""
     if not modeled_auth_seq_ids:
         return None
 
@@ -1048,6 +1080,7 @@ def parse_models_ca_coords(
     start_seq_id: int | None = None,
     end_seq_id: int | None = None,
 ) -> list[dict[int, np.ndarray]]:
+    """Parse CA coordinates from every model in a PDB file."""
     model_maps, _ = parse_models_ca_coords_with_stats(
         pdb_path=pdb_path,
         chain_id=chain_id,
@@ -1063,6 +1096,7 @@ def parse_first_model_ca_residue_sequence(
     start_seq_id: int | None = None,
     end_seq_id: int | None = None,
 ) -> list[tuple[int, str]]:
+    """Return residue identities for CA atoms in the first model."""
     return [
         (record.resid, record.identity)
         for record in parse_first_model_ca_residues(
@@ -1080,6 +1114,7 @@ def parse_first_model_ca_residues(
     start_seq_id: int | None = None,
     end_seq_id: int | None = None,
 ) -> list[CAResidueRecord]:
+    """Return first-model CA residue records with identity and atom-standard flags."""
     residue_order: list[int] = []
     candidates: dict[int, tuple[str, float, str, CAResidueRecord]] = {}
     modres_identity_by_key = _parse_pdb_modres_identity_map(pdb_path)
@@ -1176,6 +1211,7 @@ def parse_first_model_ca_residues(
 def _parse_pdb_modres_identity_map(
     pdb_path: Path,
 ) -> dict[tuple[str, int, str, str], str]:
+    """Parse MODRES records into modified-to-standard residue identity mappings."""
     identity_by_key: dict[tuple[str, int, str, str], str] = {}
     with pdb_path.open("r", encoding="utf-8", errors="ignore") as handle:
         for line in handle:
@@ -1215,6 +1251,7 @@ def find_modeled_ca_core_identity_matches(
     xray_residues: list[CAResidueRecord],
     sequence_identity_percent: int,
 ) -> list[list[tuple[CAResidueRecord, CAResidueRecord]]]:
+    """Find matching first-model CA ranges that align to a modeled core sequence."""
     if not nmr_residues or not xray_residues:
         return []
     if not 0 <= sequence_identity_percent <= 100:
@@ -1257,6 +1294,7 @@ def _find_gapped_modeled_ca_core_identity_match(
     xray_residues: list[CAResidueRecord],
     sequence_identity_percent: int,
 ) -> list[tuple[CAResidueRecord, CAResidueRecord]] | None:
+    """Find a modeled core match allowing residue gaps at CA positions."""
     nmr_len = len(nmr_residues)
     min_count = (nmr_len * sequence_identity_percent + 99) // 100
     if min_count <= 0:
@@ -1327,6 +1365,7 @@ def _find_gapped_modeled_ca_core_identity_match(
 
 def _alt_loc_tiebreak_key(alt_loc: str) -> tuple[int, str]:
     # Prefer blank altLoc, then A, then 1; keep deterministic order for others.
+    """Rank alternate atom locations for deterministic CA selection."""
     if alt_loc == "":
         return (0, "")
     if alt_loc == "A":
@@ -1338,12 +1377,14 @@ def _alt_loc_tiebreak_key(alt_loc: str) -> tuple[int, str]:
 
 def _insertion_code_tiebreak_key(insertion_code: str) -> tuple[int, str]:
     # Prefer residue numbers without insertion codes (e.g., 102 over 102A).
+    """Rank insertion codes for deterministic residue ordering."""
     if insertion_code == "":
         return (0, "")
     return (1, insertion_code)
 
 
 def _parse_pdb_occupancy(line: str) -> float:
+    """Parse the occupancy value from a PDB ATOM record."""
     occ_text = line[54:60].strip()
     if not occ_text:
         return float("-inf")
@@ -1361,6 +1402,7 @@ def _is_better_ca_candidate(
     current_occupancy: float,
     current_alt_loc: str,
 ) -> bool:
+    """Decide whether a CA atom candidate should replace the current one."""
     new_i_code_key = _insertion_code_tiebreak_key(new_insertion_code)
     current_i_code_key = _insertion_code_tiebreak_key(current_insertion_code)
     if new_i_code_key < current_i_code_key:
@@ -1384,6 +1426,7 @@ def parse_models_ca_coords_with_stats(
     # Select one CA per residue by max occupancy (altLoc-aware) and keep raw
     # per-residue counts so callers can report how many CA atoms were present
     # before altLoc collapsing.
+    """Parse model CA coordinates and report residue-selection statistics."""
     models: list[dict[int, np.ndarray]] = []
     raw_ca_counts_per_model: list[dict[int, int]] = []
     current_candidates: dict[int, tuple[str, float, str, np.ndarray]] = {}
@@ -1392,6 +1435,7 @@ def parse_models_ca_coords_with_stats(
     in_model = False
 
     def finalize_model() -> None:
+        """Finalize one parsed model and reset per-model parsing buffers."""
         models.append(
             {
                 resid: candidate[3]
@@ -1479,12 +1523,14 @@ def parse_models_ca_coords_with_stats(
 
 
 def _superposed_rmsd(a: np.ndarray, b: np.ndarray) -> float:
+    """Compute RMSD after optimal rigid-body superposition."""
     return float(mda_rmsd(a, b, center=True, superposition=True))
 
 
 def _aligned_coordinates_to_reference(
     mobile: np.ndarray, reference: np.ndarray
 ) -> np.ndarray:
+    """Align coordinates onto a reference coordinate set."""
     mobile_center = np.mean(mobile, axis=0)
     reference_center = np.mean(reference, axis=0)
     mobile_centered = mobile - mobile_center
@@ -1495,6 +1541,7 @@ def _aligned_coordinates_to_reference(
 
 
 def _average_structure_aligned_to_first_model(coords: np.ndarray) -> np.ndarray:
+    """Build an average structure after aligning models to the first model."""
     if coords.ndim != 3 or coords.shape[0] == 0:
         raise ValueError("coords must have shape (n_models, n_atoms, 3)")
     reference = np.asarray(coords[0], dtype=float)
@@ -1511,6 +1558,7 @@ def _average_structure_aligned_to_first_model(coords: np.ndarray) -> np.ndarray:
 def _normalize_polymer_sequence(
     raw_sequence: Any, expected_length: int | None = None
 ) -> str | None:
+    """Normalize polymer sequence text into a compact one-letter sequence."""
     if not isinstance(raw_sequence, str):
         return None
     compact = "".join(raw_sequence.split()).upper()
@@ -1526,6 +1574,7 @@ def _normalize_polymer_sequence(
 
 
 def _seq_type_for_polymer(polymer_type: str, sequence: str | None = None) -> str | None:
+    """Classify a polymer sequence for molecular-weight calculation."""
     mapping = {
         "Protein": "protein",
         "DNA": "DNA",
@@ -1546,6 +1595,7 @@ def _seq_type_for_polymer(polymer_type: str, sequence: str | None = None) -> str
 def _modeled_sequence_from_instance_features(
     sequence: str, instance_features: list[dict[str, Any] | None]
 ) -> str:
+    """Build the modeled sequence after removing unmodeled feature ranges."""
     if not sequence:
         return sequence
     modeled_mask = [True] * len(sequence)
@@ -1581,6 +1631,7 @@ def _modeled_sequence_from_instance_features(
 def _modeled_label_seq_ids_from_instance_features(
     sequence_length: int, instance_features: list[dict[str, Any] | None]
 ) -> set[int]:
+    """Return modeled label sequence IDs after excluding unmodeled ranges."""
     if sequence_length <= 0:
         return set()
     modeled_seq_ids = set(range(1, sequence_length + 1))
@@ -1614,6 +1665,7 @@ def _modeled_label_seq_ids_from_instance_features(
 def _map_label_seq_ids_to_auth_seq_ids(
     label_seq_ids: set[int], auth_mapping_raw: Any
 ) -> set[int]:
+    """Map label sequence IDs to author sequence IDs when mapping data exists."""
     if not label_seq_ids:
         return set()
 
@@ -1635,6 +1687,7 @@ def _map_label_seq_ids_to_auth_seq_ids(
 
 
 def _auth_mapping_tuple(auth_mapping_raw: Any) -> tuple[int | None, ...]:
+    """Normalize raw author sequence mapping data into a tuple."""
     if not isinstance(auth_mapping_raw, list):
         return tuple()
     values: list[int | None] = []
@@ -1647,6 +1700,7 @@ def _auth_mapping_tuple(auth_mapping_raw: Any) -> tuple[int | None, ...]:
 
 
 def _sequence_weight_kda(sequence: str, seq_type: str) -> float | None:
+    """Calculate sequence molecular weight in kilodaltons."""
     if sequence_molecular_weight is None:
         return None
     sequence_for_weight = sequence
@@ -1675,12 +1729,14 @@ MEMBRANE_ANNOTATION_TYPES: tuple[str, ...] = ("OPM", "PDBTM", "MemProtMD", "mpst
 
 class RCSBClient:
     def __init__(self, config: CollectorConfig) -> None:
+        """Initialize the RCSB API client session and configuration."""
         self.config = config
         self.session = requests.Session()
         self.session.headers.update({"User-Agent": "pdb-extensible-collector/1.0"})
 
     @staticmethod
     def _normalize_similarity_cutoff(raw_cutoff: Any) -> int | None:
+        """Normalize raw sequence-identity cutoff values to integer percentages."""
         try:
             return int(round(float(raw_cutoff)))
         except (TypeError, ValueError):
@@ -1692,6 +1748,7 @@ class RCSBClient:
         memberships: Iterable[dict[str, Any] | None],
         allowed_cutoffs: set[int] | None = None,
     ) -> dict[int, str]:
+        """Extract matching sequence-identity group IDs from GraphQL entity data."""
         groups: dict[int, str] = {}
         for membership in memberships:
             if not membership:
@@ -1716,6 +1773,7 @@ class RCSBClient:
     def _extract_solution_nmr_monomer_context(
         entry: dict[str, Any],
     ) -> tuple[str, int, int, dict[str, Any], str] | None:
+        """Extract monomer chain and modeled-sequence context from entry data."""
         entry_id = entry.get("rcsb_id")
         if not entry_id:
             return None
@@ -1756,6 +1814,7 @@ class RCSBClient:
         sequence_length: int,
         instance: dict[str, Any],
     ) -> tuple[set[int], set[int]]:
+        """Extract modeled residue ID sets for one polymer instance."""
         instance_features = instance.get("rcsb_polymer_instance_feature") or []
         modeled_label_seq_ids = _modeled_label_seq_ids_from_instance_features(
             sequence_length=sequence_length,
@@ -1775,6 +1834,7 @@ class RCSBClient:
     def _extract_secondary_label_ranges(
         instance_features: list[dict[str, Any] | None],
     ) -> list[tuple[int, int]]:
+        """Extract secondary-structure label sequence ranges from entry features."""
         sec_ranges: list[tuple[int, int]] = []
         for feature in instance_features:
             if not feature:
@@ -1801,6 +1861,7 @@ class RCSBClient:
     def _extract_secondary_core_range(
         polymer_entity: dict[str, Any],
     ) -> tuple[int, int] | None:
+        """Choose a core secondary-structure range from modeled label IDs."""
         instances = polymer_entity.get("polymer_entity_instances") or []
         if len(instances) != 1:
             return None
@@ -1851,6 +1912,7 @@ class RCSBClient:
         return_type: str,
         progress_label: str | None = None,
     ) -> list[str]:
+        """Run a paginated RCSB search query and return all identifiers."""
         all_ids: list[str] = []
         start = 0
         total_count: int | None = None
@@ -1883,6 +1945,7 @@ class RCSBClient:
         return all_ids
 
     def _post_json(self, url: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """POST JSON to an RCSB endpoint with retry and backoff handling."""
         last_error: Exception | None = None
         for attempt in range(1, self.config.retries + 1):
             try:
@@ -1912,6 +1975,7 @@ class RCSBClient:
         query_value: str,
         require_protein_entities: bool = False,
     ) -> list[str]:
+        """Fetch entry IDs for one experimental method."""
         method_query: dict[str, Any] = {
             "type": "terminal",
             "service": "text",
@@ -1968,6 +2032,7 @@ class RCSBClient:
     def _filter_entry_ids_by_exact_single_method(
         self, entry_ids: list[str], method_value: str
     ) -> list[str]:
+        """Keep entries whose experimental method list is exactly the requested method."""
         if not entry_ids:
             return []
 
@@ -2010,6 +2075,7 @@ class RCSBClient:
     def fetch_entry_ids_for_membrane_annotations(
         self, annotation_types: tuple[str, ...]
     ) -> list[str]:
+        """Fetch entry IDs with membrane-protein annotations."""
         query = {
             "type": "terminal",
             "service": "text",
@@ -2026,6 +2092,7 @@ class RCSBClient:
         )
 
     def fetch_deposit_dates_for_ids(self, entry_ids: list[str]) -> list[str]:
+        """Fetch deposit date strings for entry IDs."""
         query = """
         query($ids:[String!]!) {
           entries(entry_ids:$ids) {
@@ -2047,6 +2114,7 @@ class RCSBClient:
     def fetch_deposit_year_by_entry_id_for_ids(
         self, entry_ids: list[str]
     ) -> dict[str, int]:
+        """Fetch deposit years keyed by entry ID."""
         if not entry_ids:
             return {}
         query = """
@@ -2078,6 +2146,7 @@ class RCSBClient:
     def fetch_deposit_date_by_entry_id_for_ids(
         self, entry_ids: list[str]
     ) -> dict[str, str]:
+        """Fetch deposit datetimes keyed by entry ID."""
         if not entry_ids:
             return {}
         query = """
@@ -2109,6 +2178,7 @@ class RCSBClient:
     def fetch_accession_dates_by_entry_id_for_ids(
         self, entry_ids: list[str]
     ) -> dict[str, tuple[str | None, str | None]]:
+        """Fetch initial release datetimes keyed by entry ID."""
         if not entry_ids:
             return {}
         query = """
@@ -2140,6 +2210,7 @@ class RCSBClient:
         return entry_dates_by_id
 
     def fetch_entry_resolution_for_ids(self, entry_ids: list[str]) -> dict[str, float]:
+        """Fetch crystallographic resolution values keyed by entry ID."""
         query = """
         query($ids:[String!]!) {
           entries(entry_ids:$ids) {
@@ -2173,6 +2244,7 @@ class RCSBClient:
     def fetch_xray_polymer_entity_ids_for_group_ids(
         self, group_ids: list[str]
     ) -> list[str]:
+        """Fetch X-ray polymer entity IDs for sequence-identity group IDs."""
         if not group_ids:
             return []
         query = {
@@ -2207,6 +2279,7 @@ class RCSBClient:
     def fetch_polymer_entity_group_mapping_for_ids(
         self, entity_ids: list[str], similarity_cutoff: int
     ) -> list[XrayEntityGroupMappingRecord]:
+        """Fetch sequence-identity group mappings for polymer entity IDs."""
         if not entity_ids:
             return []
         query = """
@@ -2282,6 +2355,7 @@ class RCSBClient:
     def fetch_xray_polymer_entity_candidates_for_ids(
         self, entity_ids: list[str]
     ) -> list[XrayPolymerEntityCandidateRecord]:
+        """Fetch candidate X-ray polymer entities and coordinate metadata."""
         if not entity_ids:
             return []
         query = """
@@ -2344,6 +2418,7 @@ class RCSBClient:
     def fetch_sequence_identity_group_ids_for_polymer_entity_ids(
         self, entity_ids: list[str], similarity_cutoff: int
     ) -> set[str]:
+        """Fetch sequence-identity group IDs for polymer entity IDs."""
         if not entity_ids:
             return set()
         query = """
@@ -2377,6 +2452,7 @@ class RCSBClient:
         sequence: str,
         sequence_identity_percent: int,
     ) -> list[str]:
+        """Search RCSB for X-ray polymer entities matching a query sequence."""
         if sequence_identity_percent not in {95, 100}:
             raise ValueError("sequence_identity_percent must be 95 or 100")
         sequence = "".join(sequence.split()).upper()
@@ -2485,6 +2561,7 @@ class RCSBClient:
     def fetch_solution_nmr_weight_records_for_ids(
         self, entry_ids: list[str]
     ) -> list[SolutionNMRWeightRecord]:
+        """Build molecular-weight records for SOLUTION NMR entries."""
         query = """
         query($ids:[String!]!) {
           entries(entry_ids:$ids) {
@@ -2666,6 +2743,7 @@ class RCSBClient:
         stride_executable: str,
         pdb_cache_dir: Path,
     ) -> Iterator[SolutionNMRMonomerStrideModeledFirstModelRecord]:
+        """Yield STRIDE first-model monomer records for SOLUTION NMR entries."""
         query = """
         query($ids:[String!]!) {
           entries(entry_ids:$ids) {
@@ -2730,6 +2808,7 @@ class RCSBClient:
         stride_executable: str,
         pdb_cache_dir: Path,
     ) -> SolutionNMRMonomerStrideModeledFirstModelRecord | None:
+        """Compute one entry-level STRIDE modeled-first-model record."""
         if not entry:
             return None
         context = self._extract_solution_nmr_monomer_context(entry)
@@ -2813,6 +2892,7 @@ class RCSBClient:
         stride_executable: str,
         pdb_cache_dir: Path,
     ) -> list[SolutionNMRMonomerStrideModeledFirstModelRecord]:
+        """Fetch all STRIDE modeled-first-model records for SOLUTION NMR monomers."""
         return list(
             self.iter_solution_nmr_monomer_stride_modeled_first_model_records_for_ids(
                 entry_ids=entry_ids,
@@ -2824,6 +2904,7 @@ class RCSBClient:
     def fetch_solution_nmr_monomer_quality_records_for_ids(
         self, entry_ids: list[str]
     ) -> list[SolutionNMRMonomerQualityRecord]:
+        """Fetch validation quality metrics for SOLUTION NMR monomers."""
         query = """
         query($ids:[String!]!) {
           entries(entry_ids:$ids) {
@@ -2885,6 +2966,7 @@ class RCSBClient:
     def fetch_solution_nmr_monomer_modeled_first_model_seed_records_for_ids(
         self, entry_ids: list[str]
     ) -> list[SolutionNMRMonomerModeledFirstModelSeedRecord]:
+        """Fetch seed data needed for modeled-first-model precision analysis."""
         query = """
         query($ids:[String!]!) {
           entries(entry_ids:$ids) {
@@ -2961,6 +3043,7 @@ class RCSBClient:
     def fetch_solution_nmr_monomer_xray_homolog_seed_records_for_ids(
         self, entry_ids: list[str]
     ) -> list[SolutionNMRMonomerXrayHomologSeedRecord]:
+        """Fetch seed data needed to search X-ray homologs for NMR monomers."""
         query = """
         query($ids:[String!]!) {
           entries(entry_ids:$ids) {
@@ -3053,6 +3136,7 @@ class RCSBClient:
     def fetch_solution_nmr_monomer_xray_seed_records_for_ids(
         self, entry_ids: list[str]
     ) -> list[SolutionNMRMonomerXraySeedRecord]:
+        """Fetch seed data needed for NMR-to-X-ray RMSD analysis."""
         query = """
         query($ids:[String!]!) {
           entries(entry_ids:$ids) {
@@ -3132,12 +3216,14 @@ class RCSBClient:
 
 class PDBMethodYearlyCollector:
     def __init__(self, client: RCSBClient, config: CollectorConfig) -> None:
+        """Initialize a yearly experimental-method count collector."""
         self.client = client
         self.config = config
 
     def _fetch_method_records(
         self, method: ExperimentalMethod
     ) -> list[YearlyCountRecord]:
+        """Fetch yearly count records for one experimental method."""
         entry_ids = sorted(
             {
                 entry_id
@@ -3170,6 +3256,7 @@ class PDBMethodYearlyCollector:
         ]
 
     def collect(self, methods: Iterable[ExperimentalMethod]) -> list[YearlyCountRecord]:
+        """Collect yearly counts for all requested experimental methods."""
         records: list[YearlyCountRecord] = []
         for method in methods:
             records.extend(self._fetch_method_records(method))
@@ -3184,6 +3271,7 @@ class SolutionNMRProgramYearlyCollector:
         cache_dir: Path,
         download_missing: bool = True,
     ) -> None:
+        """Initialize the SOLUTION NMR refinement-program trend collector."""
         self.client = client
         self.config = config
         self.cache_dir = cache_dir
@@ -3191,6 +3279,7 @@ class SolutionNMRProgramYearlyCollector:
         self.cache_dir.mkdir(parents=True, exist_ok=True)
 
     def _fetch_entry_years(self, entry_ids: list[str]) -> dict[str, int]:
+        """Fetch deposit years for SOLUTION NMR entries."""
         entry_year_by_id: dict[str, int] = {}
         batches = list(chunked(entry_ids, self.config.graphql_batch_size))
         for batch_year_map in collect_batch_results(
@@ -3203,6 +3292,7 @@ class SolutionNMRProgramYearlyCollector:
         return entry_year_by_id
 
     def _load_programs_for_entry(self, entry_id: str) -> set[str] | None:
+        """Load refinement program labels from one cached PDB file."""
         cached_pdb_path = self.cache_dir / f"{entry_id}.pdb"
         if cached_pdb_path.exists() and cached_pdb_path.stat().st_size > 0:
             return extract_refinement_programs_from_pdb(cached_pdb_path)
@@ -3221,6 +3311,7 @@ class SolutionNMRProgramYearlyCollector:
         return extract_refinement_programs_from_pdb(downloaded_pdb_path)
 
     def collect(self) -> list[SolutionNMRProgramYearlyCountRecord]:
+        """Collect yearly SOLUTION NMR refinement-program usage counts."""
         entry_ids = fetch_solution_nmr_entry_ids(
             client=self.client,
             log_label="SOLUTION NMR programs",
@@ -3308,11 +3399,13 @@ class SolutionNMRMonomerProgramClusterCollector:
         cache_dir: Path,
         max_workers: int,
     ) -> None:
+        """Initialize the monomer refinement-program cluster collector."""
         self.quality_records = quality_records
         self.cache_dir = cache_dir
         self.max_workers = max(1, max_workers)
 
     def _load_program_text(self, entry_id: str) -> str:
+        """Load raw refinement program text for one entry."""
         pdb_path = self.cache_dir / f"{entry_id}.pdb"
         if not pdb_path.exists() or pdb_path.stat().st_size <= 0:
             return ""
@@ -3324,6 +3417,7 @@ class SolutionNMRMonomerProgramClusterCollector:
         list[SolutionNMRMonomerProgramClusterAssignmentRecord],
         list[SolutionNMRMonomerProgramClusterSummaryRecord],
     ]:
+        """Collect program-cluster assignments for SOLUTION NMR monomers."""
         if not self.quality_records:
             return [], []
 
@@ -3439,10 +3533,12 @@ class SolutionNMRMonomerProgramClusterCollector:
 
 class MembraneProteinYearlyCollector:
     def __init__(self, client: RCSBClient, config: CollectorConfig) -> None:
+        """Initialize the membrane-protein yearly count collector."""
         self.client = client
         self.config = config
 
     def _fetch_membrane_entry_ids(self) -> list[str]:
+        """Fetch entry IDs annotated as membrane proteins."""
         entry_ids = sorted(
             set(
                 self.client.fetch_entry_ids_for_membrane_annotations(
@@ -3458,6 +3554,7 @@ class MembraneProteinYearlyCollector:
         entry_ids: list[str],
         progress_label: str,
     ) -> Counter[int]:
+        """Count entries by deposit year from an entry ID list."""
         year_counter: Counter[int] = Counter()
 
         batches = list(chunked(entry_ids, self.config.graphql_batch_size))
@@ -3474,6 +3571,7 @@ class MembraneProteinYearlyCollector:
         return year_counter
 
     def collect(self) -> list[MembraneYearlyCountRecord]:
+        """Collect yearly membrane-protein entry counts."""
         entry_ids = self._fetch_membrane_entry_ids()
         year_counter = self._count_entry_years(
             entry_ids=entry_ids,
@@ -3489,6 +3587,7 @@ class MembraneProteinYearlyCollector:
         self,
         methods: Iterable[ExperimentalMethod],
     ) -> list[YearlyCountRecord]:
+        """Collect yearly membrane-protein counts split by experimental method."""
         membrane_entry_ids = set(self._fetch_membrane_entry_ids())
         records: list[YearlyCountRecord] = []
 
@@ -3527,10 +3626,12 @@ class MembraneProteinYearlyCollector:
 
 class SolutionNMRWeightCollector:
     def __init__(self, client: RCSBClient, config: CollectorConfig) -> None:
+        """Initialize the SOLUTION NMR molecular-weight collector."""
         self.client = client
         self.config = config
 
     def collect(self) -> list[SolutionNMRWeightRecord]:
+        """Collect molecular-weight records for SOLUTION NMR entries."""
         entry_ids = fetch_solution_nmr_entry_ids(
             client=self.client,
             log_label="SOLUTION NMR",
@@ -3556,6 +3657,7 @@ class SolutionNMRMonomerStrideModeledFirstModelCollector:
         stride_executable: str,
         cache_dir: Path,
     ) -> None:
+        """Initialize streaming STRIDE modeled-first-model collection."""
         self.client = client
         self.config = config
         self.stride_executable = stride_executable
@@ -3565,6 +3667,7 @@ class SolutionNMRMonomerStrideModeledFirstModelCollector:
     def iter_batches(
         self,
     ) -> Iterator[list[SolutionNMRMonomerStrideModeledFirstModelRecord]]:
+        """Yield STRIDE modeled-first-model records batch by batch."""
         entry_ids = fetch_solution_nmr_entry_ids(
             client=self.client,
             log_label="SOLUTION NMR monomer-stride-modeled-first-model",
@@ -3593,11 +3696,13 @@ class SolutionNMRMonomerStrideModeledFirstModelCollector:
             yield batch_records
 
     def iter_records(self) -> Iterator[SolutionNMRMonomerStrideModeledFirstModelRecord]:
+        """Yield individual STRIDE modeled-first-model records."""
         for batch_records in self.iter_batches():
             for record in batch_records:
                 yield record
 
     def collect(self) -> list[SolutionNMRMonomerStrideModeledFirstModelRecord]:
+        """Collect all STRIDE modeled-first-model records into a list."""
         records = list(self.iter_records())
         return sorted(records, key=lambda record: (record.year, record.entry_id))
 
@@ -3610,6 +3715,7 @@ class SolutionNMRMonomerPrecisionCollector:
         cache_dir: Path,
         precision_workers: int,
     ) -> None:
+        """Initialize shared state for monomer precision collectors."""
         self.client = client
         self.config = config
         self.cache_dir = cache_dir
@@ -3617,6 +3723,7 @@ class SolutionNMRMonomerPrecisionCollector:
         self.cache_dir.mkdir(parents=True, exist_ok=True)
 
     def _download_pdb_if_needed(self, entry_id: str) -> Path:
+        """Download or reuse the PDB file needed for precision calculations."""
         return download_pdb_if_needed(
             session=self.client.session,
             config=self.config,
@@ -3631,6 +3738,7 @@ class SolutionNMRMonomerPrecisionCollector:
         start_seq_id: int,
         end_seq_id: int,
     ) -> tuple[int, int, int, float] | None:
+        """Compute mean pairwise model precision relative to the average structure."""
         model_maps, raw_ca_counts_per_model = parse_models_ca_coords_with_stats(
             pdb_path=pdb_path,
             chain_id=chain_id,
@@ -3682,6 +3790,7 @@ class SolutionNMRMonomerPrecisionCollector:
         core_end_seq_id: int,
         parsed_chain_id: str | None = None,
     ) -> SolutionNMRMonomerPrecisionRecord | None:
+        """Build a precision record from a modeled residue core range."""
         result = self._compute_mean_rmsd_to_average(
             pdb_path=pdb_path,
             chain_id=parsed_chain_id or chain_id,
@@ -3714,6 +3823,7 @@ class SolutionNMRMonomerPrecisionStrideModeledFirstModelCollector(
         precision_workers: int,
         stride_executable: str,
     ) -> None:
+        """Initialize STRIDE-core modeled-first-model precision collection."""
         super().__init__(
             client=client,
             config=config,
@@ -3726,6 +3836,7 @@ class SolutionNMRMonomerPrecisionStrideModeledFirstModelCollector(
         self,
         seed: SolutionNMRMonomerModeledFirstModelSeedRecord,
     ) -> SolutionNMRMonomerPrecisionRecord | None:
+        """Compute one STRIDE-core precision record from seed metadata."""
         try:
             pdb_path = self._download_pdb_if_needed(seed.entry_id)
             chain_map = load_cached_chain_id_map(self.cache_dir, seed.entry_id)
@@ -3762,6 +3873,7 @@ class SolutionNMRMonomerPrecisionStrideModeledFirstModelCollector(
         skip_entry_ids: set[str] | None = None,
         on_record: Callable[[SolutionNMRMonomerPrecisionRecord], None] | None = None,
     ) -> list[SolutionNMRMonomerPrecisionRecord]:
+        """Collect STRIDE-core precision records for all eligible seeds."""
         skip_entry_ids = skip_entry_ids or set()
         entry_ids = fetch_solution_nmr_entry_ids(
             client=self.client,
@@ -3817,10 +3929,12 @@ class SolutionNMRMonomerPrecisionStrideModeledFirstModelCollector(
 
 class SolutionNMRMonomerQualityCollector:
     def __init__(self, client: RCSBClient, config: CollectorConfig) -> None:
+        """Initialize the SOLUTION NMR monomer quality collector."""
         self.client = client
         self.config = config
 
     def collect(self) -> list[SolutionNMRMonomerQualityRecord]:
+        """Collect validation quality records for SOLUTION NMR monomers."""
         entry_ids = fetch_solution_nmr_entry_ids(
             client=self.client,
             log_label="SOLUTION NMR quality",
@@ -3846,6 +3960,7 @@ class SolutionNMRMonomerXrayHomologCollector:
         stride_executable: str,
         cache_dir: Path,
     ) -> None:
+        """Initialize X-ray homolog collection for SOLUTION NMR monomers."""
         self.client = client
         self.config = config
         self.stride_executable = stride_executable
@@ -3856,6 +3971,7 @@ class SolutionNMRMonomerXrayHomologCollector:
     def _entry_ids_from_polymer_entity_ids(
         entity_ids: Sequence[str],
     ) -> tuple[str, ...]:
+        """Extract entry IDs from polymer entity identifiers."""
         seen: set[str] = set()
         entry_ids: list[str] = []
         for entity_id in entity_ids:
@@ -3872,6 +3988,7 @@ class SolutionNMRMonomerXrayHomologCollector:
         core_start_seq_id: int,
         core_end_seq_id: int,
     ) -> list[int]:
+        """Map an author residue range back to label sequence IDs."""
         selected: list[int] = []
         start = min(core_start_seq_id, core_end_seq_id)
         end = max(core_start_seq_id, core_end_seq_id)
@@ -3892,6 +4009,7 @@ class SolutionNMRMonomerXrayHomologCollector:
         self,
         seed: SolutionNMRMonomerXrayHomologSeedRecord,
     ) -> tuple[str, int, int, list[CAResidueRecord]] | None:
+        """Build the STRIDE-core query sequence used for homolog searches."""
         pdb_path = download_pdb_if_needed(
             session=self.client.session,
             config=self.config,
@@ -3942,6 +4060,7 @@ class SolutionNMRMonomerXrayHomologCollector:
         candidate: XrayPolymerEntityCandidateRecord,
         sequence_identity_percent: int,
     ) -> bool:
+        """Check whether an X-ray candidate models the NMR core sequence."""
         try:
             (
                 xray_pdb_path,
@@ -3981,6 +4100,7 @@ class SolutionNMRMonomerXrayHomologCollector:
         nmr_core_residues: list[CAResidueRecord],
         sequence_identity_percent: int,
     ) -> tuple[str, ...]:
+        """Filter homolog candidates to those modeling the required core."""
         if not xray_entity_ids:
             return tuple()
 
@@ -4012,6 +4132,7 @@ class SolutionNMRMonomerXrayHomologCollector:
             tuple[str, int, int, list[CAResidueRecord]] | None | object
         ) = _MISSING,
     ) -> SolutionNMRMonomerXrayHomologRecord:
+        """Build one X-ray homolog summary record from a seed."""
         if core_query is _MISSING:
             core_query = self._build_stride_core_query_sequence(seed)
         if core_query is None:
@@ -4055,6 +4176,7 @@ class SolutionNMRMonomerXrayHomologCollector:
         self,
         seed: SolutionNMRMonomerXrayHomologSeedRecord,
     ) -> tuple[SolutionNMRMonomerXrayHomologRecord, SolutionNMRMonomerXrayHomologRecord]:
+        """Build current and historical homolog records for one seed."""
         core_query = self._build_stride_core_query_sequence(seed)
         return (
             self._build_record(seed, sequence_identity_percent=95, core_query=core_query),
@@ -4072,6 +4194,7 @@ class SolutionNMRMonomerXrayHomologCollector:
         list[SolutionNMRMonomerXrayHomologRecord],
         list[SolutionNMRMonomerXrayHomologRecord],
     ]:
+        """Collect X-ray homolog records for SOLUTION NMR monomer seeds."""
         entry_ids = fetch_solution_nmr_entry_ids(
             client=self.client,
             log_label="SOLUTION NMR monomer X-ray homologs",
@@ -4180,6 +4303,7 @@ class SolutionNMRMonomerXrayRmsdCollector:
         homolog_records: list[SolutionNMRMonomerXrayHomologRecord],
         sequence_identity_percent: int = 100,
     ) -> None:
+        """Initialize NMR-to-X-ray RMSD collection."""
         if sequence_identity_percent not in {95, 100}:
             raise ValueError("sequence_identity_percent must be 95 or 100")
         self.client = client
@@ -4191,6 +4315,7 @@ class SolutionNMRMonomerXrayRmsdCollector:
         self.cache_dir.mkdir(parents=True, exist_ok=True)
 
     def _download_pdb_if_needed(self, entry_id: str) -> Path:
+        """Download or reuse a PDB coordinate file for RMSD work."""
         return download_pdb_if_needed(
             session=self.client.session,
             config=self.config,
@@ -4206,6 +4331,7 @@ class SolutionNMRMonomerXrayRmsdCollector:
         parsed_nmr_chain_id: str,
         candidate: XrayPolymerEntityCandidateRecord,
     ) -> SolutionNMRMonomerXrayRmsdRecord | None:
+        """Compute RMSD metrics for one NMR and X-ray candidate pair."""
         try:
             (
                 xray_pdb_path,
@@ -4320,6 +4446,7 @@ class SolutionNMRMonomerXrayRmsdCollector:
         xray_chain_id: str,
         sequence_identity_percent: int,
     ) -> tuple[int, float, int, int, int, int] | None:
+        """Compute CA RMSD after aligning an NMR model core to an X-ray chain."""
         _ = sequence_identity_percent
         core_length = nmr_core_end_seq_id - nmr_core_start_seq_id + 1
         if core_length <= 10:
@@ -4417,6 +4544,7 @@ class SolutionNMRMonomerXrayRmsdCollector:
         nmr_chain_id: str,
         candidates: tuple[XrayPolymerEntityCandidateRecord, ...],
     ) -> SolutionNMRMonomerXrayRmsdRecord | None:
+        """Compute the best X-ray RMSD record for one NMR seed."""
         if (
             homolog.nmr_core_start_seq_id is None
             or homolog.nmr_core_end_seq_id is None
@@ -4452,6 +4580,7 @@ class SolutionNMRMonomerXrayRmsdCollector:
         nmr_chain_id: str,
         candidates: tuple[XrayPolymerEntityCandidateRecord, ...],
     ) -> SolutionNMRMonomerXrayRmsdExtremesRecord | None:
+        """Compute minimum and maximum X-ray RMSD records for one NMR seed."""
         if (
             homolog.nmr_core_start_seq_id is None
             or homolog.nmr_core_end_seq_id is None
@@ -4548,6 +4677,7 @@ class SolutionNMRMonomerXrayRmsdCollector:
             tuple[XrayPolymerEntityCandidateRecord, ...],
         ]
     ]:
+        """Prepare NMR seeds and candidate lists for RMSD collection."""
         filtered_homologs = [
             record
             for record in self.homolog_records
@@ -4635,6 +4765,7 @@ class SolutionNMRMonomerXrayRmsdCollector:
         skip_entry_ids: set[str] | None = None,
         on_record: Callable[[SolutionNMRMonomerXrayRmsdRecord], None] | None = None,
     ) -> list[SolutionNMRMonomerXrayRmsdRecord]:
+        """Collect best-match NMR-to-X-ray RMSD records."""
         skip_entry_ids = skip_entry_ids or set()
         work_items = self._prepare_work_items(
             max_entries=max_entries,
@@ -4681,6 +4812,7 @@ class SolutionNMRMonomerXrayRmsdCollector:
         on_record: Callable[[SolutionNMRMonomerXrayRmsdExtremesRecord], None]
         | None = None,
     ) -> list[SolutionNMRMonomerXrayRmsdExtremesRecord]:
+        """Collect minimum and maximum NMR-to-X-ray RMSD records."""
         skip_entry_ids = skip_entry_ids or set()
         work_items = self._prepare_work_items(
             max_entries=max_entries,
@@ -4724,6 +4856,7 @@ class SolutionNMRMonomerXrayRmsdCollector:
 def write_method_counts_csv(
     records: list[YearlyCountRecord], output_path: Path
 ) -> None:
+    """Write yearly experimental-method counts to CSV."""
     write_csv_rows(
         output_path=output_path,
         header=["year", "method", "count"],
@@ -4734,6 +4867,7 @@ def write_method_counts_csv(
 def write_solution_nmr_program_counts_csv(
     records: list[SolutionNMRProgramYearlyCountRecord], output_path: Path
 ) -> None:
+    """Write yearly SOLUTION NMR program counts to CSV."""
     write_csv_rows(
         output_path=output_path,
         header=["year", "program", "count"],
@@ -4744,6 +4878,7 @@ def write_solution_nmr_program_counts_csv(
 def read_solution_nmr_monomer_quality_csv(
     input_path: Path,
 ) -> list[SolutionNMRMonomerQualityRecord]:
+    """Read SOLUTION NMR monomer quality records from CSV."""
     if not input_path.exists():
         return []
     records: list[SolutionNMRMonomerQualityRecord] = []
@@ -4772,6 +4907,7 @@ def write_solution_nmr_monomer_program_cluster_assignments_csv(
     records: list[SolutionNMRMonomerProgramClusterAssignmentRecord],
     output_path: Path,
 ) -> None:
+    """Write program-cluster assignment records to CSV."""
     write_csv_rows(
         output_path=output_path,
         header=[
@@ -4799,6 +4935,7 @@ def write_solution_nmr_monomer_program_cluster_assignments_csv(
 def read_solution_nmr_monomer_program_cluster_assignments_csv(
     input_path: Path,
 ) -> list[SolutionNMRMonomerProgramClusterAssignmentRecord]:
+    """Read program-cluster assignment records from CSV."""
     if not input_path.exists():
         return []
     records: list[SolutionNMRMonomerProgramClusterAssignmentRecord] = []
@@ -4824,6 +4961,7 @@ def write_solution_nmr_monomer_program_cluster_summary_csv(
     records: list[SolutionNMRMonomerProgramClusterSummaryRecord],
     output_path: Path,
 ) -> None:
+    """Write yearly program-cluster quality summary rows to CSV."""
     write_csv_rows(
         output_path=output_path,
         header=[
@@ -4862,6 +5000,7 @@ def summarize_solution_nmr_monomer_program_cluster_quality_by_year(
     assignment_records: list[SolutionNMRMonomerProgramClusterAssignmentRecord],
     quality_records: list[SolutionNMRMonomerQualityRecord],
 ) -> list[SolutionNMRMonomerProgramClusterYearlySummaryRecord]:
+    """Summarize monomer quality metrics by year and program cluster."""
     if not assignment_records or not quality_records:
         return []
 
@@ -4933,6 +5072,7 @@ def write_solution_nmr_monomer_program_cluster_yearly_summary_csv(
     records: list[SolutionNMRMonomerProgramClusterYearlySummaryRecord],
     output_path: Path,
 ) -> None:
+    """Write overall yearly program-cluster quality summaries to CSV."""
     write_csv_rows(
         output_path=output_path,
         header=[
@@ -4967,6 +5107,7 @@ def summarize_solution_nmr_monomer_program_cluster_quality_total(
     assignment_records: list[SolutionNMRMonomerProgramClusterAssignmentRecord],
     quality_records: list[SolutionNMRMonomerQualityRecord],
 ) -> list[SolutionNMRMonomerProgramClusterTotalRecord]:
+    """Summarize program-cluster quality metrics across all years."""
     if not assignment_records or not quality_records:
         return []
 
@@ -5055,6 +5196,7 @@ def write_solution_nmr_monomer_program_cluster_total_csv(
     records: list[SolutionNMRMonomerProgramClusterTotalRecord],
     output_path: Path,
 ) -> None:
+    """Write total program-cluster quality summaries to CSV."""
     write_csv_rows(
         output_path=output_path,
         header=[
@@ -5088,6 +5230,7 @@ def write_solution_nmr_monomer_program_cluster_total_csv(
 def write_membrane_counts_csv(
     records: list[MembraneYearlyCountRecord], output_path: Path
 ) -> None:
+    """Write membrane-protein yearly count records to CSV."""
     write_csv_rows(
         output_path=output_path,
         header=["year", "count"],
@@ -5098,6 +5241,7 @@ def write_membrane_counts_csv(
 def write_solution_nmr_weights_csv(
     records: list[SolutionNMRWeightRecord], output_path: Path
 ) -> None:
+    """Write SOLUTION NMR molecular-weight records to CSV."""
     write_csv_rows(
         output_path=output_path,
         header=[
@@ -5138,6 +5282,7 @@ def stream_solution_nmr_monomer_stride_modeled_first_model_csv(
     records: Iterator[SolutionNMRMonomerStrideModeledFirstModelRecord],
     output_path: Path,
 ) -> int:
+    """Stream STRIDE modeled-first-model records directly to CSV."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
     count = 0
     with output_path.open("w", newline="", encoding="utf-8") as csvfile:
@@ -5194,6 +5339,7 @@ def stream_solution_nmr_monomer_stride_modeled_first_model_csv(
 def read_solution_nmr_monomer_precision_csv(
     input_path: Path,
 ) -> list[SolutionNMRMonomerPrecisionRecord]:
+    """Read SOLUTION NMR monomer precision records from CSV."""
     if not input_path.exists():
         return []
     records: list[SolutionNMRMonomerPrecisionRecord] = []
@@ -5242,6 +5388,7 @@ SOLUTION_NMR_MONOMER_PRECISION_HEADER: tuple[str, ...] = (
 def _solution_nmr_monomer_precision_csv_row(
     record: SolutionNMRMonomerPrecisionRecord,
 ) -> tuple[Any, ...]:
+    """Convert a precision record into a CSV row dictionary."""
     return (
         record.entry_id,
         record.year,
@@ -5258,6 +5405,7 @@ def _solution_nmr_monomer_precision_csv_row(
 def write_solution_nmr_monomer_quality_csv(
     records: list[SolutionNMRMonomerQualityRecord], output_path: Path
 ) -> None:
+    """Write SOLUTION NMR monomer quality records to CSV."""
     write_csv_rows(
         output_path=output_path,
         header=[
@@ -5297,6 +5445,7 @@ SOLUTION_NMR_MONOMER_XRAY_HOMOLOG_HEADER = [
 def _solution_nmr_monomer_xray_homolog_csv_row(
     record: SolutionNMRMonomerXrayHomologRecord,
 ) -> tuple[Any, ...]:
+    """Convert an X-ray homolog record into a CSV row dictionary."""
     return (
         record.entry_id,
         record.year,
@@ -5320,6 +5469,7 @@ def _solution_nmr_monomer_xray_homolog_csv_row(
 def write_solution_nmr_monomer_xray_homolog_csv(
     records: list[SolutionNMRMonomerXrayHomologRecord], output_path: Path
 ) -> None:
+    """Write X-ray homolog records to CSV."""
     write_csv_rows(
         output_path=output_path,
         header=SOLUTION_NMR_MONOMER_XRAY_HOMOLOG_HEADER,
@@ -5330,6 +5480,7 @@ def write_solution_nmr_monomer_xray_homolog_csv(
 def read_solution_nmr_monomer_xray_homolog_csv(
     input_path: Path,
 ) -> list[SolutionNMRMonomerXrayHomologRecord]:
+    """Read X-ray homolog records from CSV."""
     if not input_path.exists():
         return []
     records: list[SolutionNMRMonomerXrayHomologRecord] = []
@@ -5381,6 +5532,7 @@ def filter_xray_homolog_records_by_deposit_date(
     client: RCSBClient,
     config: CollectorConfig,
 ) -> list[SolutionNMRMonomerXrayHomologRecord]:
+    """Keep homolog records whose X-ray release timing matches the mode."""
     xray_entity_ids = sorted(
         {
             entity_id
@@ -5470,6 +5622,7 @@ def filter_xray_homolog_records_by_deposit_date(
 def read_solution_nmr_monomer_xray_rmsd_csv(
     input_path: Path,
 ) -> list[SolutionNMRMonomerXrayRmsdRecord]:
+    """Read NMR-to-X-ray RMSD records from CSV."""
     if not input_path.exists():
         return []
     records: list[SolutionNMRMonomerXrayRmsdRecord] = []
@@ -5548,6 +5701,7 @@ SOLUTION_NMR_MONOMER_XRAY_RMSD_HEADER: tuple[str, ...] = (
 def _solution_nmr_monomer_xray_rmsd_csv_row(
     record: SolutionNMRMonomerXrayRmsdRecord,
 ) -> tuple[Any, ...]:
+    """Convert an NMR-to-X-ray RMSD record into a CSV row dictionary."""
     return (
         record.entry_id,
         record.year,
@@ -5575,6 +5729,7 @@ def _solution_nmr_monomer_xray_rmsd_csv_row(
 def write_solution_nmr_monomer_xray_rmsd_csv(
     records: list[SolutionNMRMonomerXrayRmsdRecord], output_path: Path
 ) -> None:
+    """Write NMR-to-X-ray RMSD records to CSV."""
     write_csv_rows(
         output_path=output_path,
         header=list(SOLUTION_NMR_MONOMER_XRAY_RMSD_HEADER),
@@ -5615,6 +5770,7 @@ SOLUTION_NMR_MONOMER_XRAY_RMSD_EXTREMES_HEADER: tuple[str, ...] = (
 def _solution_nmr_monomer_xray_rmsd_extremes_csv_row(
     record: SolutionNMRMonomerXrayRmsdExtremesRecord,
 ) -> tuple[Any, ...]:
+    """Convert an RMSD extremes record into a CSV row dictionary."""
     return (
         record.entry_id,
         record.year,
@@ -5664,6 +5820,7 @@ def _solution_nmr_monomer_xray_rmsd_extremes_csv_row(
 def read_solution_nmr_monomer_xray_rmsd_extremes_csv(
     input_path: Path,
 ) -> list[SolutionNMRMonomerXrayRmsdExtremesRecord]:
+    """Read NMR-to-X-ray RMSD extremes records from CSV."""
     if not input_path.exists():
         return []
     records: list[SolutionNMRMonomerXrayRmsdExtremesRecord] = []
@@ -5751,6 +5908,7 @@ def write_solution_nmr_monomer_xray_rmsd_extremes_csv(
     records: list[SolutionNMRMonomerXrayRmsdExtremesRecord],
     output_path: Path,
 ) -> None:
+    """Write NMR-to-X-ray RMSD extremes records to CSV."""
     write_csv_rows(
         output_path=output_path,
         header=list(SOLUTION_NMR_MONOMER_XRAY_RMSD_EXTREMES_HEADER),
@@ -5772,6 +5930,7 @@ def collect_solution_nmr_monomer_xray_rmsd_to_csv(
     overwrite: bool,
     log_label: str,
 ) -> None:
+    """Collect best-match NMR-to-X-ray RMSD records and stream them to CSV."""
     existing_records: list[SolutionNMRMonomerXrayRmsdRecord] = []
     valid_existing_records: list[SolutionNMRMonomerXrayRmsdRecord] = []
     skip_entry_ids: set[str] = set()
@@ -5836,6 +5995,7 @@ def collect_solution_nmr_monomer_xray_rmsd_to_csv(
         csvfile.flush()
 
         def _on_xray_rmsd_record(record: SolutionNMRMonomerXrayRmsdRecord) -> None:
+            """Persist one RMSD record while tracking processed seeds."""
             writer.writerow(_solution_nmr_monomer_xray_rmsd_csv_row(record))
             csvfile.flush()
 
@@ -5866,6 +6026,7 @@ def collect_solution_nmr_monomer_xray_rmsd_extremes_to_csv(
     overwrite: bool,
     log_label: str,
 ) -> None:
+    """Collect NMR-to-X-ray RMSD extremes and stream them to CSV."""
     existing_records: list[SolutionNMRMonomerXrayRmsdExtremesRecord] = []
     valid_existing_records: list[SolutionNMRMonomerXrayRmsdExtremesRecord] = []
     skip_entry_ids: set[str] = set()
@@ -5931,6 +6092,7 @@ def collect_solution_nmr_monomer_xray_rmsd_extremes_to_csv(
         def _on_xray_rmsd_extremes_record(
             record: SolutionNMRMonomerXrayRmsdExtremesRecord,
         ) -> None:
+            """Persist one RMSD extremes record while tracking processed seeds."""
             writer.writerow(_solution_nmr_monomer_xray_rmsd_extremes_csv_row(record))
             csvfile.flush()
 
@@ -5950,6 +6112,7 @@ def collect_solution_nmr_monomer_xray_rmsd_extremes_to_csv(
 
 
 def parse_dataset_kinds(raw_value: str) -> list[DatasetKind]:
+    """Parse comma-separated dataset names into DatasetKind values."""
     if raw_value.strip().lower() == "all":
         return [
             DatasetKind.METHOD_COUNTS,
@@ -5983,6 +6146,7 @@ def parse_dataset_kinds(raw_value: str) -> list[DatasetKind]:
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse command-line arguments for the collector CLI."""
     parser = argparse.ArgumentParser(
         description="Collect extensible PDB datasets from RCSB APIs."
     )
@@ -6275,6 +6439,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    """Run the requested dataset collection workflow from the CLI."""
     args = parse_args()
     logging.basicConfig(
         level=getattr(logging, args.log_level.upper(), logging.INFO),
@@ -6447,6 +6612,7 @@ def main() -> None:
             def _on_precision_stride_record(
                 record: SolutionNMRMonomerPrecisionRecord,
             ) -> None:
+                """Persist one STRIDE-core precision record while tracking processed seeds."""
                 writer.writerow(_solution_nmr_monomer_precision_csv_row(record))
                 csvfile.flush()
 
@@ -6582,6 +6748,7 @@ def main() -> None:
                 record_95: SolutionNMRMonomerXrayHomologRecord,
                 record_100: SolutionNMRMonomerXrayHomologRecord,
             ) -> None:
+                """Persist current and historical homolog records for one seed."""
                 writer_95.writerow(
                     _solution_nmr_monomer_xray_homolog_csv_row(record_95)
                 )
