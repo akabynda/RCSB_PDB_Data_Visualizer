@@ -742,7 +742,10 @@ def write_csv_rows(
 
 
 PROGRAM_REMARK_PATTERN = re.compile(r"^REMARK\s+3\s+PROGRAM\s*:\s*(.*)$")
-PROGRAM_SPLIT_PATTERN = re.compile(r"\s*(?:,|;|/|\+|\bAND\b)\s*", re.IGNORECASE)
+PROGRAM_SPLIT_PATTERN = re.compile(
+    r"\s*(?:,|;|/|\+|\|\||\bAND\b)\s*",
+    re.IGNORECASE,
+)
 PROGRAM_TRAILING_VERSION_PATTERN = re.compile(
     r"\s+(?:V(?:ERSION)?\.?\s*)?\d[\w.\-_:]*$",
     re.IGNORECASE,
@@ -834,11 +837,11 @@ def extract_refinement_programs_from_pdb(pdb_path: Path) -> set[str]:
     return programs
 
 
-def classify_solution_nmr_program_cluster(
-    program_text: str | None,
-) -> tuple[str, str]:
-    """Assign refinement program text to a broad SOLUTION NMR software cluster."""
-    text = (program_text or "").upper()
+def _classify_normalized_program_cluster(
+    program: str,
+) -> tuple[str, str] | None:
+    """Assign one normalized refinement program name to a broad cluster."""
+    text = program.upper()
     if "AMBER" in text:
         return "CLUSTER1", PROGRAM_CLUSTER_NAME_BY_ID["CLUSTER1"]
     if "ARIA" in text:
@@ -860,6 +863,21 @@ def classify_solution_nmr_program_cluster(
         or "XPLOR-NIH" in text
     ):
         return "CLUSTER8", PROGRAM_CLUSTER_NAME_BY_ID["CLUSTER8"]
+    return None
+
+
+def classify_solution_nmr_program_cluster(
+    program_text: str | None,
+) -> tuple[str, str]:
+    """Assign refinement program text to the first recognized software cluster."""
+    text = (program_text or "").strip()
+    for raw_token in PROGRAM_SPLIT_PATTERN.split(text):
+        normalized = _normalize_refinement_program_name(raw_token)
+        if normalized is None:
+            continue
+        cluster = _classify_normalized_program_cluster(normalized)
+        if cluster is not None:
+            return cluster
     return "CLUSTER9", PROGRAM_CLUSTER_NAME_BY_ID["CLUSTER9"]
 
 
