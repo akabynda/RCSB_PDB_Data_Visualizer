@@ -4,9 +4,9 @@ from pathlib import Path
 
 from pdb_data_collector import (
     _normalize_refinement_program_name,
-    classify_solution_nmr_program_cluster,
     extract_raw_refinement_program_text_from_pdb,
     extract_refinement_programs_from_pdb,
+    extract_solution_nmr_program_clusters,
 )
 
 
@@ -31,55 +31,42 @@ class NormalizeRefinementProgramNameTests(unittest.TestCase):
         self.assertIsNone(_normalize_refinement_program_name("3.0"))
 
 
-class ClassifySolutionNMRProgramClusterTests(unittest.TestCase):
-    def test_uses_first_recognized_program_not_cluster_priority(self) -> None:
+class ExtractSolutionNMRProgramClustersTests(unittest.TestCase):
+    def test_extracts_all_unique_clusters_in_program_order(self) -> None:
         self.assertEqual(
-            classify_solution_nmr_program_cluster("DIANA, AMBER 3.0"),
-            ("CLUSTER6", "DIANA_DYANA"),
-        )
-        self.assertEqual(
-            classify_solution_nmr_program_cluster("AMBER 3.0, DIANA"),
-            ("CLUSTER1", "AMBER"),
-        )
-
-    def test_skips_unknown_tokens_before_first_recognized_program(self) -> None:
-        self.assertEqual(
-            classify_solution_nmr_program_cluster("FANTOM, AMBER 3.0"),
-            ("CLUSTER1", "AMBER"),
+            extract_solution_nmr_program_clusters("DIANA, FANTOM, AMBER 3.0"),
+            [
+                ("CLUSTER6", "DIANA_DYANA"),
+                ("CLUSTER9", "OTHER"),
+                ("CLUSTER1", "AMBER"),
+            ],
         )
 
-    def test_supports_all_named_program_cluster_families(self) -> None:
-        cases = {
-            "ARIA": ("CLUSTER2", "ARIA"),
-            "CNS": ("CLUSTER3", "CNS"),
-            "CYANA": ("CLUSTER4", "CYANA"),
-            "DISCOVER": ("CLUSTER5", "DISCOVER"),
-            "DYANA": ("CLUSTER6", "DIANA_DYANA"),
-            "X-PLOR": ("CLUSTER7", "XPLOR"),
-            "X-PLOR NIH": ("CLUSTER8", "XPLOR_NIH"),
-        }
-
-        for program_text, expected in cases.items():
-            with self.subTest(program_text=program_text):
-                self.assertEqual(
-                    classify_solution_nmr_program_cluster(program_text),
-                    expected,
-                )
-
-    def test_supports_multiple_remark_separator(self) -> None:
+    def test_keeps_other_when_it_is_part_of_multi_cluster_assignment(self) -> None:
         self.assertEqual(
-            classify_solution_nmr_program_cluster("DIANA || AMBER 3.0"),
-            ("CLUSTER6", "DIANA_DYANA"),
+            extract_solution_nmr_program_clusters("FANTOM, AMBER 3.0"),
+            [
+                ("CLUSTER9", "OTHER"),
+                ("CLUSTER1", "AMBER"),
+            ],
         )
 
-    def test_falls_back_to_other_without_recognized_cluster(self) -> None:
+    def test_deduplicates_repeated_programs_and_cluster_aliases(self) -> None:
         self.assertEqual(
-            classify_solution_nmr_program_cluster("FANTOM"),
-            ("CLUSTER9", "OTHER"),
+            extract_solution_nmr_program_clusters(
+                "CNS 1.0, CNS MODIFIED CNS WITH CONFORMATIONAL, CNS"
+            ),
+            [("CLUSTER3", "CNS")],
+        )
+
+    def test_returns_other_when_no_program_cluster_is_parsed(self) -> None:
+        self.assertEqual(
+            extract_solution_nmr_program_clusters("UNKNOWN"),
+            [("CLUSTER9", "OTHER")],
         )
         self.assertEqual(
-            classify_solution_nmr_program_cluster(None),
-            ("CLUSTER9", "OTHER"),
+            extract_solution_nmr_program_clusters(None),
+            [("CLUSTER9", "OTHER")],
         )
 
 

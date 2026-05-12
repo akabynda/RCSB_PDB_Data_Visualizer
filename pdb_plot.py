@@ -88,9 +88,9 @@ class PlotConfig:
         "Solution NMR monomer program clusters and quality metrics by year"
     )
     nmr_monomer_program_cluster_share_title: str = (
-        "Share of solution NMR monomeric proteins by program cluster and year"
+        "Share of solution NMR monomer program mentions by year"
     )
-    nmr_monomer_program_cluster_share_y_label: str = "Share of structures (%)"
+    nmr_monomer_program_cluster_share_y_label: str = "Share of program mentions (%)"
     cumulative_title: str = (
         "Cumulative number of deposited PDB structures by experimental method"
     )
@@ -1361,6 +1361,8 @@ class PDBScientificPlotter:
         data_path: Path,
         share_output_png: Path,
         share_output_svg: Path,
+        share_without_other_output_png: Path,
+        share_without_other_output_svg: Path,
         metrics_output_png: Path,
         metrics_output_svg: Path,
     ) -> None:
@@ -1375,6 +1377,18 @@ class PDBScientificPlotter:
         count_share_table = (
             count_table.div(count_table.sum(axis=1), axis=0).fillna(0.0) * 100.0
         )
+        count_without_other_table = count_table.drop(
+            columns=[NMR_MONOMER_PROGRAM_CLUSTER_LABELS["CLUSTER9"]],
+            errors="ignore",
+        )
+        count_share_without_other_table = (
+            count_without_other_table.div(
+                count_without_other_table.sum(axis=1),
+                axis=0,
+            )
+            .fillna(0.0)
+            * 100.0
+        )
 
         self._scientific_style()
         self._render_cluster_stackplot(
@@ -1386,6 +1400,22 @@ class PDBScientificPlotter:
             y_limits=(0.0, 100.0),
             x_left=float(count_share_table.index.min()),
             x_right=float(count_share_table.index.max()),
+            use_step_segments=True,
+            legend_outside=True,
+            height_scale=1.25,
+        )
+        self._render_cluster_stackplot(
+            table=count_share_without_other_table,
+            output_png=share_without_other_output_png,
+            output_svg=share_without_other_output_svg,
+            title=(
+                self.config.nmr_monomer_program_cluster_share_title
+                + " (excluding OTHER)"
+            ),
+            y_label=self.config.nmr_monomer_program_cluster_share_y_label,
+            y_limits=(0.0, 100.0),
+            x_left=float(count_share_without_other_table.index.min()),
+            x_right=float(count_share_without_other_table.index.max()),
             use_step_segments=True,
             legend_outside=True,
             height_scale=1.25,
@@ -2658,6 +2688,28 @@ def parse_args() -> argparse.Namespace:
         help="Output SVG for SOLUTION NMR monomer program cluster share stacked-area plot.",
     )
     parser.add_argument(
+        "--nmr-monomer-program-cluster-share-without-other-output-png",
+        type=Path,
+        default=Path(
+            "figures/solution_nmr_monomer_program_cluster_share_without_other_by_year.png"
+        ),
+        help=(
+            "Output PNG for SOLUTION NMR monomer program cluster share "
+            "stacked-area plot excluding OTHER."
+        ),
+    )
+    parser.add_argument(
+        "--nmr-monomer-program-cluster-share-without-other-output-svg",
+        type=Path,
+        default=Path(
+            "figures/solution_nmr_monomer_program_cluster_share_without_other_by_year.svg"
+        ),
+        help=(
+            "Output SVG for SOLUTION NMR monomer program cluster share "
+            "stacked-area plot excluding OTHER."
+        ),
+    )
+    parser.add_argument(
         "--nmr-monomer-program-cluster-output-png",
         type=Path,
         default=Path("figures/solution_nmr_monomer_program_cluster_metrics_by_year.png"),
@@ -3247,6 +3299,12 @@ def main() -> None:
             data_path=args.nmr_monomer_program_cluster_summary_input,
             share_output_png=args.nmr_monomer_program_cluster_share_output_png,
             share_output_svg=args.nmr_monomer_program_cluster_share_output_svg,
+            share_without_other_output_png=(
+                args.nmr_monomer_program_cluster_share_without_other_output_png
+            ),
+            share_without_other_output_svg=(
+                args.nmr_monomer_program_cluster_share_without_other_output_svg
+            ),
             metrics_output_png=args.nmr_monomer_program_cluster_output_png,
             metrics_output_svg=args.nmr_monomer_program_cluster_output_svg,
         )

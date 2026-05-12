@@ -236,8 +236,11 @@ Useful options:
 
 ### `solution_nmr_monomer_program_clusters`
 
-Assigns SOLUTION NMR protein monomers to refinement-program clusters and
-summarizes validation quality by year and cluster.
+Assigns SOLUTION NMR protein monomers to all unique refinement-program clusters
+mentioned in PDB `REMARK 3 PROGRAM` records. This is multi-label: one structure
+can contribute to multiple clusters. In the per-cluster CSVs, `structure_count`
+therefore means cluster mentions/assignments; yearly totals remain unique
+structure counts.
 
 This dataset requires an existing quality CSV and cached PDB files with
 refinement program remarks.

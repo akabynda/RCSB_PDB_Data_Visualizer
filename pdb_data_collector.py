@@ -866,19 +866,29 @@ def _classify_normalized_program_cluster(
     return None
 
 
-def classify_solution_nmr_program_cluster(
+def extract_solution_nmr_program_clusters(
     program_text: str | None,
-) -> tuple[str, str]:
-    """Assign refinement program text to the first recognized software cluster."""
+) -> list[tuple[str, str]]:
+    """Extract unique program clusters from refinement program text in text order."""
+    clusters: list[tuple[str, str]] = []
+    seen_cluster_ids: set[str] = set()
     text = (program_text or "").strip()
     for raw_token in PROGRAM_SPLIT_PATTERN.split(text):
         normalized = _normalize_refinement_program_name(raw_token)
         if normalized is None:
             continue
         cluster = _classify_normalized_program_cluster(normalized)
-        if cluster is not None:
-            return cluster
-    return "CLUSTER9", PROGRAM_CLUSTER_NAME_BY_ID["CLUSTER9"]
+        if cluster is None:
+            cluster = "CLUSTER9", PROGRAM_CLUSTER_NAME_BY_ID["CLUSTER9"]
+        cluster_id, _ = cluster
+        if cluster_id in seen_cluster_ids:
+            continue
+        seen_cluster_ids.add(cluster_id)
+        clusters.append(cluster)
+
+    if clusters:
+        return clusters
+    return [("CLUSTER9", PROGRAM_CLUSTER_NAME_BY_ID["CLUSTER9"])]
 
 
 def extract_model_pdb_texts(pdb_path: Path) -> list[str]:
@@ -3468,33 +3478,34 @@ class SolutionNMRMonomerProgramClusterCollector:
                         missing_cache_count += 1
                     empty_program_count += 1
 
-                cluster_id, cluster_name = classify_solution_nmr_program_cluster(
-                    program_text
-                )
-                assignments.append(
-                    SolutionNMRMonomerProgramClusterAssignmentRecord(
-                        entry_id=quality_record.entry_id,
-                        year=quality_record.year,
-                        cluster_id=cluster_id,
-                        cluster_name=cluster_name,
-                        has_program_text=bool(program_text),
-                        program_text=program_text,
+                clusters = extract_solution_nmr_program_clusters(program_text)
+                for cluster_id, cluster_name in clusters:
+                    assignments.append(
+                        SolutionNMRMonomerProgramClusterAssignmentRecord(
+                            entry_id=quality_record.entry_id,
+                            year=quality_record.year,
+                            cluster_id=cluster_id,
+                            cluster_name=cluster_name,
+                            has_program_text=bool(program_text),
+                            program_text=program_text,
+                        )
                     )
-                )
-                key = (quality_record.year, cluster_id)
-                total_row = summary_totals.setdefault(
-                    key,
-                    {
-                        "count": 0,
-                        "rama_sum": 0.0,
-                        "side_sum": 0.0,
-                        "clash_sum": 0.0,
-                    },
-                )
-                total_row["count"] += 1
-                total_row["rama_sum"] += quality_record.ramachandran_outliers_percent
-                total_row["side_sum"] += quality_record.sidechain_outliers_percent
-                total_row["clash_sum"] += quality_record.clashscore
+                    key = (quality_record.year, cluster_id)
+                    total_row = summary_totals.setdefault(
+                        key,
+                        {
+                            "count": 0,
+                            "rama_sum": 0.0,
+                            "side_sum": 0.0,
+                            "clash_sum": 0.0,
+                        },
+                    )
+                    total_row["count"] += 1
+                    total_row["rama_sum"] += (
+                        quality_record.ramachandran_outliers_percent
+                    )
+                    total_row["side_sum"] += quality_record.sidechain_outliers_percent
+                    total_row["clash_sum"] += quality_record.clashscore
 
                 processed += 1
                 if processed % 500 == 0 or processed == total:
@@ -5029,18 +5040,20 @@ def summarize_solution_nmr_monomer_program_cluster_quality_by_year(
         (record.entry_id.upper(), record.year): record for record in quality_records
     }
     yearly_totals: dict[int, dict[str, float | int]] = {}
+    assignment_keys = {
+        (record.entry_id.upper(), record.year) for record in assignment_records
+    }
     matched_quality_keys: set[tuple[str, int]] = set()
     missing_quality_count = 0
 
-    for assignment_record in assignment_records:
-        key = (assignment_record.entry_id.upper(), assignment_record.year)
+    for key in sorted(assignment_keys):
         quality_record = quality_by_key.get(key)
         if quality_record is None:
             missing_quality_count += 1
             continue
         matched_quality_keys.add(key)
         total_row = yearly_totals.setdefault(
-            assignment_record.year,
+            quality_record.year,
             {
                 "count": 0,
                 "rama_sum": 0.0,
