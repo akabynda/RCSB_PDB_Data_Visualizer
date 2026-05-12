@@ -879,7 +879,7 @@ def extract_solution_nmr_program_clusters(
             continue
         cluster = _classify_normalized_program_cluster(normalized)
         if cluster is None:
-            cluster = "CLUSTER9", PROGRAM_CLUSTER_NAME_BY_ID["CLUSTER9"]
+            continue
         cluster_id, _ = cluster
         if cluster_id in seen_cluster_ids:
             continue

@@ -37,18 +37,14 @@ class ExtractSolutionNMRProgramClustersTests(unittest.TestCase):
             extract_solution_nmr_program_clusters("DIANA, FANTOM, AMBER 3.0"),
             [
                 ("CLUSTER6", "DIANA_DYANA"),
-                ("CLUSTER9", "OTHER"),
                 ("CLUSTER1", "AMBER"),
             ],
         )
 
-    def test_keeps_other_when_it_is_part_of_multi_cluster_assignment(self) -> None:
+    def test_uses_other_only_when_no_known_cluster_is_present(self) -> None:
         self.assertEqual(
             extract_solution_nmr_program_clusters("FANTOM, AMBER 3.0"),
-            [
-                ("CLUSTER9", "OTHER"),
-                ("CLUSTER1", "AMBER"),
-            ],
+            [("CLUSTER1", "AMBER")],
         )
 
     def test_deduplicates_repeated_programs_and_cluster_aliases(self) -> None:
