@@ -291,9 +291,9 @@ Output:
 ### `solution_nmr_monomer_precision_stride_modeled_first_model`
 
 Computes NMR ensemble precision for eligible SOLUTION NMR protein monomers.
-Precision is measured as RMSD between deposited models after alignment to an
-average structure. The residue range is the STRIDE core region from the first
-model.
+Models are aligned to the first model, then precision is measured as
+`sqrt(1 / (N*n) * sum_i sum_j |r_ij - r_mean,j|^2)` across models and CA atoms.
+The residue range is the STRIDE core region from the first model.
 
 Requires:
 

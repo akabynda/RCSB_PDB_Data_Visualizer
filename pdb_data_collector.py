@@ -1569,18 +1569,32 @@ def _aligned_coordinates_to_reference(
     return mobile_centered @ rotation.T + reference_center
 
 
-def _average_structure_aligned_to_first_model(coords: np.ndarray) -> np.ndarray:
-    """Build an average structure after aligning models to the first model."""
+def _coordinates_aligned_to_first_model(coords: np.ndarray) -> np.ndarray:
+    """Align every model coordinate set onto the first model."""
     if coords.ndim != 3 or coords.shape[0] == 0:
         raise ValueError("coords must have shape (n_models, n_atoms, 3)")
     reference = np.asarray(coords[0], dtype=float)
-    aligned = np.asarray(
+    return np.asarray(
         [
             _aligned_coordinates_to_reference(model, reference)
             for model in coords
         ],
         dtype=float,
     )
+
+
+def _ca_rmsd_to_mean_structure(coords: np.ndarray) -> float:
+    """Compute sqrt(1 / (N*n) * sum_i sum_j |r_ij - r_mean,j|^2)."""
+    if coords.ndim != 3 or coords.shape[0] == 0:
+        raise ValueError("coords must have shape (n_models, n_atoms, 3)")
+    mean_coords = np.mean(coords, axis=0)
+    squared_distances = np.sum(np.square(coords - mean_coords), axis=2)
+    return float(np.sqrt(np.mean(squared_distances)))
+
+
+def _average_structure_aligned_to_first_model(coords: np.ndarray) -> np.ndarray:
+    """Build an average structure after aligning models to the first model."""
+    aligned = _coordinates_aligned_to_first_model(coords)
     return np.mean(aligned, axis=0)
 
 
@@ -3768,7 +3782,7 @@ class SolutionNMRMonomerPrecisionCollector:
         start_seq_id: int,
         end_seq_id: int,
     ) -> tuple[int, int, int, float] | None:
-        """Compute mean pairwise model precision relative to the average structure."""
+        """Compute ensemble CA RMSD to per-residue mean coordinates."""
         model_maps, raw_ca_counts_per_model = parse_models_ca_coords_with_stats(
             pdb_path=pdb_path,
             chain_id=chain_id,
@@ -3789,10 +3803,8 @@ class SolutionNMRMonomerPrecisionCollector:
             [[model_map[resid] for resid in sorted_resids] for model_map in model_maps],
             dtype=float,
         )
-        reference_coords = _average_structure_aligned_to_first_model(coords)
-        per_model_rmsd = [
-            _superposed_rmsd(model_coord, reference_coords) for model_coord in coords
-        ]
+        aligned_coords = _coordinates_aligned_to_first_model(coords)
+        ensemble_rmsd = _ca_rmsd_to_mean_structure(aligned_coords)
 
         raw_ca_counts_common = [
             sum(raw_counts.get(resid, 0) for resid in sorted_resids)
@@ -3807,7 +3819,7 @@ class SolutionNMRMonomerPrecisionCollector:
             len(model_maps),
             len(sorted_resids),
             int(n_ca_core_raw),
-            float(np.mean(per_model_rmsd)),
+            ensemble_rmsd,
         )
 
     def _build_record_from_core_range(
