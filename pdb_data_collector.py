@@ -1097,6 +1097,7 @@ def parse_first_model_ca_residue_sequence(
     chain_id: str,
     start_seq_id: int | None = None,
     end_seq_id: int | None = None,
+    include_hetatm: bool = True,
 ) -> list[tuple[int, str]]:
     """Return residue identities for CA atoms in the first model."""
     return [
@@ -1106,8 +1107,51 @@ def parse_first_model_ca_residue_sequence(
             chain_id=chain_id,
             start_seq_id=start_seq_id,
             end_seq_id=end_seq_id,
+            include_hetatm=include_hetatm,
         )
     ]
+
+
+def _parse_first_model_ca_line_fields(
+    line: str,
+) -> tuple[str, int, str, str, float, str] | None:
+    """Parse CA fields, with a fallback for nonstandard long component IDs."""
+    atom_name = line[12:16].strip()
+    if atom_name != "CA":
+        return None
+
+    atom_chain = line[21].strip()
+    resid_text = line[22:26].strip()
+    insertion_code = line[26].strip()
+    alt_loc = line[16].strip()
+    occupancy = _parse_pdb_occupancy(line)
+    resname = line[17:20].strip()
+    try:
+        resid = int(resid_text)
+    except ValueError:
+        resid = None
+    if resid is not None and occupancy != float("-inf"):
+        return atom_chain, resid, insertion_code, alt_loc, occupancy, resname
+
+    parts = line.split()
+    if len(parts) < 10 or parts[2] != "CA":
+        return None
+    match = re.fullmatch(r"(-?\d+)([A-Za-z]?)", parts[5])
+    if match is None:
+        return None
+    try:
+        fallback_resid = int(match.group(1))
+        fallback_occupancy = float(parts[9])
+    except ValueError:
+        return None
+    return (
+        parts[4],
+        fallback_resid,
+        match.group(2),
+        "",
+        fallback_occupancy,
+        parts[3],
+    )
 
 
 def parse_first_model_ca_residues(
@@ -1115,6 +1159,7 @@ def parse_first_model_ca_residues(
     chain_id: str,
     start_seq_id: int | None = None,
     end_seq_id: int | None = None,
+    include_hetatm: bool = True,
 ) -> list[CAResidueRecord]:
     """Return first-model CA residue records with identity and atom-standard flags."""
     residue_order: list[int] = []
@@ -1138,31 +1183,30 @@ def parse_first_model_ca_residues(
                 continue
             if has_model_records and not in_model:
                 continue
-            if not (record.startswith("ATOM") or record.startswith("HETATM")):
+            is_standard_atom = record.startswith("ATOM")
+            is_hetero_atom = record.startswith("HETATM")
+            if not is_standard_atom and not (include_hetatm and is_hetero_atom):
                 continue
-            atom_name = line[12:16].strip()
-            if atom_name != "CA":
+            parsed_fields = _parse_first_model_ca_line_fields(line)
+            if parsed_fields is None:
                 continue
-            atom_chain = line[21].strip()
+            (
+                atom_chain,
+                resid,
+                insertion_code,
+                alt_loc,
+                occupancy,
+                resname,
+            ) = parsed_fields
             if atom_chain != chain_id:
-                continue
-            resid_text = line[22:26].strip()
-            try:
-                resid = int(resid_text)
-            except ValueError:
                 continue
             if start_seq_id is not None and resid < start_seq_id:
                 continue
             if end_seq_id is not None and resid > end_seq_id:
                 continue
 
-            insertion_code = line[26].strip()
-            alt_loc = line[16].strip()
-            occupancy = _parse_pdb_occupancy(line)
             if occupancy <= 0.0:
                 continue
-            resname = line[17:20].strip()
-            is_standard_atom = record.startswith("ATOM")
             if is_standard_atom:
                 identity = seq1(resname, custom_map={"MSE": "M"}, undef_code="X")
             else:
@@ -1222,6 +1266,7 @@ def parse_first_model_modeled_ca_auth_seq_ids(
         for record in parse_first_model_ca_residues(
             pdb_path=pdb_path,
             chain_id=chain_id,
+            include_hetatm=False,
         )
     }
 
@@ -3521,6 +3566,7 @@ class SolutionNMRMonomerXrayHomologCollector:
             chain_id=parsed_chain_id,
             start_seq_id=core_start,
             end_seq_id=core_end,
+            include_hetatm=False,
         )
         if len(nmr_core_residues) <= 10:
             return None
@@ -3563,6 +3609,7 @@ class SolutionNMRMonomerXrayHomologCollector:
             xray_residues = parse_first_model_ca_residues(
                 pdb_path=xray_pdb_path,
                 chain_id=parsed_xray_chain_id,
+                include_hetatm=True,
             )
             if find_modeled_ca_core_identity_matches(
                 nmr_residues=nmr_core_residues,
@@ -3933,11 +3980,16 @@ class SolutionNMRMonomerXrayRmsdCollector:
             nmr_chain_id,
             start_seq_id=nmr_core_start_seq_id,
             end_seq_id=nmr_core_end_seq_id,
+            include_hetatm=False,
         )
         if len(nmr_residues) <= 10:
             return None
 
-        xray_residues = parse_first_model_ca_residues(xray_pdb_path, xray_chain_id)
+        xray_residues = parse_first_model_ca_residues(
+            xray_pdb_path,
+            xray_chain_id,
+            include_hetatm=True,
+        )
         matched_pair_sets = find_modeled_ca_core_identity_matches(
             nmr_residues=nmr_residues,
             xray_residues=xray_residues,

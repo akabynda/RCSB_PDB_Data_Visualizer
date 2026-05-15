@@ -86,8 +86,10 @@ The modeled part is the subset of polymer residues that have usable coordinates
 in the deposited structure.
 
 For coordinate-level monomer datasets, the collector reads the PDB file itself:
-residues with positive-occupancy first-model CA atoms are treated as modeled.
-Zero-occupancy CA atoms are excluded. Coordinate calculations then use author residue IDs directly from the PDB file instead of mapping label IDs from RCSB metadata.
+residues with positive-occupancy first-model `ATOM` CA records are treated as
+modeled. Zero-occupancy CA atoms are excluded. Coordinate calculations then use
+author residue IDs directly from the PDB file instead of mapping label IDs from
+RCSB metadata.
 
 ## Core Region
 
