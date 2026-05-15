@@ -87,9 +87,7 @@ in the deposited structure.
 
 For coordinate-level monomer datasets, the collector reads the PDB file itself:
 residues with positive-occupancy first-model CA atoms are treated as modeled.
-Missing residue numbers are kept as gaps, and zero-occupancy CA atoms are
-excluded. Residues marked by PDB `SEQADV` records as explicitly non-native,
-currently `ARTIFACT`, `EXPRESSION TAG` or `INITIATING METHIONINE`, are also excluded. Coordinate calculations then use author residue IDs directly from the PDB file instead of mapping label IDs from RCSB metadata.
+Zero-occupancy CA atoms are excluded. Coordinate calculations then use author residue IDs directly from the PDB file instead of mapping label IDs from RCSB metadata.
 
 ## Core Region
 

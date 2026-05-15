@@ -53,7 +53,6 @@ DEFAULT_PDB_CACHE_DIR = Path("data/pdb_cache")
 LOCAL_STRIDE_CANDIDATE = Path("/tmp/stride_src/src/stride")
 STRIDE_STATE_CODES: tuple[str, ...] = ("H", "G", "I", "E", "B", "T", "C")
 STRIDE_CORE_STATE_CODES: frozenset[str] = frozenset({"H", "G", "I", "E", "B"})
-EXCLUDED_SEQADV_MARKERS: tuple[str, ...] = ("ARTIFACT", "EXPRESSION TAG", "INITIATING METHIONINE")
 DEFAULT_MAX_WORKERS = max(1, os.cpu_count() or 1)
 print(f"Using up to {DEFAULT_MAX_WORKERS} worker threads for concurrent tasks")
 
@@ -1121,12 +1120,6 @@ def parse_first_model_ca_residues(
     residue_order: list[int] = []
     candidates: dict[int, tuple[str, float, str, CAResidueRecord]] = {}
     modres_identity_by_key = _parse_pdb_modres_identity_map(pdb_path)
-    excluded_seqadv_resids = _parse_pdb_excluded_seqadv_residue_ids_by_chain(
-        pdb_path
-    ).get(
-        chain_id,
-        set(),
-    )
     has_model_records = False
     in_model = False
 
@@ -1157,8 +1150,6 @@ def parse_first_model_ca_residues(
             try:
                 resid = int(resid_text)
             except ValueError:
-                continue
-            if resid in excluded_seqadv_resids:
                 continue
             if start_seq_id is not None and resid < start_seq_id:
                 continue
@@ -1233,34 +1224,6 @@ def parse_first_model_modeled_ca_auth_seq_ids(
             chain_id=chain_id,
         )
     }
-
-
-def _parse_pdb_excluded_seqadv_residue_ids_by_chain(
-    pdb_path: Path,
-) -> dict[str, set[int]]:
-    """Parse explicitly non-native SEQADV residues by chain ID."""
-    excluded_resids_by_chain: dict[str, set[int]] = {}
-    with pdb_path.open("r", encoding="utf-8", errors="ignore") as handle:
-        for line in handle:
-            upper_line = line.upper()
-            if not line.startswith("SEQADV") or not any(
-                marker in upper_line for marker in EXCLUDED_SEQADV_MARKERS
-            ):
-                continue
-            chain_id = line[16].strip()
-            seq_num_text = line[18:22].strip()
-            if not chain_id or not seq_num_text:
-                parts = line.split()
-                if len(parts) < 5:
-                    continue
-                chain_id = parts[3].strip()
-                seq_num_text = parts[4].strip()
-            try:
-                seq_num = int(seq_num_text)
-            except ValueError:
-                continue
-            excluded_resids_by_chain.setdefault(chain_id, set()).add(seq_num)
-    return excluded_resids_by_chain
 
 
 def _parse_pdb_modres_identity_map(
@@ -1486,12 +1449,6 @@ def parse_models_ca_coords_with_stats(
     raw_ca_counts_per_model: list[dict[int, int]] = []
     current_candidates: dict[int, tuple[str, float, str, np.ndarray]] = {}
     current_raw_counts: Counter[int] = Counter()
-    excluded_seqadv_resids = _parse_pdb_excluded_seqadv_residue_ids_by_chain(
-        pdb_path
-    ).get(
-        chain_id,
-        set(),
-    )
     has_model_records = False
     in_model = False
 
@@ -1536,8 +1493,6 @@ def parse_models_ca_coords_with_stats(
             try:
                 resid = int(resid_text)
             except ValueError:
-                continue
-            if resid in excluded_seqadv_resids:
                 continue
             if start_seq_id is not None and resid < start_seq_id:
                 continue
@@ -1861,7 +1816,7 @@ class RCSBClient:
         """
         payload = {"query": query, "variables": {"ids": entry_ids}}
         data = self._post_json(self.config.graphql_url, payload)
-        entries = data.get("data", {}).get("entries", [])
+        entries = data.get("data", {}).get("entries") or []
 
         filtered: list[str] = []
         for entry in entries:
@@ -1917,7 +1872,7 @@ class RCSBClient:
         """
         payload = {"query": query, "variables": {"ids": entry_ids}}
         data = self._post_json(self.config.graphql_url, payload)
-        entries = data.get("data", {}).get("entries", [])
+        entries = data.get("data", {}).get("entries") or []
         return [
             entry.get("rcsb_accession_info", {}).get("deposit_date")
             for entry in entries
@@ -1942,7 +1897,7 @@ class RCSBClient:
         """
         payload = {"query": query, "variables": {"ids": entry_ids}}
         data = self._post_json(self.config.graphql_url, payload)
-        entries = data.get("data", {}).get("entries", [])
+        entries = data.get("data", {}).get("entries") or []
         entry_year_by_id: dict[str, int] = {}
         for entry in entries:
             if not entry:
@@ -1974,7 +1929,7 @@ class RCSBClient:
         """
         payload = {"query": query, "variables": {"ids": entry_ids}}
         data = self._post_json(self.config.graphql_url, payload)
-        entries = data.get("data", {}).get("entries", [])
+        entries = data.get("data", {}).get("entries") or []
         entry_date_by_id: dict[str, str] = {}
         for entry in entries:
             if not entry:
@@ -2007,7 +1962,7 @@ class RCSBClient:
         """
         payload = {"query": query, "variables": {"ids": entry_ids}}
         data = self._post_json(self.config.graphql_url, payload)
-        entries = data.get("data", {}).get("entries", [])
+        entries = data.get("data", {}).get("entries") or []
         entry_dates_by_id: dict[str, tuple[str | None, str | None]] = {}
         for entry in entries:
             if not entry:
@@ -2036,7 +1991,7 @@ class RCSBClient:
         """
         payload = {"query": query, "variables": {"ids": entry_ids}}
         data = self._post_json(self.config.graphql_url, payload)
-        entries = data.get("data", {}).get("entries", [])
+        entries = data.get("data", {}).get("entries") or []
         resolutions: dict[str, float] = {}
         for entry in entries:
             if not entry:
@@ -2115,7 +2070,7 @@ class RCSBClient:
         """
         payload = {"query": query, "variables": {"ids": entity_ids}}
         data = self._post_json(self.config.graphql_url, payload)
-        entities = data.get("data", {}).get("polymer_entities", [])
+        entities = data.get("data", {}).get("polymer_entities") or []
 
         records: list[XrayEntityGroupMappingRecord] = []
         for entity in entities:
@@ -2186,7 +2141,7 @@ class RCSBClient:
         """
         payload = {"query": query, "variables": {"ids": entity_ids}}
         data = self._post_json(self.config.graphql_url, payload)
-        entities = data.get("data", {}).get("polymer_entities", [])
+        entities = data.get("data", {}).get("polymer_entities") or []
 
         entity_rows: list[tuple[str, str, tuple[str, ...]]] = []
         for entity in entities:
@@ -2247,7 +2202,7 @@ class RCSBClient:
         """
         payload = {"query": query, "variables": {"ids": entity_ids}}
         data = self._post_json(self.config.graphql_url, payload)
-        entities = data.get("data", {}).get("polymer_entities", [])
+        entities = data.get("data", {}).get("polymer_entities") or []
         matching_group_ids: set[str] = set()
         for entity in entities:
             if not entity:
@@ -2390,7 +2345,7 @@ class RCSBClient:
         """
         payload = {"query": query, "variables": {"ids": entry_ids}}
         data = self._post_json(self.config.graphql_url, payload)
-        entries = data.get("data", {}).get("entries", [])
+        entries = data.get("data", {}).get("entries") or []
 
         records: list[SolutionNMRWeightRecord] = []
         for entry in entries:
@@ -2453,7 +2408,7 @@ class RCSBClient:
         """
         payload = {"query": query, "variables": {"ids": entry_ids}}
         data = self._post_json(self.config.graphql_url, payload)
-        entries = data.get("data", {}).get("entries", [])
+        entries = data.get("data", {}).get("entries") or []
 
         with ThreadPoolExecutor(max_workers=self.config.max_workers) as executor:
             future_map = {
@@ -2609,7 +2564,7 @@ class RCSBClient:
         """
         payload = {"query": query, "variables": {"ids": entry_ids}}
         data = self._post_json(self.config.graphql_url, payload)
-        entries = data.get("data", {}).get("entries", [])
+        entries = data.get("data", {}).get("entries") or []
         records: list[SolutionNMRMonomerQualityRecord] = []
 
         for entry in entries:
@@ -2666,7 +2621,7 @@ class RCSBClient:
         """
         payload = {"query": query, "variables": {"ids": entry_ids}}
         data = self._post_json(self.config.graphql_url, payload)
-        entries = data.get("data", {}).get("entries", [])
+        entries = data.get("data", {}).get("entries") or []
         records: list[SolutionNMRMonomerModeledFirstModelSeedRecord] = []
 
         for entry in entries:
@@ -2712,7 +2667,7 @@ class RCSBClient:
         """
         payload = {"query": query, "variables": {"ids": entry_ids}}
         data = self._post_json(self.config.graphql_url, payload)
-        entries = data.get("data", {}).get("entries", [])
+        entries = data.get("data", {}).get("entries") or []
         records: list[SolutionNMRMonomerXrayHomologSeedRecord] = []
 
         for entry in entries:

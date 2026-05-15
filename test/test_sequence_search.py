@@ -19,6 +19,11 @@ class _FakeSession:
         return _NullResultSetResponse()
 
 
+class _NullGraphqlListClient(RCSBClient):
+    def _post_json(self, url: str, payload: dict) -> dict:
+        return {"data": {"polymer_entities": None}}
+
+
 class SequenceSearchTests(unittest.TestCase):
     def test_treats_null_result_set_as_empty_search_result(self) -> None:
         client = RCSBClient(CollectorConfig(retries=1))
@@ -28,6 +33,13 @@ class SequenceSearchTests(unittest.TestCase):
             sequence="ACDEFGHIKLMNPQRSTVWY",
             sequence_identity_percent=100,
         )
+
+        self.assertEqual(result, [])
+
+    def test_treats_null_candidate_entity_list_as_empty(self) -> None:
+        client = _NullGraphqlListClient(CollectorConfig())
+
+        result = client.fetch_xray_polymer_entity_candidates_for_ids(["1ABC_1"])
 
         self.assertEqual(result, [])
 

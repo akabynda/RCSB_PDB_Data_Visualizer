@@ -67,7 +67,7 @@ class PdbModeledCaTests(unittest.TestCase):
             self.assertEqual([set(model_map) for model_map in model_maps], [{1}, {1}])
             self.assertEqual(raw_counts, [{1: 1}, {1: 1}])
 
-    def test_first_model_modeled_ids_skip_excluded_seqadv_residues(self) -> None:
+    def test_first_model_modeled_ids_ignore_seqadv_labels(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             pdb_path = Path(tmpdir) / "artifact.pdb"
             pdb_path.write_text(
@@ -88,10 +88,10 @@ class PdbModeledCaTests(unittest.TestCase):
 
             self.assertEqual(
                 parse_first_model_modeled_ca_auth_seq_ids(pdb_path, "A"),
-                {-3, 1},
+                {-5, -4, -3, 1},
             )
 
-    def test_model_coordinate_maps_skip_excluded_seqadv_residues(self) -> None:
+    def test_model_coordinate_maps_ignore_seqadv_labels(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             pdb_path = Path(tmpdir) / "artifact_coords.pdb"
             pdb_path.write_text(
@@ -116,8 +116,14 @@ class PdbModeledCaTests(unittest.TestCase):
 
             model_maps, raw_counts = parse_models_ca_coords_with_stats(pdb_path, "A")
 
-            self.assertEqual([set(model_map) for model_map in model_maps], [{1}, {1}])
-            self.assertEqual(raw_counts, [{1: 1}, {1: 1}])
+            self.assertEqual(
+                [set(model_map) for model_map in model_maps],
+                [{-5, -4, 1}, {-5, -4, 1}],
+            )
+            self.assertEqual(
+                raw_counts,
+                [{-5: 1, -4: 1, 1: 1}, {-5: 1, -4: 1, 1: 1}],
+            )
 
 
 if __name__ == "__main__":
