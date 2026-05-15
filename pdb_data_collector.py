@@ -3256,7 +3256,7 @@ class SolutionNMRMonomerPrecisionCollector:
         chain_id: str,
         start_seq_id: int,
         end_seq_id: int,
-    ) -> tuple[int, int, int, float] | None:
+    ) -> tuple[tuple[int, int, int, float] | None, str | None]:
         """Compute ensemble CA RMSD to per-residue mean coordinates."""
         model_maps, raw_ca_counts_per_model = parse_models_ca_coords_with_stats(
             pdb_path=pdb_path,
@@ -3265,13 +3265,22 @@ class SolutionNMRMonomerPrecisionCollector:
             end_seq_id=end_seq_id,
         )
         if len(model_maps) < 2:
-            return None
+            return (
+                None,
+                f"fewer than 2 coordinate models in core range (found {len(model_maps)})",
+            )
 
         common_resids = set(model_maps[0].keys())
         for model_map in model_maps[1:]:
             common_resids &= set(model_map.keys())
         if len(common_resids) < 3:
-            return None
+            return (
+                None,
+                (
+                    "fewer than 3 CA residues common to all models in core range "
+                    f"(found {len(common_resids)})"
+                ),
+            )
         sorted_resids = sorted(common_resids)
 
         coords = np.asarray(
@@ -3291,10 +3300,13 @@ class SolutionNMRMonomerPrecisionCollector:
             else len(sorted_resids)
         )
         return (
-            len(model_maps),
-            len(sorted_resids),
-            int(n_ca_core_raw),
-            ensemble_rmsd,
+            (
+                len(model_maps),
+                len(sorted_resids),
+                int(n_ca_core_raw),
+                ensemble_rmsd,
+            ),
+            None,
         )
 
     def _build_record_from_core_range(
@@ -3308,13 +3320,19 @@ class SolutionNMRMonomerPrecisionCollector:
         parsed_chain_id: str | None = None,
     ) -> SolutionNMRMonomerPrecisionRecord | None:
         """Build a precision record from a modeled residue core range."""
-        result = self._compute_mean_rmsd_to_average(
+        result, skip_reason = self._compute_mean_rmsd_to_average(
             pdb_path=pdb_path,
             chain_id=parsed_chain_id or chain_id,
             start_seq_id=core_start_seq_id,
             end_seq_id=core_end_seq_id,
         )
         if result is None:
+            LOGGER.info(
+                "Skipping precision entry %s chain %s: %s",
+                entry_id,
+                chain_id,
+                skip_reason,
+            )
             return None
         n_models, n_ca_core_used, n_ca_core_raw, mean_rmsd = result
         return SolutionNMRMonomerPrecisionRecord(
@@ -3363,6 +3381,11 @@ class SolutionNMRMonomerPrecisionStrideModeledFirstModelCollector(
                 chain_id=parsed_chain_id,
             )
             if not modeled_auth_seq_ids:
+                LOGGER.info(
+                    "Skipping precision entry %s chain %s: no usable first-model modeled CA residues",
+                    seed.entry_id,
+                    seed.chain_id,
+                )
                 return None
             core_range = compute_stride_core_range_for_modeled_auth_seq_ids_in_first_model(
                 pdb_path=pdb_path,
@@ -3371,6 +3394,11 @@ class SolutionNMRMonomerPrecisionStrideModeledFirstModelCollector(
                 stride_executable=self.stride_executable,
             )
             if core_range is None:
+                LOGGER.info(
+                    "Skipping precision entry %s chain %s: STRIDE found no modeled core residues",
+                    seed.entry_id,
+                    seed.chain_id,
+                )
                 return None
             core_start, core_end = core_range
             return self._build_record_from_core_range(
