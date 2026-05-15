@@ -70,9 +70,10 @@ protein monomers that pass several structural filters:
 - that polymer entity is a protein, with entity type `polypeptide(L)` or
   `polypeptide(D)`;
 - the polymer entity has exactly one chain ID in `pdbx_strand_id`;
-- datasets that need residue-level analysis also require exactly one polymer
-  instance, a valid sequence length, modeled residues, and usable chain/residue
-  mapping.
+- datasets that use RCSB instance summaries also require exactly one polymer
+  instance;
+- datasets that need residue-level analysis also require usable modeled CA
+  atoms in the first PDB model.
 
 `method_counts` and `membrane_protein_counts` are broader summary datasets.
 They intentionally count method trends across X-ray, cryo-EM, and NMR categories.
@@ -84,21 +85,11 @@ with `solution_nmr_`.
 The modeled part is the subset of polymer residues that have usable coordinates
 in the deposited structure.
 
-The collector starts from the polymer sequence and removes residues marked by
-RCSB instance features such as:
-
-- `UNOBSERVED_RESIDUE_XYZ`
-- `ZERO_OCCUPANCY_RESIDUE_XYZ`
-- `UNMODELED_RESIDUE_XYZ`
-- `MISSING_RESIDUE`
-
-The code tracks both numbering systems when possible:
-
-- label sequence IDs: canonical entity sequence numbering;
-- author sequence IDs: residue numbering used in the coordinate file.
-
-When an `auth_to_entity_poly_seq_mapping` is available, label IDs are mapped to
-author IDs before coordinate-level calculations.
+For coordinate-level monomer datasets, the collector reads the PDB file itself:
+residues with positive-occupancy first-model CA atoms are treated as modeled.
+Missing residue numbers are kept as gaps, and zero-occupancy CA atoms are
+excluded. Residues marked by PDB `SEQADV` records as explicitly non-native,
+currently `ARTIFACT`, `EXPRESSION TAG` or `INITIATING METHIONINE`, are also excluded. Coordinate calculations then use author residue IDs directly from the PDB file instead of mapping label IDs from RCSB metadata.
 
 ## Core Region
 
@@ -115,10 +106,12 @@ identifies residues assigned to core secondary-structure states:
 - `E`: beta strand
 - `B`: isolated beta bridge
 
-The STRIDE core region is the continuous author-residue span from the first to
-the last modeled residue with one of those STRIDE core states. Entries are
-skipped when no usable core can be found. Homolog search also requires a usable
-core sequence, and the current implementation skips very short cores.
+The STRIDE core region is the author-residue span from the first to the last
+modeled residue with one of those STRIDE core states. Author residue numbering
+does not have to be contiguous: downstream sequence and coordinate operations
+use the actually present CA residues inside that span. Entries are skipped when
+no usable core can be found. Homolog search also requires a usable core
+sequence, and the current implementation skips very short cores.
 
 ## STRIDE
 
@@ -260,12 +253,8 @@ Outputs:
 ### `solution_nmr_weights`
 
 Collects exact single-method `SOLUTION NMR` entries and calculates molecular
-weights. The output includes the RCSB entry molecular weight, the maximum
-polymer molecular weight, the total polymer weight, and the modeled-sequence
-weight when available.
-
-This dataset is not limited to protein monomers; it can include supported
-protein and nucleic-acid polymer types.
+weights. The output stores one total molecular-weight value per entry from RCSB
+entry metadata.
 
 Output:
 

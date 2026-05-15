@@ -16,7 +16,7 @@ import numpy as np
 from Bio import BiopythonWarning
 from Bio.PDB import MMCIFParser, PDBIO, PDBParser, Select
 from Bio.PDB.PDBExceptions import PDBConstructionWarning
-from Bio.SeqUtils import molecular_weight as sequence_molecular_weight, seq1
+from Bio.SeqUtils import seq1
 from collections import Counter
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
@@ -49,18 +49,11 @@ PROTEIN_MONOMER_ENTITY_TYPES: frozenset[str] = frozenset(
 )
 PROTEIN_POLYMER_TYPE = "Protein"
 SEQUENCE_IDENTITY_AGGREGATION_METHOD = "sequence_identity"
-UNMODELED_INSTANCE_FEATURE_TYPES: frozenset[str] = frozenset(
-    {
-        "UNOBSERVED_RESIDUE_XYZ",
-        "ZERO_OCCUPANCY_RESIDUE_XYZ",
-        "UNMODELED_RESIDUE_XYZ",
-        "MISSING_RESIDUE",
-    }
-)
 DEFAULT_PDB_CACHE_DIR = Path("data/pdb_cache")
 LOCAL_STRIDE_CANDIDATE = Path("/tmp/stride_src/src/stride")
 STRIDE_STATE_CODES: tuple[str, ...] = ("H", "G", "I", "E", "B", "T", "C")
 STRIDE_CORE_STATE_CODES: frozenset[str] = frozenset({"H", "G", "I", "E", "B"})
+EXCLUDED_SEQADV_MARKERS: tuple[str, ...] = ("ARTIFACT", "EXPRESSION TAG", "INITIATING METHIONINE")
 DEFAULT_MAX_WORKERS = max(1, os.cpu_count() or 1)
 print(f"Using up to {DEFAULT_MAX_WORKERS} worker threads for concurrent tasks")
 
@@ -193,9 +186,6 @@ class SolutionNMRWeightRecord:
     entry_id: str
     year: int
     molecular_weight_kda: float
-    rcsb_entry_molecular_weight_kda: float | None
-    polymer_molecular_weight_maximum_kda: float | None
-    modeled_molecular_weight_kda: float | None
 
 
 @dataclass(frozen=True)
@@ -224,7 +214,6 @@ class SolutionNMRMonomerModeledFirstModelSeedRecord:
     entry_id: str
     year: int
     chain_id: str
-    modeled_auth_seq_ids: frozenset[int]
 
 
 @dataclass(frozen=True)
@@ -267,21 +256,6 @@ class SolutionNMRMonomerXrayHomologSeedRecord:
     entry_id: str
     year: int
     chain_id: str
-    sequence: str
-    modeled_label_seq_ids: frozenset[int]
-    modeled_auth_seq_ids: frozenset[int]
-    auth_mapping: tuple[int | None, ...]
-
-
-@dataclass(frozen=True)
-class SolutionNMRMonomerXraySeedRecord:
-    entry_id: str
-    year: int
-    chain_id: str
-    core_start_seq_id: int
-    core_end_seq_id: int
-    group_id_95: str | None
-    group_id_100: str | None
 
 
 @dataclass(frozen=True)
@@ -997,7 +971,7 @@ def _extract_stride_core_range_for_modeled_auth_seq_ids(
     chain_states: dict[int, str],
     modeled_auth_seq_ids: set[int],
 ) -> tuple[int, int] | None:
-    """Find the contiguous modeled residue range covered by STRIDE core states."""
+    """Find the outer modeled residue range covered by STRIDE core states."""
     structured_auth_seq_ids = sorted(
         auth_seq_id
         for auth_seq_id in modeled_auth_seq_ids
@@ -1147,6 +1121,12 @@ def parse_first_model_ca_residues(
     residue_order: list[int] = []
     candidates: dict[int, tuple[str, float, str, CAResidueRecord]] = {}
     modres_identity_by_key = _parse_pdb_modres_identity_map(pdb_path)
+    excluded_seqadv_resids = _parse_pdb_excluded_seqadv_residue_ids_by_chain(
+        pdb_path
+    ).get(
+        chain_id,
+        set(),
+    )
     has_model_records = False
     in_model = False
 
@@ -1178,6 +1158,8 @@ def parse_first_model_ca_residues(
                 resid = int(resid_text)
             except ValueError:
                 continue
+            if resid in excluded_seqadv_resids:
+                continue
             if start_seq_id is not None and resid < start_seq_id:
                 continue
             if end_seq_id is not None and resid > end_seq_id:
@@ -1186,6 +1168,8 @@ def parse_first_model_ca_residues(
             insertion_code = line[26].strip()
             alt_loc = line[16].strip()
             occupancy = _parse_pdb_occupancy(line)
+            if occupancy <= 0.0:
+                continue
             resname = line[17:20].strip()
             is_standard_atom = record.startswith("ATOM")
             if is_standard_atom:
@@ -1235,6 +1219,48 @@ def parse_first_model_ca_residues(
                 candidates[resid] = (insertion_code, occupancy, alt_loc, ca_record)
 
     return [candidates[resid][3] for resid in residue_order if resid in candidates]
+
+
+def parse_first_model_modeled_ca_auth_seq_ids(
+    pdb_path: Path,
+    chain_id: str,
+) -> set[int]:
+    """Return author residue IDs with positive-occupancy first-model CA atoms."""
+    return {
+        record.resid
+        for record in parse_first_model_ca_residues(
+            pdb_path=pdb_path,
+            chain_id=chain_id,
+        )
+    }
+
+
+def _parse_pdb_excluded_seqadv_residue_ids_by_chain(
+    pdb_path: Path,
+) -> dict[str, set[int]]:
+    """Parse explicitly non-native SEQADV residues by chain ID."""
+    excluded_resids_by_chain: dict[str, set[int]] = {}
+    with pdb_path.open("r", encoding="utf-8", errors="ignore") as handle:
+        for line in handle:
+            upper_line = line.upper()
+            if not line.startswith("SEQADV") or not any(
+                marker in upper_line for marker in EXCLUDED_SEQADV_MARKERS
+            ):
+                continue
+            chain_id = line[16].strip()
+            seq_num_text = line[18:22].strip()
+            if not chain_id or not seq_num_text:
+                parts = line.split()
+                if len(parts) < 5:
+                    continue
+                chain_id = parts[3].strip()
+                seq_num_text = parts[4].strip()
+            try:
+                seq_num = int(seq_num_text)
+            except ValueError:
+                continue
+            excluded_resids_by_chain.setdefault(chain_id, set()).add(seq_num)
+    return excluded_resids_by_chain
 
 
 def _parse_pdb_modres_identity_map(
@@ -1452,14 +1478,20 @@ def parse_models_ca_coords_with_stats(
     start_seq_id: int | None = None,
     end_seq_id: int | None = None,
 ) -> tuple[list[dict[int, np.ndarray]], list[dict[int, int]]]:
-    # Select one CA per residue by max occupancy (altLoc-aware) and keep raw
-    # per-residue counts so callers can report how many CA atoms were present
-    # before altLoc collapsing.
+    # Select one positive-occupancy CA per residue by max occupancy
+    # (altLoc-aware) and keep raw per-residue counts so callers can report how
+    # many modeled CA atoms were present before altLoc collapsing.
     """Parse model CA coordinates and report residue-selection statistics."""
     models: list[dict[int, np.ndarray]] = []
     raw_ca_counts_per_model: list[dict[int, int]] = []
     current_candidates: dict[int, tuple[str, float, str, np.ndarray]] = {}
     current_raw_counts: Counter[int] = Counter()
+    excluded_seqadv_resids = _parse_pdb_excluded_seqadv_residue_ids_by_chain(
+        pdb_path
+    ).get(
+        chain_id,
+        set(),
+    )
     has_model_records = False
     in_model = False
 
@@ -1505,16 +1537,20 @@ def parse_models_ca_coords_with_stats(
                 resid = int(resid_text)
             except ValueError:
                 continue
+            if resid in excluded_seqadv_resids:
+                continue
             if start_seq_id is not None and resid < start_seq_id:
                 continue
             if end_seq_id is not None and resid > end_seq_id:
                 continue
 
-            current_raw_counts[resid] += 1
-
             insertion_code = line[26].strip()
             alt_loc = line[16].strip()
             occupancy = _parse_pdb_occupancy(line)
+            if occupancy <= 0.0:
+                continue
+            current_raw_counts[resid] += 1
+
             try:
                 x = float(line[30:38].strip())
                 y = float(line[38:46].strip())
@@ -1596,175 +1632,6 @@ def _average_structure_aligned_to_first_model(coords: np.ndarray) -> np.ndarray:
     """Build an average structure after aligning models to the first model."""
     aligned = _coordinates_aligned_to_first_model(coords)
     return np.mean(aligned, axis=0)
-
-
-def _normalize_polymer_sequence(
-    raw_sequence: Any, expected_length: int | None = None
-) -> str | None:
-    """Normalize polymer sequence text into a compact one-letter sequence."""
-    if not isinstance(raw_sequence, str):
-        return None
-    compact = "".join(raw_sequence.split()).upper()
-    if not compact:
-        return None
-    if (
-        expected_length is not None
-        and expected_length > 0
-        and len(compact) != expected_length
-    ):
-        return None
-    return compact
-
-
-def _seq_type_for_polymer(polymer_type: str, sequence: str | None = None) -> str | None:
-    """Classify a polymer sequence for molecular-weight calculation."""
-    mapping = {
-        "Protein": "protein",
-        "DNA": "DNA",
-        "RNA": "RNA",
-    }
-    if polymer_type in mapping:
-        return mapping[polymer_type]
-    if polymer_type != "NA-hybrid":
-        return None
-    seq = (sequence or "").upper()
-    has_u = "U" in seq
-    has_t = "T" in seq
-    if has_u and not has_t:
-        return "RNA"
-    return "DNA"
-
-
-def _modeled_sequence_from_instance_features(
-    sequence: str, instance_features: list[dict[str, Any] | None]
-) -> str:
-    """Build the modeled sequence after removing unmodeled feature ranges."""
-    if not sequence:
-        return sequence
-    modeled_mask = [True] * len(sequence)
-    for feature in instance_features:
-        if not feature:
-            continue
-        feature_type = str(feature.get("type") or "")
-        if feature_type not in UNMODELED_INSTANCE_FEATURE_TYPES:
-            continue
-        for pos in feature.get("feature_positions") or []:
-            if not pos:
-                continue
-            beg = pos.get("beg_seq_id")
-            end = pos.get("end_seq_id")
-            if beg is None:
-                continue
-            try:
-                beg_i = int(beg)
-                end_i = int(end) if end is not None else beg_i
-            except (TypeError, ValueError):
-                continue
-            start = max(1, min(beg_i, end_i))
-            stop = min(len(sequence), max(beg_i, end_i))
-            if start > stop:
-                continue
-            for idx in range(start - 1, stop):
-                modeled_mask[idx] = False
-    return "".join(
-        residue for residue, keep in zip(sequence, modeled_mask, strict=False) if keep
-    )
-
-
-def _modeled_label_seq_ids_from_instance_features(
-    sequence_length: int, instance_features: list[dict[str, Any] | None]
-) -> set[int]:
-    """Return modeled label sequence IDs after excluding unmodeled ranges."""
-    if sequence_length <= 0:
-        return set()
-    modeled_seq_ids = set(range(1, sequence_length + 1))
-    for feature in instance_features:
-        if not feature:
-            continue
-        feature_type = str(feature.get("type") or "")
-        if feature_type not in UNMODELED_INSTANCE_FEATURE_TYPES:
-            continue
-        for pos in feature.get("feature_positions") or []:
-            if not pos:
-                continue
-            beg = pos.get("beg_seq_id")
-            end = pos.get("end_seq_id")
-            if beg is None:
-                continue
-            try:
-                beg_i = int(beg)
-                end_i = int(end) if end is not None else beg_i
-            except (TypeError, ValueError):
-                continue
-            start = max(1, min(beg_i, end_i))
-            stop = min(sequence_length, max(beg_i, end_i))
-            if start > stop:
-                continue
-            for seq_id in range(start, stop + 1):
-                modeled_seq_ids.discard(seq_id)
-    return modeled_seq_ids
-
-
-def _map_label_seq_ids_to_auth_seq_ids(
-    label_seq_ids: set[int], auth_mapping_raw: Any
-) -> set[int]:
-    """Map label sequence IDs to author sequence IDs when mapping data exists."""
-    if not label_seq_ids:
-        return set()
-
-    mapped_auth_seq_ids: set[int] = set()
-    if isinstance(auth_mapping_raw, list) and auth_mapping_raw:
-        for label_seq_id in sorted(label_seq_ids):
-            if label_seq_id <= 0 or label_seq_id > len(auth_mapping_raw):
-                continue
-            auth_seq_raw = auth_mapping_raw[label_seq_id - 1]
-            try:
-                mapped_auth_seq_ids.add(int(str(auth_seq_raw).strip()))
-            except (TypeError, ValueError):
-                continue
-    if mapped_auth_seq_ids:
-        return mapped_auth_seq_ids
-
-    # Fallback for entries without mapping: treat label ids as auth ids.
-    return {int(seq_id) for seq_id in label_seq_ids}
-
-
-def _auth_mapping_tuple(auth_mapping_raw: Any) -> tuple[int | None, ...]:
-    """Normalize raw author sequence mapping data into a tuple."""
-    if not isinstance(auth_mapping_raw, list):
-        return tuple()
-    values: list[int | None] = []
-    for item in auth_mapping_raw:
-        try:
-            values.append(int(str(item).strip()))
-        except (TypeError, ValueError):
-            values.append(None)
-    return tuple(values)
-
-
-def _sequence_weight_kda(sequence: str, seq_type: str) -> float | None:
-    """Calculate sequence molecular weight in kilodaltons."""
-    if sequence_molecular_weight is None:
-        return None
-    sequence_for_weight = sequence
-    if seq_type == "protein":
-        allowed = set("ACDEFGHIKLMNPQRSTVWY")
-        sequence_for_weight = "".join(aa for aa in sequence_for_weight if aa in allowed)
-    elif seq_type == "DNA":
-        allowed = set("ACGT")
-        sequence_for_weight = "".join(nt for nt in sequence_for_weight if nt in allowed)
-    elif seq_type == "RNA":
-        allowed = set("ACGU")
-        sequence_for_weight = "".join(nt for nt in sequence_for_weight if nt in allowed)
-    if not sequence_for_weight:
-        return 0.0
-    try:
-        daltons = float(
-            sequence_molecular_weight(sequence_for_weight, seq_type=seq_type)
-        )
-    except Exception:
-        return None
-    return daltons / 1000.0
 
 
 MEMBRANE_ANNOTATION_TYPES: tuple[str, ...] = ("OPM", "PDBTM", "MemProtMD", "mpstruc")
@@ -1852,103 +1719,6 @@ class RCSBClient:
 
         return str(entry_id), year, model_count, polymer_entity, chain_id
 
-    @staticmethod
-    def _extract_modeled_residue_sets_for_instance(
-        sequence_length: int,
-        instance: dict[str, Any],
-    ) -> tuple[set[int], set[int]]:
-        """Extract modeled residue ID sets for one polymer instance."""
-        instance_features = instance.get("rcsb_polymer_instance_feature") or []
-        modeled_label_seq_ids = _modeled_label_seq_ids_from_instance_features(
-            sequence_length=sequence_length,
-            instance_features=instance_features,
-        )
-        identifiers = (
-            instance.get("rcsb_polymer_entity_instance_container_identifiers") or {}
-        )
-        auth_mapping_raw = identifiers.get("auth_to_entity_poly_seq_mapping") or []
-        modeled_auth_seq_ids = _map_label_seq_ids_to_auth_seq_ids(
-            label_seq_ids=modeled_label_seq_ids,
-            auth_mapping_raw=auth_mapping_raw,
-        )
-        return modeled_label_seq_ids, modeled_auth_seq_ids
-
-    @staticmethod
-    def _extract_secondary_label_ranges(
-        instance_features: list[dict[str, Any] | None],
-    ) -> list[tuple[int, int]]:
-        """Extract secondary-structure label sequence ranges from entry features."""
-        sec_ranges: list[tuple[int, int]] = []
-        for feature in instance_features:
-            if not feature:
-                continue
-            feature_type = feature.get("type")
-            if feature_type not in {"HELIX_P", "SHEET"}:
-                continue
-            for pos in feature.get("feature_positions") or []:
-                if not pos:
-                    continue
-                beg = pos.get("beg_seq_id")
-                end = pos.get("end_seq_id")
-                if beg is None:
-                    continue
-                try:
-                    beg_i = int(beg)
-                    end_i = int(end) if end is not None else beg_i
-                except (TypeError, ValueError):
-                    continue
-                sec_ranges.append((beg_i, end_i))
-        return sec_ranges
-
-    @staticmethod
-    def _extract_secondary_core_range(
-        polymer_entity: dict[str, Any],
-    ) -> tuple[int, int] | None:
-        """Choose a core secondary-structure range from modeled label IDs."""
-        instances = polymer_entity.get("polymer_entity_instances") or []
-        if len(instances) != 1:
-            return None
-
-        instance = instances[0] or {}
-        features = instance.get("rcsb_polymer_instance_feature") or []
-        sec_ranges = RCSBClient._extract_secondary_label_ranges(features)
-
-        if not sec_ranges:
-            return None
-
-        instance_identifiers = (
-            instance.get("rcsb_polymer_entity_instance_container_identifiers") or {}
-        )
-        auth_mapping_raw = (
-            instance_identifiers.get("auth_to_entity_poly_seq_mapping") or []
-        )
-
-        mapped_auth_positions: list[int] = []
-        if isinstance(auth_mapping_raw, list) and auth_mapping_raw:
-            for beg_i, end_i in sec_ranges:
-                start = min(beg_i, end_i)
-                stop = max(beg_i, end_i)
-                for label_seq_id in range(start, stop + 1):
-                    if label_seq_id <= 0 or label_seq_id > len(auth_mapping_raw):
-                        continue
-                    auth_seq_id_raw = auth_mapping_raw[label_seq_id - 1]
-                    try:
-                        mapped_auth_positions.append(int(str(auth_seq_id_raw).strip()))
-                    except (TypeError, ValueError):
-                        continue
-
-        if mapped_auth_positions:
-            core_start = min(mapped_auth_positions)
-            core_end = max(mapped_auth_positions)
-            if core_end >= core_start:
-                return core_start, core_end
-
-        core_start = min(beg for beg, _ in sec_ranges)
-        core_end = max(end for _, end in sec_ranges)
-        if core_end < core_start:
-            return None
-        return core_start, core_end
-
     def _fetch_paginated_identifiers(
         self,
         query: dict[str, Any],
@@ -1971,7 +1741,7 @@ class RCSBClient:
             total_count = int(data.get("total_count", 0))
             batch_ids = [
                 item["identifier"]
-                for item in data.get("result_set", [])
+                for item in data.get("result_set") or []
                 if "identifier" in item
             ]
             all_ids.extend(batch_ids)
@@ -2590,7 +2360,7 @@ class RCSBClient:
             data = response.json()
             total_count = int(data.get("total_count", 0))
             batch_ids: list[str] = []
-            for item in data.get("result_set", []):
+            for item in data.get("result_set") or []:
                 if isinstance(item, str):
                     batch_ids.append(item)
                 elif isinstance(item, dict) and item.get("identifier"):
@@ -2614,28 +2384,6 @@ class RCSBClient:
             }
             rcsb_entry_info {
               molecular_weight
-              polymer_molecular_weight_maximum
-            }
-            polymer_entities {
-              entity_poly {
-                rcsb_entity_polymer_type
-                pdbx_strand_id
-                rcsb_sample_sequence_length
-                pdbx_seq_one_letter_code_can
-              }
-              rcsb_polymer_entity {
-                formula_weight
-              }
-              polymer_entity_instances {
-                rcsb_id
-                rcsb_polymer_instance_feature {
-                  type
-                  feature_positions {
-                    beg_seq_id
-                    end_seq_id
-                  }
-                }
-              }
             }
           }
         }
@@ -2643,7 +2391,6 @@ class RCSBClient:
         payload = {"query": query, "variables": {"ids": entry_ids}}
         data = self._post_json(self.config.graphql_url, payload)
         entries = data.get("data", {}).get("entries", [])
-        allowed_polymer_types = {"Protein", "RNA", "DNA", "NA-hybrid"}
 
         records: list[SolutionNMRWeightRecord] = []
         for entry in entries:
@@ -2657,125 +2404,15 @@ class RCSBClient:
                 continue
             entry_mw_raw = (entry.get("rcsb_entry_info") or {}).get("molecular_weight")
             try:
-                entry_mw_kda = float(entry_mw_raw) if entry_mw_raw is not None else None
+                molecular_weight_kda = float(entry_mw_raw)
             except (TypeError, ValueError):
-                entry_mw_kda = None
-            polymer_mw_max_raw = (entry.get("rcsb_entry_info") or {}).get(
-                "polymer_molecular_weight_maximum"
-            )
-            try:
-                polymer_mw_max_kda = (
-                    float(polymer_mw_max_raw)
-                    if polymer_mw_max_raw is not None
-                    else None
-                )
-            except (TypeError, ValueError):
-                polymer_mw_max_kda = None
-            total_weight_kda = 0.0
-            modeled_weight_total_kda = 0.0
-            for polymer_entity in entry.get("polymer_entities") or []:
-                if not polymer_entity:
-                    continue
-                polymer_type = polymer_entity.get("entity_poly", {}).get(
-                    "rcsb_entity_polymer_type"
-                )
-                if polymer_type not in allowed_polymer_types:
-                    continue
-                entity_weight = polymer_entity.get("rcsb_polymer_entity", {}).get(
-                    "formula_weight"
-                )
-                if entity_weight is not None:
-                    entity_weight_f = float(entity_weight)
-                    instances = polymer_entity.get("polymer_entity_instances") or []
-                    instance_count = len(
-                        [
-                            instance
-                            for instance in instances
-                            if instance and instance.get("rcsb_id")
-                        ]
-                    )
-                    if instance_count <= 0:
-                        strand_ids = str(
-                            polymer_entity.get("entity_poly", {}).get("pdbx_strand_id")
-                            or ""
-                        )
-                        chain_ids = {
-                            chain_id.strip()
-                            for chain_id in strand_ids.split(",")
-                            if chain_id.strip()
-                        }
-                        instance_count = len(chain_ids) if chain_ids else 1
-
-                    total_weight_kda += entity_weight_f * instance_count
-
-                    sequence_length_raw = polymer_entity.get("entity_poly", {}).get(
-                        "rcsb_sample_sequence_length"
-                    )
-                    try:
-                        sequence_length = int(sequence_length_raw)
-                    except (TypeError, ValueError):
-                        sequence_length = 0
-
-                    if sequence_length > 0:
-                        raw_sequence = polymer_entity.get("entity_poly", {}).get(
-                            "pdbx_seq_one_letter_code_can"
-                        )
-                        normalized_sequence = _normalize_polymer_sequence(
-                            raw_sequence=raw_sequence,
-                            expected_length=sequence_length,
-                        )
-                        seq_type = _seq_type_for_polymer(
-                            str(polymer_type), normalized_sequence
-                        )
-                        if normalized_sequence is None or seq_type is None:
-                            continue
-
-                        valid_instances = [
-                            instance
-                            for instance in instances
-                            if instance and instance.get("rcsb_id")
-                        ]
-                        if valid_instances:
-                            for instance in valid_instances:
-                                modeled_sequence = (
-                                    _modeled_sequence_from_instance_features(
-                                        sequence=normalized_sequence,
-                                        instance_features=instance.get(
-                                            "rcsb_polymer_instance_feature"
-                                        )
-                                        or [],
-                                    )
-                                )
-                                modeled_sequence_weight = _sequence_weight_kda(
-                                    sequence=modeled_sequence,
-                                    seq_type=seq_type,
-                                )
-                                if modeled_sequence_weight is not None:
-                                    modeled_weight_total_kda += modeled_sequence_weight
-                        else:
-                            full_sequence_weight = _sequence_weight_kda(
-                                sequence=normalized_sequence,
-                                seq_type=seq_type,
-                            )
-                            if full_sequence_weight is not None:
-                                modeled_weight_total_kda += (
-                                    full_sequence_weight * instance_count
-                                )
-
-            if total_weight_kda <= 0.0:
-                total_weight_kda = entry_mw_kda
-
-            if modeled_weight_total_kda <= 0.0:
-                modeled_weight_total_kda = total_weight_kda
+                continue
 
             records.append(
                 SolutionNMRWeightRecord(
                     entry_id=entry_id,
                     year=year,
-                    molecular_weight_kda=total_weight_kda,
-                    rcsb_entry_molecular_weight_kda=entry_mw_kda,
-                    polymer_molecular_weight_maximum_kda=polymer_mw_max_kda,
-                    modeled_molecular_weight_kda=modeled_weight_total_kda,
+                    molecular_weight_kda=molecular_weight_kda,
                 )
             )
         return records
@@ -2802,23 +2439,12 @@ class RCSBClient:
                 type
                 rcsb_entity_polymer_type
                 pdbx_strand_id
-                rcsb_sample_sequence_length
               }
               polymer_entity_instances {
                 rcsb_id
-                rcsb_polymer_entity_instance_container_identifiers {
-                  auth_to_entity_poly_seq_mapping
-                }
                 rcsb_polymer_instance_feature_summary {
                   type
                   coverage
-                }
-                rcsb_polymer_instance_feature {
-                  type
-                  feature_positions {
-                    beg_seq_id
-                    end_seq_id
-                  }
                 }
               }
             }
@@ -2857,26 +2483,34 @@ class RCSBClient:
         context = self._extract_solution_nmr_monomer_context(entry)
         if context is None:
             return None
-        entry_id, year, model_count, polymer_entity, chain_id = context
-        entity_poly = polymer_entity.get("entity_poly") or {}
-
-        sequence_length_raw = entity_poly.get("rcsb_sample_sequence_length")
-        if sequence_length_raw is None or int(sequence_length_raw) <= 0:
-            return None
-        sequence_length = int(sequence_length_raw)
+        entry_id, year, _, polymer_entity, chain_id = context
 
         instances = polymer_entity.get("polymer_entity_instances") or []
         if len(instances) != 1:
             return None
         instance = instances[0] or {}
-        (
-            modeled_label_seq_ids,
-            modeled_auth_seq_ids,
-        ) = self._extract_modeled_residue_sets_for_instance(
-            sequence_length=sequence_length,
-            instance=instance,
-        )
-        modeled_sequence_length = len(modeled_label_seq_ids)
+        try:
+            pdb_path = download_pdb_if_needed(
+                session=self.session,
+                config=self.config,
+                cache_dir=pdb_cache_dir,
+                entry_id=entry_id,
+            )
+            chain_map = load_cached_chain_id_map(pdb_cache_dir, entry_id)
+            parsed_chain_id = chain_map.get(chain_id, chain_id)
+            modeled_auth_seq_ids = parse_first_model_modeled_ca_auth_seq_ids(
+                pdb_path=pdb_path,
+                chain_id=parsed_chain_id,
+            )
+        except Exception as exc:
+            LOGGER.debug(
+                "Skipping STRIDE modeled-first-model entry %s: %s",
+                entry_id,
+                exc,
+            )
+            return None
+
+        modeled_sequence_length = len(modeled_auth_seq_ids)
         if modeled_sequence_length <= 0:
             return None
         modeled_start_seq_id = min(modeled_auth_seq_ids)
@@ -3025,19 +2659,6 @@ class RCSBClient:
                 type
                 rcsb_entity_polymer_type
                 pdbx_strand_id
-                rcsb_sample_sequence_length
-              }
-              polymer_entity_instances {
-                rcsb_polymer_entity_instance_container_identifiers {
-                  auth_to_entity_poly_seq_mapping
-                }
-                rcsb_polymer_instance_feature {
-                  type
-                  feature_positions {
-                    beg_seq_id
-                    end_seq_id
-                  }
-                }
               }
             }
           }
@@ -3054,31 +2675,13 @@ class RCSBClient:
             context = self._extract_solution_nmr_monomer_context(entry)
             if context is None:
                 continue
-            entry_id, year, _, polymer_entity, chain_id = context
-            entity_poly = polymer_entity.get("entity_poly") or {}
-
-            sequence_length_raw = entity_poly.get("rcsb_sample_sequence_length")
-            if sequence_length_raw is None or int(sequence_length_raw) <= 0:
-                continue
-            sequence_length = int(sequence_length_raw)
-
-            instances = polymer_entity.get("polymer_entity_instances") or []
-            if len(instances) != 1:
-                continue
-            instance = instances[0] or {}
-            _, modeled_auth_seq_ids = self._extract_modeled_residue_sets_for_instance(
-                sequence_length=sequence_length,
-                instance=instance,
-            )
-            if not modeled_auth_seq_ids:
-                continue
+            entry_id, year, _, _, chain_id = context
 
             records.append(
                 SolutionNMRMonomerModeledFirstModelSeedRecord(
                     entry_id=str(entry_id),
                     year=year,
                     chain_id=chain_id,
-                    modeled_auth_seq_ids=frozenset(modeled_auth_seq_ids),
                 )
             )
         return records
@@ -3102,20 +2705,6 @@ class RCSBClient:
                 type
                 rcsb_entity_polymer_type
                 pdbx_strand_id
-                rcsb_sample_sequence_length
-                pdbx_seq_one_letter_code_can
-              }
-              polymer_entity_instances {
-                rcsb_polymer_entity_instance_container_identifiers {
-                  auth_to_entity_poly_seq_mapping
-                }
-                rcsb_polymer_instance_feature {
-                  type
-                  feature_positions {
-                    beg_seq_id
-                    end_seq_id
-                  }
-                }
               }
             }
           }
@@ -3132,126 +2721,12 @@ class RCSBClient:
             context = self._extract_solution_nmr_monomer_context(entry)
             if context is None:
                 continue
-            entry_id, year, _, polymer_entity, chain_id = context
-            entity_poly = polymer_entity.get("entity_poly") or {}
-            try:
-                sequence_length = int(entity_poly.get("rcsb_sample_sequence_length"))
-            except (TypeError, ValueError):
-                continue
-            sequence = _normalize_polymer_sequence(
-                raw_sequence=entity_poly.get("pdbx_seq_one_letter_code_can"),
-                expected_length=sequence_length,
-            )
-            if sequence is None:
-                continue
-            instances = polymer_entity.get("polymer_entity_instances") or []
-            if len(instances) != 1:
-                continue
-            instance = instances[0] or {}
-            modeled_label_seq_ids, modeled_auth_seq_ids = (
-                self._extract_modeled_residue_sets_for_instance(
-                    sequence_length=sequence_length,
-                    instance=instance,
-                )
-            )
-            if not modeled_label_seq_ids or not modeled_auth_seq_ids:
-                continue
-            identifiers = (
-                instance.get("rcsb_polymer_entity_instance_container_identifiers")
-                or {}
-            )
-            auth_mapping = _auth_mapping_tuple(
-                identifiers.get("auth_to_entity_poly_seq_mapping") or []
-            )
+            entry_id, year, _, _, chain_id = context
             records.append(
                 SolutionNMRMonomerXrayHomologSeedRecord(
                     entry_id=str(entry_id),
                     year=year,
                     chain_id=chain_id,
-                    sequence=sequence,
-                    modeled_label_seq_ids=frozenset(modeled_label_seq_ids),
-                    modeled_auth_seq_ids=frozenset(modeled_auth_seq_ids),
-                    auth_mapping=auth_mapping,
-                )
-            )
-        return records
-
-    def fetch_solution_nmr_monomer_xray_seed_records_for_ids(
-        self, entry_ids: list[str]
-    ) -> list[SolutionNMRMonomerXraySeedRecord]:
-        """Fetch seed data needed for NMR-to-X-ray RMSD analysis."""
-        query = """
-        query($ids:[String!]!) {
-          entries(entry_ids:$ids) {
-            rcsb_id
-            rcsb_entry_info {
-              deposited_model_count
-            }
-            rcsb_accession_info {
-              deposit_date
-            }
-            polymer_entities {
-              entity_poly {
-                type
-                rcsb_entity_polymer_type
-                pdbx_strand_id
-              }
-              polymer_entity_instances {
-                rcsb_polymer_entity_instance_container_identifiers {
-                  auth_to_entity_poly_seq_mapping
-                }
-                rcsb_polymer_instance_feature {
-                  type
-                  feature_positions {
-                    beg_seq_id
-                    end_seq_id
-                  }
-                }
-              }
-              rcsb_polymer_entity_group_membership {
-                aggregation_method
-                similarity_cutoff
-                group_id
-              }
-            }
-          }
-        }
-        """
-        payload = {"query": query, "variables": {"ids": entry_ids}}
-        data = self._post_json(self.config.graphql_url, payload)
-        entries = data.get("data", {}).get("entries", [])
-        records: list[SolutionNMRMonomerXraySeedRecord] = []
-
-        for entry in entries:
-            if not entry:
-                continue
-            context = self._extract_solution_nmr_monomer_context(entry)
-            if context is None:
-                continue
-            entry_id, year, _, polymer_entity, chain_id = context
-            memberships = (
-                polymer_entity.get("rcsb_polymer_entity_group_membership") or []
-            )
-            groups = self._extract_sequence_identity_groups(
-                memberships,
-                allowed_cutoffs={95, 100},
-            )
-            group_95 = groups.get(95)
-            group_100 = groups.get(100)
-            core_range = self._extract_secondary_core_range(polymer_entity)
-            if core_range is None:
-                continue
-            core_start, core_end = core_range
-
-            records.append(
-                SolutionNMRMonomerXraySeedRecord(
-                    entry_id=str(entry_id),
-                    year=year,
-                    chain_id=chain_id,
-                    core_start_seq_id=core_start,
-                    core_end_seq_id=core_end,
-                    group_id_95=group_95,
-                    group_id_100=group_100,
                 )
             )
         return records
@@ -3883,10 +3358,16 @@ class SolutionNMRMonomerPrecisionStrideModeledFirstModelCollector(
             pdb_path = self._download_pdb_if_needed(seed.entry_id)
             chain_map = load_cached_chain_id_map(self.cache_dir, seed.entry_id)
             parsed_chain_id = chain_map.get(seed.chain_id, seed.chain_id)
+            modeled_auth_seq_ids = parse_first_model_modeled_ca_auth_seq_ids(
+                pdb_path=pdb_path,
+                chain_id=parsed_chain_id,
+            )
+            if not modeled_auth_seq_ids:
+                return None
             core_range = compute_stride_core_range_for_modeled_auth_seq_ids_in_first_model(
                 pdb_path=pdb_path,
                 chain_id=parsed_chain_id,
-                modeled_auth_seq_ids=set(seed.modeled_auth_seq_ids),
+                modeled_auth_seq_ids=modeled_auth_seq_ids,
                 stride_executable=self.stride_executable,
             )
             if core_range is None:
@@ -4024,29 +3505,6 @@ class SolutionNMRMonomerXrayHomologCollector:
             entry_ids.append(entry_id)
         return tuple(entry_ids)
 
-    @staticmethod
-    def _label_seq_ids_for_auth_range(
-        seed: SolutionNMRMonomerXrayHomologSeedRecord,
-        core_start_seq_id: int,
-        core_end_seq_id: int,
-    ) -> list[int]:
-        """Map an author residue range back to label sequence IDs."""
-        selected: list[int] = []
-        start = min(core_start_seq_id, core_end_seq_id)
-        end = max(core_start_seq_id, core_end_seq_id)
-        for label_seq_id in sorted(seed.modeled_label_seq_ids):
-            if seed.auth_mapping:
-                if label_seq_id <= 0 or label_seq_id > len(seed.auth_mapping):
-                    continue
-                auth_seq_id = seed.auth_mapping[label_seq_id - 1]
-                if auth_seq_id is None:
-                    continue
-            else:
-                auth_seq_id = label_seq_id
-            if start <= auth_seq_id <= end:
-                selected.append(label_seq_id)
-        return selected
-
     def _build_stride_core_query_sequence(
         self,
         seed: SolutionNMRMonomerXrayHomologSeedRecord,
@@ -4060,38 +3518,33 @@ class SolutionNMRMonomerXrayHomologCollector:
         )
         chain_map = load_cached_chain_id_map(self.cache_dir, seed.entry_id)
         parsed_chain_id = chain_map.get(seed.chain_id, seed.chain_id)
+        modeled_auth_seq_ids = parse_first_model_modeled_ca_auth_seq_ids(
+            pdb_path=pdb_path,
+            chain_id=parsed_chain_id,
+        )
+        if not modeled_auth_seq_ids:
+            return None
         core_range = compute_stride_core_range_for_modeled_auth_seq_ids_in_first_model(
             pdb_path=pdb_path,
             chain_id=parsed_chain_id,
-            modeled_auth_seq_ids=set(seed.modeled_auth_seq_ids),
+            modeled_auth_seq_ids=modeled_auth_seq_ids,
             stride_executable=self.stride_executable,
         )
         if core_range is None:
             return None
         core_start, core_end = core_range
-        core_length = core_end - core_start + 1
-        if core_length <= 10:
-            return None
         nmr_core_residues = parse_first_model_ca_residues(
             pdb_path=pdb_path,
             chain_id=parsed_chain_id,
             start_seq_id=core_start,
             end_seq_id=core_end,
         )
-        if len(nmr_core_residues) != core_length:
+        if len(nmr_core_residues) <= 10:
             return None
-        if [record.resid for record in nmr_core_residues] != list(
-            range(core_start, core_end + 1)
-        ):
+        identities = [record.identity for record in nmr_core_residues]
+        if any(len(identity) != 1 or not identity.isalpha() for identity in identities):
             return None
-        label_seq_ids = self._label_seq_ids_for_auth_range(
-            seed=seed,
-            core_start_seq_id=core_start,
-            core_end_seq_id=core_end,
-        )
-        if len(label_seq_ids) != core_length:
-            return None
-        query_sequence = "".join(seed.sequence[seq_id - 1] for seq_id in label_seq_ids)
+        query_sequence = "".join(identities)
         if not query_sequence:
             return None
         return query_sequence, core_start, core_end, nmr_core_residues
@@ -4492,21 +3945,13 @@ class SolutionNMRMonomerXrayRmsdCollector:
     ) -> tuple[int, float, int, int, int, int] | None:
         """Compute CA RMSD after aligning an NMR model core to an X-ray chain."""
         _ = sequence_identity_percent
-        core_length = nmr_core_end_seq_id - nmr_core_start_seq_id + 1
-        if core_length <= 10:
-            return None
-
         nmr_residues = parse_first_model_ca_residues(
             nmr_pdb_path,
             nmr_chain_id,
             start_seq_id=nmr_core_start_seq_id,
             end_seq_id=nmr_core_end_seq_id,
         )
-        if len(nmr_residues) != core_length:
-            return None
-        if [record.resid for record in nmr_residues] != list(
-            range(nmr_core_start_seq_id, nmr_core_end_seq_id + 1)
-        ):
+        if len(nmr_residues) <= 10:
             return None
 
         xray_residues = parse_first_model_ca_residues(xray_pdb_path, xray_chain_id)
@@ -4518,17 +3963,19 @@ class SolutionNMRMonomerXrayRmsdCollector:
         if not matched_pair_sets:
             return None
 
-        nmr_models = parse_models_ca_coords(
+        nmr_model_maps = parse_models_ca_coords(
             nmr_pdb_path,
             nmr_chain_id,
             start_seq_id=nmr_core_start_seq_id,
             end_seq_id=nmr_core_end_seq_id,
         )
-        if len(nmr_models) < 2:
+        if not nmr_model_maps:
             return None
+        nmr_first_model_map = nmr_model_maps[0]
         xray_models = parse_models_ca_coords(xray_pdb_path, xray_chain_id)
         if not xray_models:
             return None
+        xray_first_model_map = xray_models[0]
 
         best_result: tuple[int, float, int, int, int, int] | None = None
         for matched_pairs in matched_pair_sets:
@@ -4542,30 +3989,20 @@ class SolutionNMRMonomerXrayRmsdCollector:
 
             nmr_common_resids = [nmr_resid for nmr_resid, _ in rmsd_pairs]
             xray_common_resids = [xray_resid for _, xray_resid in rmsd_pairs]
-            if any(
-                any(resid not in model_map for resid in nmr_common_resids)
-                for model_map in nmr_models
-            ):
+            if any(resid not in nmr_first_model_map for resid in nmr_common_resids):
                 continue
-            if any(resid not in xray_models[0] for resid in xray_common_resids):
+            if any(resid not in xray_first_model_map for resid in xray_common_resids):
                 continue
 
             nmr_coords = np.asarray(
-                [
-                    [model_map[resid] for resid in nmr_common_resids]
-                    for model_map in nmr_models
-                ],
+                [nmr_first_model_map[resid] for resid in nmr_common_resids],
                 dtype=float,
             )
             xray_coords = np.asarray(
-                [xray_models[0][resid] for resid in xray_common_resids],
+                [xray_first_model_map[resid] for resid in xray_common_resids],
                 dtype=float,
             )
-            per_model_rmsd = [
-                _superposed_rmsd(model_coord, xray_coords)
-                for model_coord in nmr_coords
-            ]
-            rmsd_value = float(np.mean(per_model_rmsd))
+            rmsd_value = _superposed_rmsd(nmr_coords, xray_coords)
             xray_matched_resids = [
                 xray_record.resid for _, xray_record in matched_pairs
             ]
@@ -5290,34 +4727,12 @@ def write_solution_nmr_weights_csv(
     """Write SOLUTION NMR molecular-weight records to CSV."""
     write_csv_rows(
         output_path=output_path,
-        header=[
-            "entry_id",
-            "year",
-            "molecular_weight_kda",
-            "rcsb_entry_molecular_weight_kda",
-            "polymer_molecular_weight_maximum",
-            "modeled_molecular_weight_kda",
-        ],
+        header=["entry_id", "year", "molecular_weight_kda"],
         rows=(
             (
                 r.entry_id,
                 r.year,
                 f"{r.molecular_weight_kda:.3f}",
-                (
-                    f"{r.rcsb_entry_molecular_weight_kda:.3f}"
-                    if r.rcsb_entry_molecular_weight_kda is not None
-                    else ""
-                ),
-                (
-                    f"{r.polymer_molecular_weight_maximum_kda:.3f}"
-                    if r.polymer_molecular_weight_maximum_kda is not None
-                    else ""
-                ),
-                (
-                    f"{r.modeled_molecular_weight_kda:.3f}"
-                    if r.modeled_molecular_weight_kda is not None
-                    else ""
-                ),
             )
             for r in records
         ),

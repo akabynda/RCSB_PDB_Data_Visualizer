@@ -30,6 +30,14 @@ class ExtractStrideCoreRangeForModeledAuthSeqIdsTests(unittest.TestCase):
 
         self.assertIsNone(result)
 
+    def test_keeps_outer_structured_core_range_across_numbering_gap(self) -> None:
+        result = _extract_stride_core_range_for_modeled_auth_seq_ids(
+            chain_states={10: "H", 11: "E", 12: "G", 13: "I"},
+            modeled_auth_seq_ids={10, 11, 13},
+        )
+
+        self.assertEqual(result, (10, 13))
+
 
 if __name__ == "__main__":
     unittest.main()

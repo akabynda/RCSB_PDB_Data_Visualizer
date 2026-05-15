@@ -759,7 +759,7 @@ class PDBScientificPlotter:
     def _build_weight_category_yearly_counts(table: pd.DataFrame) -> pd.DataFrame:
         categorized = table.copy()
         categorized["weight_category"] = pd.cut(
-            categorized["rcsb_entry_molecular_weight_kda"],
+            categorized["molecular_weight_kda"],
             bins=NMR_WEIGHT_BINS,
             labels=NMR_WEIGHT_LABELS,
             right=False,
@@ -1181,8 +1181,8 @@ class PDBScientificPlotter:
     def _prepare_nmr_weight_table(df: pd.DataFrame) -> pd.DataFrame:
         prepared = PDBScientificPlotter._prepare_typed_table(
             df=df,
-            required_columns={"entry_id", "year", "rcsb_entry_molecular_weight_kda"},
-            column_types={"year": int, "rcsb_entry_molecular_weight_kda": float},
+            required_columns={"entry_id", "year", "molecular_weight_kda"},
+            column_types={"year": int, "molecular_weight_kda": float},
             dataset_name="NMR weight CSV",
         )
         return PDBScientificPlotter._limit_year_column(prepared)
@@ -1190,16 +1190,12 @@ class PDBScientificPlotter:
     @staticmethod
     def _period_series(table: pd.DataFrame) -> dict[str, pd.Series]:
         return {
-            "Before 1996": table.loc[
-                table["year"] < 1996, "rcsb_entry_molecular_weight_kda"
-            ],
+            "Before 1996": table.loc[table["year"] < 1996, "molecular_weight_kda"],
             "1996-2006": table.loc[
                 (table["year"] >= 1996) & (table["year"] <= 2006),
-                "rcsb_entry_molecular_weight_kda",
+                "molecular_weight_kda",
             ],
-            "After 2006": table.loc[
-                table["year"] > 2006, "rcsb_entry_molecular_weight_kda"
-            ],
+            "After 2006": table.loc[table["year"] > 2006, "molecular_weight_kda"],
         }
 
     def plot_method_counts(
@@ -1438,7 +1434,7 @@ class PDBScientificPlotter:
     ) -> None:
         table = self._prepare_nmr_weight_table(self._read_csv(data_path))
         stats = (
-            table.groupby("year", as_index=True)["rcsb_entry_molecular_weight_kda"]
+            table.groupby("year", as_index=True)["molecular_weight_kda"]
             .agg(["mean", "median", "max"])
             .sort_index()
         )
