@@ -130,6 +130,10 @@ python pdb_data_collector.py \
   --solution-nmr-monomer-stride-executable /path/to/stride
 ```
 
+First-model STRIDE state maps are cached by structure in `data/stride_cache/`
+by default and reused across STRIDE-based datasets. Use `--stride-cache-dir` to
+change that location.
+
 ## Useful Options
 
 - `--datasets`: dataset kind list, or `all`.

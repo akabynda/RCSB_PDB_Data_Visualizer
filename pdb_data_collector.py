@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import csv
 import hashlib
+import json
 import logging
 import os
 import re
@@ -50,6 +51,7 @@ PROTEIN_MONOMER_ENTITY_TYPES: frozenset[str] = frozenset(
 PROTEIN_POLYMER_TYPE = "Protein"
 SEQUENCE_IDENTITY_AGGREGATION_METHOD = "sequence_identity"
 DEFAULT_PDB_CACHE_DIR = Path("data/pdb_cache")
+DEFAULT_STRIDE_CACHE_DIR = Path("data/stride_cache")
 LOCAL_STRIDE_CANDIDATE = Path("/tmp/stride_src/src/stride")
 STRIDE_STATE_CODES: tuple[str, ...] = ("H", "G", "I", "E", "B", "T", "C")
 STRIDE_CORE_STATE_CODES: frozenset[str] = frozenset({"H", "G", "I", "E", "B"})
@@ -966,6 +968,119 @@ def _run_stride_for_model_text(
         return _parse_stride_state_by_chain(process.stdout)
 
 
+def _stride_state_cache_path(stride_cache_dir: Path, entry_id: str) -> Path:
+    """Return the first-model STRIDE state cache path for one structure."""
+    return stride_cache_dir / f"{entry_id.upper()}.json"
+
+
+def _load_cached_stride_state_by_chain(
+    cache_path: Path,
+    first_model_sha1: str,
+) -> dict[str, dict[int, str]] | None:
+    """Load cached first-model STRIDE states if they match the model text."""
+    if not cache_path.exists():
+        return None
+    try:
+        payload = json.loads(cache_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if payload.get("first_model_sha1") != first_model_sha1:
+        return None
+    raw_state_by_chain = payload.get("state_by_chain")
+    if not isinstance(raw_state_by_chain, dict):
+        return None
+
+    state_by_chain: dict[str, dict[int, str]] = {}
+    for chain_id_raw, raw_chain_states in raw_state_by_chain.items():
+        if not isinstance(raw_chain_states, dict):
+            return None
+        chain_states: dict[int, str] = {}
+        for auth_seq_id_raw, state_raw in raw_chain_states.items():
+            try:
+                auth_seq_id = int(auth_seq_id_raw)
+            except (TypeError, ValueError):
+                return None
+            state = str(state_raw)
+            if state not in STRIDE_STATE_CODES:
+                return None
+            chain_states[auth_seq_id] = state
+        state_by_chain[str(chain_id_raw)] = chain_states
+    return state_by_chain
+
+
+def _write_cached_stride_state_by_chain(
+    cache_path: Path,
+    entry_id: str,
+    first_model_sha1: str,
+    state_by_chain: dict[str, dict[int, str]],
+) -> None:
+    """Persist first-model STRIDE states using an atomic replace."""
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "entry_id": entry_id.upper(),
+        "first_model_sha1": first_model_sha1,
+        "state_by_chain": {
+            chain_id: {
+                str(auth_seq_id): state
+                for auth_seq_id, state in sorted(chain_states.items())
+            }
+            for chain_id, chain_states in sorted(state_by_chain.items())
+        },
+    }
+    temp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            suffix=".json",
+            prefix=f"{entry_id.upper()}.",
+            dir=str(cache_path.parent),
+            encoding="utf-8",
+            delete=False,
+        ) as handle:
+            temp_path = Path(handle.name)
+            json.dump(payload, handle, sort_keys=True, separators=(",", ":"))
+            handle.write("\n")
+        temp_path.replace(cache_path)
+    except OSError:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
+
+
+def load_first_model_stride_state_by_chain(
+    pdb_path: Path,
+    entry_id: str,
+    stride_executable: str,
+    stride_cache_dir: Path,
+) -> tuple[dict[str, dict[int, str]] | None, int]:
+    """Load or compute cached STRIDE states for the first coordinate model."""
+    model_texts = extract_model_pdb_texts(pdb_path)
+    if not model_texts:
+        return None, 0
+
+    first_model_text = model_texts[0]
+    first_model_sha1 = hashlib.sha1(first_model_text.encode("utf-8")).hexdigest()
+    cache_path = _stride_state_cache_path(stride_cache_dir, entry_id)
+    cached_states = _load_cached_stride_state_by_chain(
+        cache_path=cache_path,
+        first_model_sha1=first_model_sha1,
+    )
+    if cached_states is not None:
+        return cached_states, len(model_texts)
+
+    state_by_chain = _run_stride_for_model_text(
+        model_text=first_model_text,
+        stride_executable=stride_executable,
+    )
+    if state_by_chain is not None:
+        _write_cached_stride_state_by_chain(
+            cache_path=cache_path,
+            entry_id=entry_id,
+            first_model_sha1=first_model_sha1,
+            state_by_chain=state_by_chain,
+        )
+    return state_by_chain, len(model_texts)
+
+
 def _extract_stride_core_range_for_modeled_auth_seq_ids(
     chain_states: dict[int, str],
     modeled_auth_seq_ids: set[int],
@@ -985,6 +1100,7 @@ def compute_stride_state_coverages_for_chain_modeled_first_model(
     session: requests.Session,
     config: CollectorConfig,
     cache_dir: Path,
+    stride_cache_dir: Path,
     entry_id: str,
     chain_id: str,
     modeled_sequence_length: int,
@@ -1008,21 +1124,20 @@ def compute_stride_state_coverages_for_chain_modeled_first_model(
 
     chain_map = load_cached_chain_id_map(cache_dir, entry_id)
     parsed_chain_id = chain_map.get(chain_id, chain_id)
-    model_texts = extract_model_pdb_texts(pdb_path)
-    if not model_texts:
-        return default_coverages, 0, 0
-
+    model_count = 0
     try:
-        state_by_chain = _run_stride_for_model_text(
-            model_text=model_texts[0],
+        state_by_chain, model_count = load_first_model_stride_state_by_chain(
+            pdb_path=pdb_path,
+            entry_id=entry_id,
             stride_executable=stride_executable,
+            stride_cache_dir=stride_cache_dir,
         )
         if state_by_chain is None:
-            return default_coverages, len(model_texts), 0
+            return default_coverages, model_count, 0
 
         chain_states = _select_stride_chain_states(state_by_chain, parsed_chain_id)
         if not chain_states:
-            return default_coverages, len(model_texts), 0
+            return default_coverages, model_count, 0
 
         filtered_states = [
             chain_states.get(auth_seq_id, "C")
@@ -1032,7 +1147,7 @@ def compute_stride_state_coverages_for_chain_modeled_first_model(
         if missing_count > 0:
             filtered_states.extend(["C"] * missing_count)
         if not filtered_states:
-            return default_coverages, len(model_texts), 0
+            return default_coverages, model_count, 0
 
         state_counts = Counter(filtered_states)
         denominator = float(modeled_sequence_length)
@@ -1040,28 +1155,28 @@ def compute_stride_state_coverages_for_chain_modeled_first_model(
             state: min(1.0, max(0.0, state_counts.get(state, 0) / denominator))
             for state in STRIDE_STATE_CODES
         }
-        return coverages, len(model_texts), 1
+        return coverages, model_count, 1
     except Exception:
-        return default_coverages, len(model_texts), 0
+        return default_coverages, model_count, 0
 
 
 def compute_stride_core_range_for_modeled_auth_seq_ids_in_first_model(
     pdb_path: Path,
+    entry_id: str,
     chain_id: str,
     modeled_auth_seq_ids: set[int],
     stride_executable: str,
+    stride_cache_dir: Path,
 ) -> tuple[int, int] | None:
     """Return the modeled first-model residue range supported by STRIDE core states."""
     if not modeled_auth_seq_ids:
         return None
 
-    model_texts = extract_model_pdb_texts(pdb_path)
-    if not model_texts:
-        return None
-
-    state_by_chain = _run_stride_for_model_text(
-        model_text=model_texts[0],
+    state_by_chain, _ = load_first_model_stride_state_by_chain(
+        pdb_path=pdb_path,
+        entry_id=entry_id,
         stride_executable=stride_executable,
+        stride_cache_dir=stride_cache_dir,
     )
     if state_by_chain is None:
         return None
@@ -2422,6 +2537,7 @@ class RCSBClient:
         entry_ids: list[str],
         stride_executable: str,
         pdb_cache_dir: Path,
+        stride_cache_dir: Path,
     ) -> Iterator[SolutionNMRMonomerStrideModeledFirstModelRecord]:
         """Yield STRIDE first-model monomer records for SOLUTION NMR entries."""
         query = """
@@ -2462,6 +2578,7 @@ class RCSBClient:
                     entry=entry,
                     stride_executable=stride_executable,
                     pdb_cache_dir=pdb_cache_dir,
+                    stride_cache_dir=stride_cache_dir,
                 ): idx
                 for idx, entry in enumerate(entries, start=1)
             }
@@ -2476,6 +2593,7 @@ class RCSBClient:
         entry: dict[str, Any] | None,
         stride_executable: str,
         pdb_cache_dir: Path,
+        stride_cache_dir: Path,
     ) -> SolutionNMRMonomerStrideModeledFirstModelRecord | None:
         """Compute one entry-level STRIDE modeled-first-model record."""
         if not entry:
@@ -2534,6 +2652,7 @@ class RCSBClient:
             session=self.session,
             config=self.config,
             cache_dir=pdb_cache_dir,
+            stride_cache_dir=stride_cache_dir,
             entry_id=entry_id,
             chain_id=chain_id,
             modeled_sequence_length=modeled_sequence_length,
@@ -2568,6 +2687,7 @@ class RCSBClient:
         entry_ids: list[str],
         stride_executable: str,
         pdb_cache_dir: Path,
+        stride_cache_dir: Path,
     ) -> list[SolutionNMRMonomerStrideModeledFirstModelRecord]:
         """Fetch all STRIDE modeled-first-model records for SOLUTION NMR monomers."""
         return list(
@@ -2575,6 +2695,7 @@ class RCSBClient:
                 entry_ids=entry_ids,
                 stride_executable=stride_executable,
                 pdb_cache_dir=pdb_cache_dir,
+                stride_cache_dir=stride_cache_dir,
             )
         )
 
@@ -3175,13 +3296,16 @@ class SolutionNMRMonomerStrideModeledFirstModelCollector:
         config: CollectorConfig,
         stride_executable: str,
         cache_dir: Path,
+        stride_cache_dir: Path,
     ) -> None:
         """Initialize streaming STRIDE modeled-first-model collection."""
         self.client = client
         self.config = config
         self.stride_executable = stride_executable
         self.cache_dir = cache_dir
+        self.stride_cache_dir = stride_cache_dir
         self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self.stride_cache_dir.mkdir(parents=True, exist_ok=True)
 
     def iter_batches(
         self,
@@ -3201,6 +3325,7 @@ class SolutionNMRMonomerStrideModeledFirstModelCollector:
                     entry_ids=batch,
                     stride_executable=self.stride_executable,
                     pdb_cache_dir=self.cache_dir,
+                    stride_cache_dir=self.stride_cache_dir,
                 )
             )
             LOGGER.info(
@@ -3357,6 +3482,7 @@ class SolutionNMRMonomerPrecisionStrideModeledFirstModelCollector(
         cache_dir: Path,
         precision_workers: int,
         stride_executable: str,
+        stride_cache_dir: Path,
     ) -> None:
         """Initialize STRIDE-core modeled-first-model precision collection."""
         super().__init__(
@@ -3366,6 +3492,8 @@ class SolutionNMRMonomerPrecisionStrideModeledFirstModelCollector(
             precision_workers=precision_workers,
         )
         self.stride_executable = stride_executable
+        self.stride_cache_dir = stride_cache_dir
+        self.stride_cache_dir.mkdir(parents=True, exist_ok=True)
 
     def _compute_record_from_seed(
         self,
@@ -3389,9 +3517,11 @@ class SolutionNMRMonomerPrecisionStrideModeledFirstModelCollector(
                 return None
             core_range = compute_stride_core_range_for_modeled_auth_seq_ids_in_first_model(
                 pdb_path=pdb_path,
+                entry_id=seed.entry_id,
                 chain_id=parsed_chain_id,
                 modeled_auth_seq_ids=modeled_auth_seq_ids,
                 stride_executable=self.stride_executable,
+                stride_cache_dir=self.stride_cache_dir,
             )
             if core_range is None:
                 LOGGER.info(
@@ -3510,13 +3640,16 @@ class SolutionNMRMonomerXrayHomologCollector:
         config: CollectorConfig,
         stride_executable: str,
         cache_dir: Path,
+        stride_cache_dir: Path,
     ) -> None:
         """Initialize X-ray homolog collection for SOLUTION NMR monomers."""
         self.client = client
         self.config = config
         self.stride_executable = stride_executable
         self.cache_dir = cache_dir
+        self.stride_cache_dir = stride_cache_dir
         self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self.stride_cache_dir.mkdir(parents=True, exist_ok=True)
 
     @staticmethod
     def _entry_ids_from_polymer_entity_ids(
@@ -3554,9 +3687,11 @@ class SolutionNMRMonomerXrayHomologCollector:
             return None
         core_range = compute_stride_core_range_for_modeled_auth_seq_ids_in_first_model(
             pdb_path=pdb_path,
+            entry_id=seed.entry_id,
             chain_id=parsed_chain_id,
             modeled_auth_seq_ids=modeled_auth_seq_ids,
             stride_executable=self.stride_executable,
+            stride_cache_dir=self.stride_cache_dir,
         )
         if core_range is None:
             return None
@@ -5720,6 +5855,12 @@ def parse_args() -> argparse.Namespace:
         help="Directory to cache downloaded PDB files for STRIDE in monomer-stride dataset.",
     )
     parser.add_argument(
+        "--stride-cache-dir",
+        type=Path,
+        default=DEFAULT_STRIDE_CACHE_DIR,
+        help="Directory to cache first-model STRIDE state maps by structure.",
+    )
+    parser.add_argument(
         "--solution-nmr-monomer-stride-executable",
         type=str,
         default="",
@@ -6041,6 +6182,7 @@ def main() -> None:
             config=config,
             stride_executable=modeled_first_stride_executable,
             cache_dir=Path(args.solution_nmr_monomer_stride_cache_dir),
+            stride_cache_dir=Path(args.stride_cache_dir),
         )
         modeled_stride_count = (
             stream_solution_nmr_monomer_stride_modeled_first_model_csv(
@@ -6092,6 +6234,7 @@ def main() -> None:
                 cache_dir=Path(args.precision_cache_dir),
                 precision_workers=args.precision_workers,
                 stride_executable=precision_stride_executable,
+                stride_cache_dir=Path(args.stride_cache_dir),
             )
         )
         existing_records = sorted(existing_records, key=lambda r: (r.year, r.entry_id))
@@ -6223,6 +6366,7 @@ def main() -> None:
             config=config,
             stride_executable=homolog_stride_executable,
             cache_dir=Path(args.solution_nmr_monomer_stride_cache_dir),
+            stride_cache_dir=Path(args.stride_cache_dir),
         )
         homolog_95_output_path = Path(args.solution_nmr_monomer_xray_homolog_95_output)
         homolog_100_output_path = Path(args.solution_nmr_monomer_xray_homolog_100_output)
