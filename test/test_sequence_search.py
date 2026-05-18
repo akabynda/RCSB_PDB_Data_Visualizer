@@ -1,6 +1,6 @@
 import unittest
 
-from pdb_data_collector import CollectorConfig, RCSBClient
+from pdb_dataset_builder import DatasetBuildConfig, RCSBClient
 
 
 class _NullResultSetResponse:
@@ -26,7 +26,7 @@ class _NullGraphqlListClient(RCSBClient):
 
 class SequenceSearchTests(unittest.TestCase):
     def test_treats_null_result_set_as_empty_search_result(self) -> None:
-        client = RCSBClient(CollectorConfig(retries=1))
+        client = RCSBClient(DatasetBuildConfig(retries=1))
         client.session = _FakeSession()
 
         result = client.fetch_xray_polymer_entity_ids_by_sequence(
@@ -37,7 +37,7 @@ class SequenceSearchTests(unittest.TestCase):
         self.assertEqual(result, [])
 
     def test_treats_null_candidate_entity_list_as_empty(self) -> None:
-        client = _NullGraphqlListClient(CollectorConfig())
+        client = _NullGraphqlListClient(DatasetBuildConfig())
 
         result = client.fetch_xray_polymer_entity_candidates_for_ids(["1ABC_1"])
 

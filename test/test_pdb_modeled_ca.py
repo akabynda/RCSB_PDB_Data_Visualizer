@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from pdb_data_collector import (
+from pdb_dataset_builder import (
     parse_first_model_ca_residues,
     parse_first_model_modeled_ca_auth_seq_ids,
     parse_models_ca_coords_with_stats,
@@ -26,7 +26,9 @@ def _hetatm_ca_line(serial: int, resname: str, resid: int, occupancy: float) -> 
 
 
 class PdbModeledCaTests(unittest.TestCase):
-    def test_first_model_modeled_ids_skip_zero_occupancy_and_preserve_gaps(self) -> None:
+    def test_first_model_modeled_ids_skip_zero_occupancy_and_preserve_gaps(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             pdb_path = Path(tmpdir) / "modeled.pdb"
             pdb_path.write_text(
@@ -181,6 +183,7 @@ class PdbModeledCaTests(unittest.TestCase):
                 [(record.identity, record.is_standard_atom) for record in residues],
                 [("A", True), ("HET:A1BEB", False)],
             )
+
 
 if __name__ == "__main__":
     unittest.main()

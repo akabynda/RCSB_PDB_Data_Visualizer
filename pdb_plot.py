@@ -457,7 +457,9 @@ class PDBScientificPlotter:
         if y_bottom >= 0.0:
             filtered_ticks = [tick for tick in ax.get_yticks() if float(tick) > 0.0]
         else:
-            filtered_ticks = [tick for tick in ax.get_yticks() if abs(float(tick)) > 1e-9]
+            filtered_ticks = [
+                tick for tick in ax.get_yticks() if abs(float(tick)) > 1e-9
+            ]
         if filtered_ticks:
             ax.set_yticks(filtered_ticks)
 
@@ -1072,10 +1074,9 @@ class PDBScientificPlotter:
             .sort_values("cluster_id")
         )
         years = sorted(int(year) for year in table["year"].dropna().unique())
-        heatmap = (
-            table.pivot(index="cluster_id", columns="year", values=value_column)
-            .reindex(index=cluster_rows["cluster_id"], columns=years)
-        )
+        heatmap = table.pivot(
+            index="cluster_id", columns="year", values=value_column
+        ).reindex(index=cluster_rows["cluster_id"], columns=years)
         cluster_labels = [
             cls._display_cluster_label(
                 cluster_id=str(row.cluster_id),
@@ -1113,7 +1114,9 @@ class PDBScientificPlotter:
         )
         axes_flat = list(axes.flat)
 
-        for ax, (column, panel_title, cmap_name) in zip(axes_flat, metrics, strict=True):
+        for ax, (column, panel_title, cmap_name) in zip(
+            axes_flat, metrics, strict=True
+        ):
             matrix, cluster_labels, years = self._build_cluster_metric_heatmap(
                 table=table,
                 value_column=column,
@@ -1362,9 +1365,13 @@ class PDBScientificPlotter:
         metrics_output_png: Path,
         metrics_output_svg: Path,
     ) -> None:
-        table = self._prepare_nmr_monomer_program_cluster_table(self._read_csv(data_path))
+        table = self._prepare_nmr_monomer_program_cluster_table(
+            self._read_csv(data_path)
+        )
         if table.empty:
-            raise ValueError("Solution NMR monomer program cluster summary CSV is empty.")
+            raise ValueError(
+                "Solution NMR monomer program cluster summary CSV is empty."
+            )
         count_table = self._build_cluster_yearly_table(
             table=table,
             value_column="structure_count",
@@ -1381,8 +1388,7 @@ class PDBScientificPlotter:
             count_without_other_table.div(
                 count_without_other_table.sum(axis=1),
                 axis=0,
-            )
-            .fillna(0.0)
+            ).fillna(0.0)
             * 100.0
         )
 
@@ -1496,7 +1502,7 @@ class PDBScientificPlotter:
             x_values=table["year"],
             y_values=table["count"],
             color="#17becf",
-            y_bottom = 0.0
+            y_bottom=0.0,
         )
         self._render_line_series(
             output_png=cumulative_output_png,
@@ -1507,7 +1513,9 @@ class PDBScientificPlotter:
             y_values=cumulative["count"],
             color="#17becf",
         )
-        method_table = self._prepare_method_count_table(self._read_csv(method_data_path))
+        method_table = self._prepare_method_count_table(
+            self._read_csv(method_data_path)
+        )
         self._plot_method_count_table(
             table=method_table,
             annual_output_png=method_annual_output_png,
@@ -1622,7 +1630,6 @@ class PDBScientificPlotter:
             required_columns={
                 "entry_id",
                 "year",
-                "secondary_structure_percent",
                 "stride_alpha_helix_fraction",
                 "stride_3_10_helix_fraction",
                 "stride_pi_helix_fraction",
@@ -1631,7 +1638,6 @@ class PDBScientificPlotter:
             },
             column_types={
                 "year": int,
-                "secondary_structure_percent": float,
                 "stride_alpha_helix_fraction": float,
                 "stride_3_10_helix_fraction": float,
                 "stride_pi_helix_fraction": float,
@@ -2269,9 +2275,9 @@ class PDBScientificPlotter:
         precision_df: pd.DataFrame,
         extremes_df: pd.DataFrame,
     ) -> pd.DataFrame:
-        precision = PDBScientificPlotter._prepare_monomer_precision_table(
-            precision_df
-        )[["entry_id", "year", "mean_rmsd_angstrom"]].copy()
+        precision = PDBScientificPlotter._prepare_monomer_precision_table(precision_df)[
+            ["entry_id", "year", "mean_rmsd_angstrom"]
+        ].copy()
         extremes = PDBScientificPlotter._prepare_monomer_xray_rmsd_extremes_table(
             extremes_df
         )[["entry_id", "best_rmsd_ca_angstrom"]].copy()
@@ -2520,7 +2526,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--nmr-monomer-precision-stride-modeled-first-model-input",
         type=Path,
-        default=Path("data/solution_nmr_monomer_precision_stride_modeled_first_model.csv"),
+        default=Path(
+            "data/solution_nmr_monomer_precision_stride_modeled_first_model.csv"
+        ),
         help=(
             "Input CSV for SOLUTION NMR monomer precision plots "
             "with STRIDE-defined modeled-first-model core."
@@ -2708,13 +2716,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--nmr-monomer-program-cluster-output-png",
         type=Path,
-        default=Path("figures/solution_nmr_monomer_program_cluster_metrics_by_year.png"),
+        default=Path(
+            "figures/solution_nmr_monomer_program_cluster_metrics_by_year.png"
+        ),
         help="Output PNG for SOLUTION NMR monomer program cluster metric heatmaps.",
     )
     parser.add_argument(
         "--nmr-monomer-program-cluster-output-svg",
         type=Path,
-        default=Path("figures/solution_nmr_monomer_program_cluster_metrics_by_year.svg"),
+        default=Path(
+            "figures/solution_nmr_monomer_program_cluster_metrics_by_year.svg"
+        ),
         help="Output SVG for SOLUTION NMR monomer program cluster metric heatmaps.",
     )
 
@@ -2810,13 +2822,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--nmr-monomer-stride-modeled-first-model-output-png",
         type=Path,
-        default=Path("figures/solution_nmr_monomer_stride_modeled_first_model_by_year.png"),
+        default=Path(
+            "figures/solution_nmr_monomer_stride_modeled_first_model_by_year.png"
+        ),
         help="Output PNG for SOLUTION NMR monomer STRIDE modeled-first-model secondary-structure plot.",
     )
     parser.add_argument(
         "--nmr-monomer-stride-modeled-first-model-output-svg",
         type=Path,
-        default=Path("figures/solution_nmr_monomer_stride_modeled_first_model_by_year.svg"),
+        default=Path(
+            "figures/solution_nmr_monomer_stride_modeled_first_model_by_year.svg"
+        ),
         help="Output SVG for SOLUTION NMR monomer STRIDE modeled-first-model secondary-structure plot.",
     )
     parser.add_argument(
@@ -2954,25 +2970,33 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--nmr-monomer-xray-homolog-95-historical-output-png",
         type=Path,
-        default=Path("figures/solution_nmr_monomer_xray_homologs_95_historical_by_year.png"),
+        default=Path(
+            "figures/solution_nmr_monomer_xray_homologs_95_historical_by_year.png"
+        ),
         help="Output PNG for historical monomer X-ray homolog share plot at 95%% sequence identity.",
     )
     parser.add_argument(
         "--nmr-monomer-xray-homolog-95-historical-output-svg",
         type=Path,
-        default=Path("figures/solution_nmr_monomer_xray_homologs_95_historical_by_year.svg"),
+        default=Path(
+            "figures/solution_nmr_monomer_xray_homologs_95_historical_by_year.svg"
+        ),
         help="Output SVG for historical monomer X-ray homolog share plot at 95%% sequence identity.",
     )
     parser.add_argument(
         "--nmr-monomer-xray-homolog-100-historical-output-png",
         type=Path,
-        default=Path("figures/solution_nmr_monomer_xray_homologs_100_historical_by_year.png"),
+        default=Path(
+            "figures/solution_nmr_monomer_xray_homologs_100_historical_by_year.png"
+        ),
         help="Output PNG for historical monomer X-ray homolog share plot at 100%% sequence identity.",
     )
     parser.add_argument(
         "--nmr-monomer-xray-homolog-100-historical-output-svg",
         type=Path,
-        default=Path("figures/solution_nmr_monomer_xray_homologs_100_historical_by_year.svg"),
+        default=Path(
+            "figures/solution_nmr_monomer_xray_homologs_100_historical_by_year.svg"
+        ),
         help="Output SVG for historical monomer X-ray homolog share plot at 100%% sequence identity.",
     )
     parser.add_argument(
@@ -3106,25 +3130,33 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--nmr-monomer-xray-rmsd-extremes-mean-output-png",
         type=Path,
-        default=Path("figures/solution_nmr_monomer_xray_rmsd_extremes_mean_by_year.png"),
+        default=Path(
+            "figures/solution_nmr_monomer_xray_rmsd_extremes_mean_by_year.png"
+        ),
         help="Output PNG for monomer X-ray RMSD extremes yearly-mean comparison plot.",
     )
     parser.add_argument(
         "--nmr-monomer-xray-rmsd-extremes-mean-output-svg",
         type=Path,
-        default=Path("figures/solution_nmr_monomer_xray_rmsd_extremes_mean_by_year.svg"),
+        default=Path(
+            "figures/solution_nmr_monomer_xray_rmsd_extremes_mean_by_year.svg"
+        ),
         help="Output SVG for monomer X-ray RMSD extremes yearly-mean comparison plot.",
     )
     parser.add_argument(
         "--nmr-monomer-xray-rmsd-extremes-median-output-png",
         type=Path,
-        default=Path("figures/solution_nmr_monomer_xray_rmsd_extremes_median_by_year.png"),
+        default=Path(
+            "figures/solution_nmr_monomer_xray_rmsd_extremes_median_by_year.png"
+        ),
         help="Output PNG for monomer X-ray RMSD extremes yearly-median comparison plot.",
     )
     parser.add_argument(
         "--nmr-monomer-xray-rmsd-extremes-median-output-svg",
         type=Path,
-        default=Path("figures/solution_nmr_monomer_xray_rmsd_extremes_median_by_year.svg"),
+        default=Path(
+            "figures/solution_nmr_monomer_xray_rmsd_extremes_median_by_year.svg"
+        ),
         help="Output SVG for monomer X-ray RMSD extremes yearly-median comparison plot.",
     )
     parser.add_argument(
@@ -3142,61 +3174,81 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--nmr-monomer-xray-median-rmsd-historical-output-png",
         type=Path,
-        default=Path("figures/solution_nmr_monomer_xray_median_rmsd_historical_by_year.png"),
+        default=Path(
+            "figures/solution_nmr_monomer_xray_median_rmsd_historical_by_year.png"
+        ),
         help="Output PNG for historical monomer X-ray median RMSD(CA) by year plot.",
     )
     parser.add_argument(
         "--nmr-monomer-xray-median-rmsd-historical-output-svg",
         type=Path,
-        default=Path("figures/solution_nmr_monomer_xray_median_rmsd_historical_by_year.svg"),
+        default=Path(
+            "figures/solution_nmr_monomer_xray_median_rmsd_historical_by_year.svg"
+        ),
         help="Output SVG for historical monomer X-ray median RMSD(CA) by year plot.",
     )
     parser.add_argument(
         "--nmr-monomer-xray-min-rmsd-historical-output-png",
         type=Path,
-        default=Path("figures/solution_nmr_monomer_xray_min_rmsd_historical_by_year.png"),
+        default=Path(
+            "figures/solution_nmr_monomer_xray_min_rmsd_historical_by_year.png"
+        ),
         help="Output PNG for historical monomer X-ray minimum RMSD(CA) yearly-mean plot.",
     )
     parser.add_argument(
         "--nmr-monomer-xray-min-rmsd-historical-output-svg",
         type=Path,
-        default=Path("figures/solution_nmr_monomer_xray_min_rmsd_historical_by_year.svg"),
+        default=Path(
+            "figures/solution_nmr_monomer_xray_min_rmsd_historical_by_year.svg"
+        ),
         help="Output SVG for historical monomer X-ray minimum RMSD(CA) yearly-mean plot.",
     )
     parser.add_argument(
         "--nmr-monomer-xray-min-median-rmsd-historical-output-png",
         type=Path,
-        default=Path("figures/solution_nmr_monomer_xray_min_median_rmsd_historical_by_year.png"),
+        default=Path(
+            "figures/solution_nmr_monomer_xray_min_median_rmsd_historical_by_year.png"
+        ),
         help="Output PNG for historical monomer X-ray minimum RMSD(CA) yearly-median plot.",
     )
     parser.add_argument(
         "--nmr-monomer-xray-min-median-rmsd-historical-output-svg",
         type=Path,
-        default=Path("figures/solution_nmr_monomer_xray_min_median_rmsd_historical_by_year.svg"),
+        default=Path(
+            "figures/solution_nmr_monomer_xray_min_median_rmsd_historical_by_year.svg"
+        ),
         help="Output SVG for historical monomer X-ray minimum RMSD(CA) yearly-median plot.",
     )
     parser.add_argument(
         "--nmr-monomer-xray-rmsd-extremes-historical-mean-output-png",
         type=Path,
-        default=Path("figures/solution_nmr_monomer_xray_rmsd_extremes_historical_mean_by_year.png"),
+        default=Path(
+            "figures/solution_nmr_monomer_xray_rmsd_extremes_historical_mean_by_year.png"
+        ),
         help="Output PNG for historical monomer X-ray RMSD extremes yearly-mean comparison plot.",
     )
     parser.add_argument(
         "--nmr-monomer-xray-rmsd-extremes-historical-mean-output-svg",
         type=Path,
-        default=Path("figures/solution_nmr_monomer_xray_rmsd_extremes_historical_mean_by_year.svg"),
+        default=Path(
+            "figures/solution_nmr_monomer_xray_rmsd_extremes_historical_mean_by_year.svg"
+        ),
         help="Output SVG for historical monomer X-ray RMSD extremes yearly-mean comparison plot.",
     )
     parser.add_argument(
         "--nmr-monomer-xray-rmsd-extremes-historical-median-output-png",
         type=Path,
-        default=Path("figures/solution_nmr_monomer_xray_rmsd_extremes_historical_median_by_year.png"),
+        default=Path(
+            "figures/solution_nmr_monomer_xray_rmsd_extremes_historical_median_by_year.png"
+        ),
         help="Output PNG for historical monomer X-ray RMSD extremes yearly-median comparison plot.",
     )
     parser.add_argument(
         "--nmr-monomer-xray-rmsd-extremes-historical-median-output-svg",
         type=Path,
-        default=Path("figures/solution_nmr_monomer_xray_rmsd_extremes_historical_median_by_year.svg"),
+        default=Path(
+            "figures/solution_nmr_monomer_xray_rmsd_extremes_historical_median_by_year.svg"
+        ),
         help="Output SVG for historical monomer X-ray RMSD extremes yearly-median comparison plot.",
     )
     parser.add_argument(
@@ -3351,14 +3403,20 @@ def main() -> None:
             output_svg=args.nmr_monomer_stride_modeled_first_model_output_svg,
         )
 
-    if PlotKind.SOLUTION_NMR_MONOMER_PRECISION_STRIDE_MODELED_FIRST_MODEL_MEAN in args.plots:
+    if (
+        PlotKind.SOLUTION_NMR_MONOMER_PRECISION_STRIDE_MODELED_FIRST_MODEL_MEAN
+        in args.plots
+    ):
         plotter.plot_solution_nmr_monomer_precision_stride_modeled_first_model_mean(
             data_path=args.nmr_monomer_precision_stride_modeled_first_model_input,
             output_png=args.nmr_monomer_precision_stride_mean_output_png,
             output_svg=args.nmr_monomer_precision_stride_mean_output_svg,
         )
 
-    if PlotKind.SOLUTION_NMR_MONOMER_PRECISION_STRIDE_MODELED_FIRST_MODEL_MEDIAN in args.plots:
+    if (
+        PlotKind.SOLUTION_NMR_MONOMER_PRECISION_STRIDE_MODELED_FIRST_MODEL_MEDIAN
+        in args.plots
+    ):
         plotter.plot_solution_nmr_monomer_precision_stride_modeled_first_model_median(
             data_path=args.nmr_monomer_precision_stride_modeled_first_model_input,
             output_png=args.nmr_monomer_precision_stride_median_output_png,

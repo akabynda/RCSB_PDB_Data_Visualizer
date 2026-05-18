@@ -2,8 +2,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from pdb_data_collector import (
-    CollectorConfig,
+from pdb_dataset_builder import (
+    DatasetBuildConfig,
     RCSBClient,
     SolutionNMRWeightRecord,
     write_solution_nmr_weights_csv,
@@ -12,7 +12,7 @@ from pdb_data_collector import (
 
 class _WeightClient(RCSBClient):
     def __init__(self) -> None:
-        super().__init__(CollectorConfig())
+        super().__init__(DatasetBuildConfig())
         self.last_payload: dict | None = None
 
     def _post_json(self, url: str, payload: dict) -> dict:

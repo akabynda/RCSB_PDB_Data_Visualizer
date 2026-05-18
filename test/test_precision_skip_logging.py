@@ -2,10 +2,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from pdb_data_collector import (
-    CollectorConfig,
+from pdb_dataset_builder import (
+    DatasetBuildConfig,
     RCSBClient,
-    SolutionNMRMonomerPrecisionCollector,
+    SolutionNMRMonomerPrecisionBuilder,
 )
 
 
@@ -33,15 +33,15 @@ class PrecisionSkipLoggingTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            collector = SolutionNMRMonomerPrecisionCollector(
-                client=RCSBClient(CollectorConfig()),
-                config=CollectorConfig(),
+            builder = SolutionNMRMonomerPrecisionBuilder(
+                client=RCSBClient(DatasetBuildConfig()),
+                config=DatasetBuildConfig(),
                 cache_dir=Path(tmpdir),
                 precision_workers=1,
             )
 
-            with self.assertLogs("pdb_data_collector", level="INFO") as logs:
-                record = collector._build_record_from_core_range(
+            with self.assertLogs("pdb_dataset_builder", level="INFO") as logs:
+                record = builder._build_record_from_core_range(
                     pdb_path=pdb_path,
                     entry_id="TEST",
                     year=2000,

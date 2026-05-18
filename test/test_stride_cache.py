@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from pdb_data_collector import load_first_model_stride_state_by_chain
+from pdb_dataset_builder import load_first_model_stride_state_by_chain
 
 
 def _ca_line(serial: int, resid: int) -> str:
@@ -36,20 +36,24 @@ class StrideCacheTests(unittest.TestCase):
 
             expected_states = {"A": {1: "H"}}
             with patch(
-                "pdb_data_collector._run_stride_for_model_text",
+                "pdb_dataset_builder._run_stride_for_model_text",
                 return_value=expected_states,
             ) as run_stride:
-                first_states, first_model_count = load_first_model_stride_state_by_chain(
-                    pdb_path=pdb_path,
-                    entry_id="1ABC",
-                    stride_executable="stride",
-                    stride_cache_dir=cache_dir,
+                first_states, first_model_count = (
+                    load_first_model_stride_state_by_chain(
+                        pdb_path=pdb_path,
+                        entry_id="1ABC",
+                        stride_executable="stride",
+                        stride_cache_dir=cache_dir,
+                    )
                 )
-                second_states, second_model_count = load_first_model_stride_state_by_chain(
-                    pdb_path=pdb_path,
-                    entry_id="1ABC",
-                    stride_executable="stride",
-                    stride_cache_dir=cache_dir,
+                second_states, second_model_count = (
+                    load_first_model_stride_state_by_chain(
+                        pdb_path=pdb_path,
+                        entry_id="1ABC",
+                        stride_executable="stride",
+                        stride_cache_dir=cache_dir,
+                    )
                 )
 
             self.assertEqual(first_states, expected_states)

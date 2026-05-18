@@ -44,6 +44,7 @@ class ChainSubsetSelect(Select):
         """Return whether a chain should be written by PDBIO."""
         return id(chain) in self.chain_object_ids
 
+
 SOLUTION_NMR_METHOD = "SOLUTION NMR"
 PROTEIN_MONOMER_ENTITY_TYPES: frozenset[str] = frozenset(
     {"polypeptide(L)", "polypeptide(D)"}
@@ -96,16 +97,14 @@ class DatasetKind(str, Enum):
     SOLUTION_NMR_MONOMER_XRAY_RMSD_HISTORICAL = (
         "solution_nmr_monomer_xray_rmsd_historical"
     )
-    SOLUTION_NMR_MONOMER_XRAY_RMSD_EXTREMES = (
-        "solution_nmr_monomer_xray_rmsd_extremes"
-    )
+    SOLUTION_NMR_MONOMER_XRAY_RMSD_EXTREMES = "solution_nmr_monomer_xray_rmsd_extremes"
     SOLUTION_NMR_MONOMER_XRAY_RMSD_EXTREMES_HISTORICAL = (
         "solution_nmr_monomer_xray_rmsd_extremes_historical"
     )
 
 
 @dataclass(frozen=True)
-class CollectorConfig:
+class DatasetBuildConfig:
     search_url: str = "https://search.rcsb.org/rcsbsearch/v2/query"
     graphql_url: str = "https://data.rcsb.org/graphql"
     page_size: int = 10000
@@ -197,9 +196,6 @@ class SolutionNMRMonomerStrideModeledFirstModelRecord:
     modeled_start_seq_id: int
     modeled_end_seq_id: int
     modeled_sequence_length: int
-    secondary_structure_percent: float
-    helix_fraction: float
-    sheet_fraction: float
     stride_alpha_helix_fraction: float
     stride_3_10_helix_fraction: float
     stride_pi_helix_fraction: float
@@ -410,7 +406,7 @@ def resolve_stride_executable(explicit_value: str) -> str | None:
 
 def download_pdb_if_needed(
     session: requests.Session,
-    config: CollectorConfig,
+    config: DatasetBuildConfig,
     cache_dir: Path,
     entry_id: str,
 ) -> Path:
@@ -624,7 +620,7 @@ def _chain_subset_cache_stem(entry_id: str, chain_ids: Sequence[str]) -> str:
 
 def download_pdb_chain_subset_if_needed(
     session: requests.Session,
-    config: CollectorConfig,
+    config: DatasetBuildConfig,
     cache_dir: Path,
     entry_id: str,
     chain_ids: Sequence[str],
@@ -667,9 +663,11 @@ def download_pdb_chain_subset_if_needed(
             raise RuntimeError(f"Failed to download {entry_id} mmCIF: {last_error}")
 
     structure = parse_mmcif_structure(entry_id, cif_path)
-    chain_id_map, selected_chain_object_ids = _coerce_selected_structure_chain_ids_for_pdbio(
-        structure=structure,
-        selected_chain_ids=selected_chain_ids,
+    chain_id_map, selected_chain_object_ids = (
+        _coerce_selected_structure_chain_ids_for_pdbio(
+            structure=structure,
+            selected_chain_ids=selected_chain_ids,
+        )
     )
     missing_chain_ids = selected_chain_ids - set(chain_id_map)
     if missing_chain_ids:
@@ -1098,7 +1096,7 @@ def _extract_stride_core_range_for_modeled_auth_seq_ids(
 
 def compute_stride_state_coverages_for_chain_modeled_first_model(
     session: requests.Session,
-    config: CollectorConfig,
+    config: DatasetBuildConfig,
     cache_dir: Path,
     stride_cache_dir: Path,
     entry_id: str,
@@ -1615,10 +1613,7 @@ def parse_models_ca_coords_with_stats(
     def finalize_model() -> None:
         """Finalize one parsed model and reset per-model parsing buffers."""
         models.append(
-            {
-                resid: candidate[3]
-                for resid, candidate in current_candidates.items()
-            }
+            {resid: candidate[3] for resid, candidate in current_candidates.items()}
         )
         raw_ca_counts_per_model.append(dict(current_raw_counts))
 
@@ -1726,10 +1721,7 @@ def _coordinates_aligned_to_first_model(coords: np.ndarray) -> np.ndarray:
         raise ValueError("coords must have shape (n_models, n_atoms, 3)")
     reference = np.asarray(coords[0], dtype=float)
     return np.asarray(
-        [
-            _aligned_coordinates_to_reference(model, reference)
-            for model in coords
-        ],
+        [_aligned_coordinates_to_reference(model, reference) for model in coords],
         dtype=float,
     )
 
@@ -1753,11 +1745,11 @@ MEMBRANE_ANNOTATION_TYPES: tuple[str, ...] = ("OPM", "PDBTM", "MemProtMD", "mpst
 
 
 class RCSBClient:
-    def __init__(self, config: CollectorConfig) -> None:
+    def __init__(self, config: DatasetBuildConfig) -> None:
         """Initialize the RCSB API client session and configuration."""
         self.config = config
         self.session = requests.Session()
-        self.session.headers.update({"User-Agent": "pdb-extensible-collector/1.0"})
+        self.session.headers.update({"User-Agent": "pdb-extensible-builder/1.0"})
 
     @staticmethod
     def _normalize_similarity_cutoff(raw_cutoff: Any) -> int | None:
@@ -2065,7 +2057,9 @@ class RCSBClient:
             entry_id = entry.get("rcsb_id")
             if not entry_id:
                 continue
-            year = extract_year(entry.get("rcsb_accession_info", {}).get("deposit_date"))
+            year = extract_year(
+                entry.get("rcsb_accession_info", {}).get("deposit_date")
+            )
             if year is None:
                 continue
             entry_year_by_id[str(entry_id)] = year
@@ -2095,9 +2089,9 @@ class RCSBClient:
             if not entry:
                 continue
             entry_id = entry.get("rcsb_id")
-            deposit_date = (
-                entry.get("rcsb_accession_info", {}) or {}
-            ).get("deposit_date")
+            deposit_date = (entry.get("rcsb_accession_info", {}) or {}).get(
+                "deposit_date"
+            )
             if not entry_id or not deposit_date:
                 continue
             entry_date_by_id[str(entry_id)] = str(deposit_date)
@@ -2319,14 +2313,14 @@ class RCSBClient:
             )
             if not polymer_entity_id or not entry_id or not chain_id_tuple:
                 continue
-            entity_rows.append(
-                (str(polymer_entity_id), str(entry_id), chain_id_tuple)
-            )
+            entity_rows.append((str(polymer_entity_id), str(entry_id), chain_id_tuple))
 
         resolution_by_entry_id: dict[str, float] = {}
         unknown_entries = sorted({entry_id for _, entry_id, _ in entity_rows})
         for entry_batch in chunked(unknown_entries, self.config.graphql_batch_size):
-            resolution_by_entry_id.update(self.fetch_entry_resolution_for_ids(entry_batch))
+            resolution_by_entry_id.update(
+                self.fetch_entry_resolution_for_ids(entry_batch)
+            )
 
         records: list[XrayPolymerEntityCandidateRecord] = []
         for polymer_entity_id, entry_id, chain_ids in entity_rows:
@@ -2558,10 +2552,6 @@ class RCSBClient:
               }
               polymer_entity_instances {
                 rcsb_id
-                rcsb_polymer_instance_feature_summary {
-                  type
-                  coverage
-                }
               }
             }
           }
@@ -2606,7 +2596,6 @@ class RCSBClient:
         instances = polymer_entity.get("polymer_entity_instances") or []
         if len(instances) != 1:
             return None
-        instance = instances[0] or {}
         try:
             pdb_path = download_pdb_if_needed(
                 session=self.session,
@@ -2634,30 +2623,18 @@ class RCSBClient:
         modeled_start_seq_id = min(modeled_auth_seq_ids)
         modeled_end_seq_id = max(modeled_auth_seq_ids)
 
-        feature_summary = instance.get("rcsb_polymer_instance_feature_summary") or []
-        coverage_by_type: dict[str, float] = {}
-        for item in feature_summary:
-            if not item:
-                continue
-            feature_type = item.get("type")
-            coverage = item.get("coverage")
-            if feature_type and coverage is not None:
-                coverage_by_type[str(feature_type)] = float(coverage)
-
-        helix_fraction = coverage_by_type.get("HELIX_P", -1.0)
-        sheet_fraction = coverage_by_type.get("SHEET", -1.0)
-        unassigned_fraction = coverage_by_type.get("UNASSIGNED_SEC_STRUCT", -1.0)
-        secondary_fraction = 1.0 - unassigned_fraction
-        stride_coverages, _, _ = compute_stride_state_coverages_for_chain_modeled_first_model(
-            session=self.session,
-            config=self.config,
-            cache_dir=pdb_cache_dir,
-            stride_cache_dir=stride_cache_dir,
-            entry_id=entry_id,
-            chain_id=chain_id,
-            modeled_sequence_length=modeled_sequence_length,
-            modeled_auth_seq_ids=modeled_auth_seq_ids,
-            stride_executable=stride_executable,
+        stride_coverages, _, _ = (
+            compute_stride_state_coverages_for_chain_modeled_first_model(
+                session=self.session,
+                config=self.config,
+                cache_dir=pdb_cache_dir,
+                stride_cache_dir=stride_cache_dir,
+                entry_id=entry_id,
+                chain_id=chain_id,
+                modeled_sequence_length=modeled_sequence_length,
+                modeled_auth_seq_ids=modeled_auth_seq_ids,
+                stride_executable=stride_executable,
+            )
         )
         stride_coil_fraction = stride_coverages["C"]
         stride_secondary_percent = (1.0 - stride_coil_fraction) * 100.0
@@ -2669,9 +2646,6 @@ class RCSBClient:
             modeled_start_seq_id=modeled_start_seq_id,
             modeled_end_seq_id=modeled_end_seq_id,
             modeled_sequence_length=modeled_sequence_length,
-            secondary_structure_percent=secondary_fraction * 100.0,
-            helix_fraction=helix_fraction,
-            sheet_fraction=sheet_fraction,
             stride_alpha_helix_fraction=stride_coverages["H"],
             stride_3_10_helix_fraction=stride_coverages["G"],
             stride_pi_helix_fraction=stride_coverages["I"],
@@ -2853,9 +2827,9 @@ class RCSBClient:
         return records
 
 
-class PDBMethodYearlyCollector:
-    def __init__(self, client: RCSBClient, config: CollectorConfig) -> None:
-        """Initialize a yearly experimental-method count collector."""
+class PDBMethodYearlyBuilder:
+    def __init__(self, client: RCSBClient, config: DatasetBuildConfig) -> None:
+        """Initialize a yearly experimental-method count builder."""
         self.client = client
         self.config = config
 
@@ -2894,7 +2868,7 @@ class PDBMethodYearlyCollector:
             for year, count in sorted(year_counter.items())
         ]
 
-    def collect(self, methods: Iterable[ExperimentalMethod]) -> list[YearlyCountRecord]:
+    def build(self, methods: Iterable[ExperimentalMethod]) -> list[YearlyCountRecord]:
         """Collect yearly counts for all requested experimental methods."""
         records: list[YearlyCountRecord] = []
         for method in methods:
@@ -2902,15 +2876,15 @@ class PDBMethodYearlyCollector:
         return sorted(records, key=lambda record: (record.year, record.method))
 
 
-class SolutionNMRProgramYearlyCollector:
+class SolutionNMRProgramYearlyBuilder:
     def __init__(
         self,
         client: RCSBClient,
-        config: CollectorConfig,
+        config: DatasetBuildConfig,
         cache_dir: Path,
         download_missing: bool = True,
     ) -> None:
-        """Initialize the SOLUTION NMR refinement-program trend collector."""
+        """Initialize the SOLUTION NMR refinement-program trend builder."""
         self.client = client
         self.config = config
         self.cache_dir = cache_dir
@@ -2949,7 +2923,7 @@ class SolutionNMRProgramYearlyCollector:
             return None
         return extract_refinement_programs_from_pdb(downloaded_pdb_path)
 
-    def collect(self) -> list[SolutionNMRProgramYearlyCountRecord]:
+    def build(self) -> list[SolutionNMRProgramYearlyCountRecord]:
         """Collect yearly SOLUTION NMR refinement-program usage counts."""
         entry_ids = fetch_solution_nmr_entry_ids(
             client=self.client,
@@ -2965,8 +2939,7 @@ class SolutionNMRProgramYearlyCollector:
         yearly_program_counter: Counter[tuple[int, str]] = Counter()
 
         entry_year_pairs = [
-            (entry_id, entry_year_by_id.get(entry_id))
-            for entry_id in entry_ids
+            (entry_id, entry_year_by_id.get(entry_id)) for entry_id in entry_ids
         ]
 
         with ThreadPoolExecutor(max_workers=self.config.max_workers) as executor:
@@ -2986,9 +2959,9 @@ class SolutionNMRProgramYearlyCollector:
                 programs = future.result()
                 if programs is None:
                     cached_pdb_path = self.cache_dir / f"{entry_id}.pdb"
-                    if (
-                        not self.download_missing
-                        and (not cached_pdb_path.exists() or cached_pdb_path.stat().st_size <= 0)
+                    if not self.download_missing and (
+                        not cached_pdb_path.exists()
+                        or cached_pdb_path.stat().st_size <= 0
                     ):
                         skipped_uncached_count += 1
                     else:
@@ -3031,14 +3004,14 @@ class SolutionNMRProgramYearlyCollector:
         )
 
 
-class SolutionNMRMonomerProgramClusterCollector:
+class SolutionNMRMonomerProgramClusterBuilder:
     def __init__(
         self,
         quality_records: list[SolutionNMRMonomerQualityRecord],
         cache_dir: Path,
         max_workers: int,
     ) -> None:
-        """Initialize the monomer refinement-program cluster collector."""
+        """Initialize the monomer refinement-program cluster builder."""
         self.quality_records = quality_records
         self.cache_dir = cache_dir
         self.max_workers = max(1, max_workers)
@@ -3050,7 +3023,7 @@ class SolutionNMRMonomerProgramClusterCollector:
             return ""
         return extract_raw_refinement_program_text_from_pdb(pdb_path)
 
-    def collect(
+    def build(
         self,
     ) -> tuple[
         list[SolutionNMRMonomerProgramClusterAssignmentRecord],
@@ -3111,9 +3084,9 @@ class SolutionNMRMonomerProgramClusterCollector:
                         },
                     )
                     total_row["count"] += 1
-                    total_row["rama_sum"] += (
-                        quality_record.ramachandran_outliers_percent
-                    )
+                    total_row[
+                        "rama_sum"
+                    ] += quality_record.ramachandran_outliers_percent
                     total_row["side_sum"] += quality_record.sidechain_outliers_percent
                     total_row["clash_sum"] += quality_record.clashscore
 
@@ -3171,9 +3144,9 @@ class SolutionNMRMonomerProgramClusterCollector:
         return assignments, summaries
 
 
-class MembraneProteinYearlyCollector:
-    def __init__(self, client: RCSBClient, config: CollectorConfig) -> None:
-        """Initialize the membrane-protein yearly count collector."""
+class MembraneProteinYearlyBuilder:
+    def __init__(self, client: RCSBClient, config: DatasetBuildConfig) -> None:
+        """Initialize the membrane-protein yearly count builder."""
         self.client = client
         self.config = config
 
@@ -3210,7 +3183,7 @@ class MembraneProteinYearlyCollector:
             year_counter.update(years)
         return year_counter
 
-    def collect(self) -> list[MembraneYearlyCountRecord]:
+    def build(self) -> list[MembraneYearlyCountRecord]:
         """Collect yearly membrane-protein entry counts."""
         entry_ids = self._fetch_membrane_entry_ids()
         year_counter = self._count_entry_years(
@@ -3223,7 +3196,7 @@ class MembraneProteinYearlyCollector:
             for year, count in sorted(year_counter.items())
         ]
 
-    def collect_by_method(
+    def build_by_method(
         self,
         methods: Iterable[ExperimentalMethod],
     ) -> list[YearlyCountRecord]:
@@ -3244,7 +3217,9 @@ class MembraneProteinYearlyCollector:
                 }
             )
             membrane_method_entry_ids = [
-                entry_id for entry_id in method_entry_ids if entry_id in membrane_entry_ids
+                entry_id
+                for entry_id in method_entry_ids
+                if entry_id in membrane_entry_ids
             ]
             LOGGER.info(
                 "Membrane proteins %s: kept %d/%d method entries",
@@ -3264,13 +3239,13 @@ class MembraneProteinYearlyCollector:
         return sorted(records, key=lambda record: (record.year, record.method))
 
 
-class SolutionNMRWeightCollector:
-    def __init__(self, client: RCSBClient, config: CollectorConfig) -> None:
-        """Initialize the SOLUTION NMR molecular-weight collector."""
+class SolutionNMRWeightBuilder:
+    def __init__(self, client: RCSBClient, config: DatasetBuildConfig) -> None:
+        """Initialize the SOLUTION NMR molecular-weight builder."""
         self.client = client
         self.config = config
 
-    def collect(self) -> list[SolutionNMRWeightRecord]:
+    def build(self) -> list[SolutionNMRWeightRecord]:
         """Collect molecular-weight records for SOLUTION NMR entries."""
         entry_ids = fetch_solution_nmr_entry_ids(
             client=self.client,
@@ -3289,11 +3264,11 @@ class SolutionNMRWeightCollector:
         return sorted(records, key=lambda record: (record.year, record.entry_id))
 
 
-class SolutionNMRMonomerStrideModeledFirstModelCollector:
+class SolutionNMRMonomerStrideModeledFirstModelBuilder:
     def __init__(
         self,
         client: RCSBClient,
-        config: CollectorConfig,
+        config: DatasetBuildConfig,
         stride_executable: str,
         cache_dir: Path,
         stride_cache_dir: Path,
@@ -3320,13 +3295,11 @@ class SolutionNMRMonomerStrideModeledFirstModelCollector:
             return
 
         for batch_idx, batch in enumerate(batches, start=1):
-            batch_records = (
-                self.client.fetch_solution_nmr_monomer_stride_modeled_first_model_records_for_ids(
-                    entry_ids=batch,
-                    stride_executable=self.stride_executable,
-                    pdb_cache_dir=self.cache_dir,
-                    stride_cache_dir=self.stride_cache_dir,
-                )
+            batch_records = self.client.fetch_solution_nmr_monomer_stride_modeled_first_model_records_for_ids(
+                entry_ids=batch,
+                stride_executable=self.stride_executable,
+                pdb_cache_dir=self.cache_dir,
+                stride_cache_dir=self.stride_cache_dir,
             )
             LOGGER.info(
                 (
@@ -3345,21 +3318,21 @@ class SolutionNMRMonomerStrideModeledFirstModelCollector:
             for record in batch_records:
                 yield record
 
-    def collect(self) -> list[SolutionNMRMonomerStrideModeledFirstModelRecord]:
+    def build(self) -> list[SolutionNMRMonomerStrideModeledFirstModelRecord]:
         """Collect all STRIDE modeled-first-model records into a list."""
         records = list(self.iter_records())
         return sorted(records, key=lambda record: (record.year, record.entry_id))
 
 
-class SolutionNMRMonomerPrecisionCollector:
+class SolutionNMRMonomerPrecisionBuilder:
     def __init__(
         self,
         client: RCSBClient,
-        config: CollectorConfig,
+        config: DatasetBuildConfig,
         cache_dir: Path,
         precision_workers: int,
     ) -> None:
-        """Initialize shared state for monomer precision collectors."""
+        """Initialize shared state for monomer precision builders."""
         self.client = client
         self.config = config
         self.cache_dir = cache_dir
@@ -3420,9 +3393,7 @@ class SolutionNMRMonomerPrecisionCollector:
             for raw_counts in raw_ca_counts_per_model
         ]
         n_ca_core_raw = (
-            min(raw_ca_counts_common)
-            if raw_ca_counts_common
-            else len(sorted_resids)
+            min(raw_ca_counts_common) if raw_ca_counts_common else len(sorted_resids)
         )
         return (
             (
@@ -3472,13 +3443,14 @@ class SolutionNMRMonomerPrecisionCollector:
             mean_rmsd_angstrom=mean_rmsd,
         )
 
-class SolutionNMRMonomerPrecisionStrideModeledFirstModelCollector(
-    SolutionNMRMonomerPrecisionCollector
+
+class SolutionNMRMonomerPrecisionStrideModeledFirstModelBuilder(
+    SolutionNMRMonomerPrecisionBuilder
 ):
     def __init__(
         self,
         client: RCSBClient,
-        config: CollectorConfig,
+        config: DatasetBuildConfig,
         cache_dir: Path,
         precision_workers: int,
         stride_executable: str,
@@ -3515,13 +3487,15 @@ class SolutionNMRMonomerPrecisionStrideModeledFirstModelCollector(
                     seed.chain_id,
                 )
                 return None
-            core_range = compute_stride_core_range_for_modeled_auth_seq_ids_in_first_model(
-                pdb_path=pdb_path,
-                entry_id=seed.entry_id,
-                chain_id=parsed_chain_id,
-                modeled_auth_seq_ids=modeled_auth_seq_ids,
-                stride_executable=self.stride_executable,
-                stride_cache_dir=self.stride_cache_dir,
+            core_range = (
+                compute_stride_core_range_for_modeled_auth_seq_ids_in_first_model(
+                    pdb_path=pdb_path,
+                    entry_id=seed.entry_id,
+                    chain_id=parsed_chain_id,
+                    modeled_auth_seq_ids=modeled_auth_seq_ids,
+                    stride_executable=self.stride_executable,
+                    stride_cache_dir=self.stride_cache_dir,
+                )
             )
             if core_range is None:
                 LOGGER.info(
@@ -3548,7 +3522,7 @@ class SolutionNMRMonomerPrecisionStrideModeledFirstModelCollector(
             )
             return None
 
-    def collect(
+    def build(
         self,
         max_entries: int | None = None,
         skip_entry_ids: set[str] | None = None,
@@ -3608,13 +3582,13 @@ class SolutionNMRMonomerPrecisionStrideModeledFirstModelCollector(
         return sorted(precision_records, key=lambda r: (r.year, r.entry_id))
 
 
-class SolutionNMRMonomerQualityCollector:
-    def __init__(self, client: RCSBClient, config: CollectorConfig) -> None:
-        """Initialize the SOLUTION NMR monomer quality collector."""
+class SolutionNMRMonomerQualityBuilder:
+    def __init__(self, client: RCSBClient, config: DatasetBuildConfig) -> None:
+        """Initialize the SOLUTION NMR monomer quality builder."""
         self.client = client
         self.config = config
 
-    def collect(self) -> list[SolutionNMRMonomerQualityRecord]:
+    def build(self) -> list[SolutionNMRMonomerQualityRecord]:
         """Collect validation quality records for SOLUTION NMR monomers."""
         entry_ids = fetch_solution_nmr_entry_ids(
             client=self.client,
@@ -3633,11 +3607,11 @@ class SolutionNMRMonomerQualityCollector:
         return sorted(records, key=lambda r: (r.year, r.entry_id))
 
 
-class SolutionNMRMonomerXrayHomologCollector:
+class SolutionNMRMonomerXrayHomologBuilder:
     def __init__(
         self,
         client: RCSBClient,
-        config: CollectorConfig,
+        config: DatasetBuildConfig,
         stride_executable: str,
         cache_dir: Path,
         stride_cache_dir: Path,
@@ -3835,21 +3809,32 @@ class SolutionNMRMonomerXrayHomologCollector:
     def _build_record_pair(
         self,
         seed: SolutionNMRMonomerXrayHomologSeedRecord,
-    ) -> tuple[SolutionNMRMonomerXrayHomologRecord, SolutionNMRMonomerXrayHomologRecord]:
+    ) -> tuple[
+        SolutionNMRMonomerXrayHomologRecord, SolutionNMRMonomerXrayHomologRecord
+    ]:
         """Build current and historical homolog records for one seed."""
         core_query = self._build_stride_core_query_sequence(seed)
         return (
-            self._build_record(seed, sequence_identity_percent=95, core_query=core_query),
-            self._build_record(seed, sequence_identity_percent=100, core_query=core_query),
+            self._build_record(
+                seed, sequence_identity_percent=95, core_query=core_query
+            ),
+            self._build_record(
+                seed, sequence_identity_percent=100, core_query=core_query
+            ),
         )
 
-    def collect(
+    def build(
         self,
-        on_record_pair: Callable[
-            [SolutionNMRMonomerXrayHomologRecord, SolutionNMRMonomerXrayHomologRecord],
-            None,
-        ]
-        | None = None,
+        on_record_pair: (
+            Callable[
+                [
+                    SolutionNMRMonomerXrayHomologRecord,
+                    SolutionNMRMonomerXrayHomologRecord,
+                ],
+                None,
+            ]
+            | None
+        ) = None,
     ) -> tuple[
         list[SolutionNMRMonomerXrayHomologRecord],
         list[SolutionNMRMonomerXrayHomologRecord],
@@ -3955,11 +3940,11 @@ class SolutionNMRMonomerXrayHomologCollector:
         return sorted(records_95, key=key_fn), sorted(records_100, key=key_fn)
 
 
-class SolutionNMRMonomerXrayRmsdCollector:
+class SolutionNMRMonomerXrayRmsdBuilder:
     def __init__(
         self,
         client: RCSBClient,
-        config: CollectorConfig,
+        config: DatasetBuildConfig,
         cache_dir: Path,
         rmsd_workers: int,
         homolog_records: list[SolutionNMRMonomerXrayHomologRecord],
@@ -4304,9 +4289,7 @@ class SolutionNMRMonomerXrayRmsdCollector:
                 worst_xray_core_end_seq_id=worst.xray_core_end_seq_id,
                 worst_n_common_ca=worst.n_common_ca,
                 worst_rmsd_ca_angstrom=worst.rmsd_ca_angstrom,
-                rmsd_delta_angstrom=(
-                    worst.rmsd_ca_angstrom - best.rmsd_ca_angstrom
-                ),
+                rmsd_delta_angstrom=(worst.rmsd_ca_angstrom - best.rmsd_ca_angstrom),
             )
         except Exception as exc:
             LOGGER.warning(
@@ -4410,7 +4393,7 @@ class SolutionNMRMonomerXrayRmsdCollector:
         )
         return work_items
 
-    def collect(
+    def build(
         self,
         max_entries: int | None = None,
         skip_entry_ids: set[str] | None = None,
@@ -4456,12 +4439,13 @@ class SolutionNMRMonomerXrayRmsdCollector:
 
         return sorted(records, key=lambda r: (r.year, r.entry_id))
 
-    def collect_extremes(
+    def build_extremes(
         self,
         max_entries: int | None = None,
         skip_entry_ids: set[str] | None = None,
-        on_record: Callable[[SolutionNMRMonomerXrayRmsdExtremesRecord], None]
-        | None = None,
+        on_record: (
+            Callable[[SolutionNMRMonomerXrayRmsdExtremesRecord], None] | None
+        ) = None,
     ) -> list[SolutionNMRMonomerXrayRmsdExtremesRecord]:
         """Collect minimum and maximum NMR-to-X-ray RMSD records."""
         skip_entry_ids = skip_entry_ids or set()
@@ -4546,9 +4530,7 @@ def read_solution_nmr_monomer_quality_csv(
                     ramachandran_outliers_percent=float(
                         row["ramachandran_outliers_percent"]
                     ),
-                    sidechain_outliers_percent=float(
-                        row["sidechain_outliers_percent"]
-                    ),
+                    sidechain_outliers_percent=float(row["sidechain_outliers_percent"]),
                 )
             )
     return records
@@ -4926,9 +4908,6 @@ def stream_solution_nmr_monomer_stride_modeled_first_model_csv(
                 "modeled_start_seq_id",
                 "modeled_end_seq_id",
                 "modeled_sequence_length",
-                "secondary_structure_percent",
-                "helix_fraction",
-                "sheet_fraction",
                 "stride_alpha_helix_fraction",
                 "stride_3_10_helix_fraction",
                 "stride_pi_helix_fraction",
@@ -4949,9 +4928,6 @@ def stream_solution_nmr_monomer_stride_modeled_first_model_csv(
                     record.modeled_start_seq_id,
                     record.modeled_end_seq_id,
                     record.modeled_sequence_length,
-                    f"{record.secondary_structure_percent:.3f}",
-                    f"{record.helix_fraction:.6f}",
-                    f"{record.sheet_fraction:.6f}",
                     f"{record.stride_alpha_helix_fraction:.6f}",
                     f"{record.stride_3_10_helix_fraction:.6f}",
                     f"{record.stride_pi_helix_fraction:.6f}",
@@ -5086,9 +5062,7 @@ def _solution_nmr_monomer_xray_homolog_csv_row(
             if record.nmr_core_start_seq_id is not None
             else ""
         ),
-        record.nmr_core_end_seq_id
-        if record.nmr_core_end_seq_id is not None
-        else "",
+        record.nmr_core_end_seq_id if record.nmr_core_end_seq_id is not None else "",
         record.nmr_query_sequence_length,
         int(record.has_xray_homolog),
         len(record.xray_homolog_entity_ids),
@@ -5161,7 +5135,7 @@ def read_solution_nmr_monomer_xray_homolog_csv(
 def filter_xray_homolog_records_by_deposit_date(
     records: list[SolutionNMRMonomerXrayHomologRecord],
     client: RCSBClient,
-    config: CollectorConfig,
+    config: DatasetBuildConfig,
 ) -> list[SolutionNMRMonomerXrayHomologRecord]:
     """Keep homolog records whose X-ray release timing matches the mode."""
     xray_entity_ids = sorted(
@@ -5192,15 +5166,8 @@ def filter_xray_homolog_records_by_deposit_date(
         for entity_id in xray_entity_ids
     }
     entry_ids = sorted(
-        {
-            record.entry_id
-            for record in records
-        }
-        | {
-            entry_id
-            for entry_id in xray_entry_id_by_entity_id.values()
-            if entry_id
-        }
+        {record.entry_id for record in records}
+        | {entry_id for entry_id in xray_entry_id_by_entity_id.values() if entry_id}
     )
     accession_dates_by_entry_id: dict[str, tuple[str | None, str | None]] = {}
     for batch_dates in collect_batch_results(
@@ -5231,8 +5198,10 @@ def filter_xray_homolog_records_by_deposit_date(
                 if parsed_xray_release_date <= nmr_deposit_date:
                     kept_entity_ids_list.append(entity_id)
         kept_entity_ids = tuple(kept_entity_ids_list)
-        kept_entry_ids = SolutionNMRMonomerXrayHomologCollector._entry_ids_from_polymer_entity_ids(
-            kept_entity_ids
+        kept_entry_ids = (
+            SolutionNMRMonomerXrayHomologBuilder._entry_ids_from_polymer_entity_ids(
+                kept_entity_ids
+            )
         )
         historical_records.append(
             SolutionNMRMonomerXrayHomologRecord(
@@ -5285,9 +5254,7 @@ def read_solution_nmr_monomer_xray_rmsd_csv(
                     nmr_query_sequence_length=int(
                         row.get("nmr_query_sequence_length") or 0
                     ),
-                    xray_homolog_entity_id=str(
-                        row.get("xray_homolog_entity_id") or ""
-                    ),
+                    xray_homolog_entity_id=str(row.get("xray_homolog_entity_id") or ""),
                     xray_homolog_count=int(row.get("xray_homolog_count") or 0),
                     xray_entry_id=str(row["xray_entry_id"]),
                     xray_chain_id=str(row["xray_chain_id"]),
@@ -5338,7 +5305,11 @@ def _solution_nmr_monomer_xray_rmsd_csv_row(
         record.year,
         record.sequence_identity_percent,
         record.nmr_chain_id,
-        record.nmr_core_start_seq_id if record.nmr_core_start_seq_id is not None else "",
+        (
+            record.nmr_core_start_seq_id
+            if record.nmr_core_start_seq_id is not None
+            else ""
+        ),
         record.nmr_core_end_seq_id if record.nmr_core_end_seq_id is not None else "",
         record.nmr_query_sequence_length,
         record.xray_homolog_entity_id,
@@ -5407,7 +5378,11 @@ def _solution_nmr_monomer_xray_rmsd_extremes_csv_row(
         record.year,
         record.sequence_identity_percent,
         record.nmr_chain_id,
-        record.nmr_core_start_seq_id if record.nmr_core_start_seq_id is not None else "",
+        (
+            record.nmr_core_start_seq_id
+            if record.nmr_core_start_seq_id is not None
+            else ""
+        ),
         record.nmr_core_end_seq_id if record.nmr_core_end_seq_id is not None else "",
         record.nmr_query_sequence_length,
         record.xray_homolog_count,
@@ -5489,9 +5464,7 @@ def read_solution_nmr_monomer_xray_rmsd_extremes_csv(
                     successful_xray_homolog_count=int(
                         row.get("successful_xray_homolog_count") or 0
                     ),
-                    best_xray_homolog_entity_id=str(
-                        row["best_xray_homolog_entity_id"]
-                    ),
+                    best_xray_homolog_entity_id=str(row["best_xray_homolog_entity_id"]),
                     best_xray_entry_id=str(row["best_xray_entry_id"]),
                     best_xray_chain_id=str(row["best_xray_chain_id"]),
                     best_xray_resolution_angstrom=float(
@@ -5543,15 +5516,13 @@ def write_solution_nmr_monomer_xray_rmsd_extremes_csv(
     write_csv_rows(
         output_path=output_path,
         header=list(SOLUTION_NMR_MONOMER_XRAY_RMSD_EXTREMES_HEADER),
-        rows=(
-            _solution_nmr_monomer_xray_rmsd_extremes_csv_row(r) for r in records
-        ),
+        rows=(_solution_nmr_monomer_xray_rmsd_extremes_csv_row(r) for r in records),
     )
 
 
-def collect_solution_nmr_monomer_xray_rmsd_to_csv(
+def build_solution_nmr_monomer_xray_rmsd_to_csv(
     client: RCSBClient,
-    config: CollectorConfig,
+    config: DatasetBuildConfig,
     homolog_input_path: Path,
     output_path: Path,
     cache_dir: Path,
@@ -5565,9 +5536,7 @@ def collect_solution_nmr_monomer_xray_rmsd_to_csv(
     existing_records: list[SolutionNMRMonomerXrayRmsdRecord] = []
     valid_existing_records: list[SolutionNMRMonomerXrayRmsdRecord] = []
     skip_entry_ids: set[str] = set()
-    homolog_records = read_solution_nmr_monomer_xray_homolog_csv(
-        homolog_input_path
-    )
+    homolog_records = read_solution_nmr_monomer_xray_homolog_csv(homolog_input_path)
     if not homolog_records:
         raise SystemExit(
             f"No X-ray homolog records found for {log_label}. Run the matching "
@@ -5606,7 +5575,7 @@ def collect_solution_nmr_monomer_xray_rmsd_to_csv(
             dropped_existing,
         )
 
-    rmsd_collector = SolutionNMRMonomerXrayRmsdCollector(
+    rmsd_builder = SolutionNMRMonomerXrayRmsdBuilder(
         client=client,
         config=config,
         cache_dir=cache_dir,
@@ -5630,7 +5599,7 @@ def collect_solution_nmr_monomer_xray_rmsd_to_csv(
             writer.writerow(_solution_nmr_monomer_xray_rmsd_csv_row(record))
             csvfile.flush()
 
-        new_records = rmsd_collector.collect(
+        new_records = rmsd_builder.build(
             max_entries=max_entries,
             skip_entry_ids=skip_entry_ids,
             on_record=_on_xray_rmsd_record,
@@ -5645,9 +5614,9 @@ def collect_solution_nmr_monomer_xray_rmsd_to_csv(
     )
 
 
-def collect_solution_nmr_monomer_xray_rmsd_extremes_to_csv(
+def build_solution_nmr_monomer_xray_rmsd_extremes_to_csv(
     client: RCSBClient,
-    config: CollectorConfig,
+    config: DatasetBuildConfig,
     homolog_input_path: Path,
     output_path: Path,
     cache_dir: Path,
@@ -5661,9 +5630,7 @@ def collect_solution_nmr_monomer_xray_rmsd_extremes_to_csv(
     existing_records: list[SolutionNMRMonomerXrayRmsdExtremesRecord] = []
     valid_existing_records: list[SolutionNMRMonomerXrayRmsdExtremesRecord] = []
     skip_entry_ids: set[str] = set()
-    homolog_records = read_solution_nmr_monomer_xray_homolog_csv(
-        homolog_input_path
-    )
+    homolog_records = read_solution_nmr_monomer_xray_homolog_csv(homolog_input_path)
     if not homolog_records:
         raise SystemExit(
             f"No X-ray homolog records found for {log_label}. Run the matching "
@@ -5677,9 +5644,7 @@ def collect_solution_nmr_monomer_xray_rmsd_extremes_to_csv(
         homolog_input_path,
     )
     if not overwrite and output_path.exists():
-        existing_records = read_solution_nmr_monomer_xray_rmsd_extremes_csv(
-            output_path
-        )
+        existing_records = read_solution_nmr_monomer_xray_rmsd_extremes_csv(output_path)
         existing_records = [
             record
             for record in existing_records
@@ -5701,7 +5666,7 @@ def collect_solution_nmr_monomer_xray_rmsd_extremes_to_csv(
             dropped_existing,
         )
 
-    rmsd_collector = SolutionNMRMonomerXrayRmsdCollector(
+    rmsd_builder = SolutionNMRMonomerXrayRmsdBuilder(
         client=client,
         config=config,
         cache_dir=cache_dir,
@@ -5727,7 +5692,7 @@ def collect_solution_nmr_monomer_xray_rmsd_extremes_to_csv(
             writer.writerow(_solution_nmr_monomer_xray_rmsd_extremes_csv_row(record))
             csvfile.flush()
 
-        new_records = rmsd_collector.collect_extremes(
+        new_records = rmsd_builder.build_extremes(
             max_entries=max_entries,
             skip_entry_ids=skip_entry_ids,
             on_record=_on_xray_rmsd_extremes_record,
@@ -5777,7 +5742,7 @@ def parse_dataset_kinds(raw_value: str) -> list[DatasetKind]:
 
 
 def parse_args() -> argparse.Namespace:
-    """Parse command-line arguments for the collector CLI."""
+    """Parse command-line arguments for the builder CLI."""
     parser = argparse.ArgumentParser(
         description="Collect extensible PDB datasets from RCSB APIs."
     )
@@ -5872,7 +5837,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--solution-nmr-monomer-precision-stride-modeled-first-model-output",
         type=Path,
-        default=Path("data/solution_nmr_monomer_precision_stride_modeled_first_model.csv"),
+        default=Path(
+            "data/solution_nmr_monomer_precision_stride_modeled_first_model.csv"
+        ),
         help=(
             "Output CSV path for solution_nmr_monomer_precision_stride_modeled_first_model "
             "dataset."
@@ -5923,7 +5890,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--solution-nmr-monomer-program-cluster-yearly-summary-output",
         type=Path,
-        default=Path("data/solution_nmr_monomer_program_cluster_quality_total_by_year.csv"),
+        default=Path(
+            "data/solution_nmr_monomer_program_cluster_quality_total_by_year.csv"
+        ),
         help=(
             "Output CSV path for yearly totals across all program clusters in "
             "solution_nmr_monomer_program_clusters dataset."
@@ -5988,8 +5957,7 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("data/solution_nmr_monomer_xray_rmsd_extremes.csv"),
         help=(
-            "Output CSV path for solution_nmr_monomer_xray_rmsd_extremes "
-            "dataset."
+            "Output CSV path for solution_nmr_monomer_xray_rmsd_extremes " "dataset."
         ),
     )
     parser.add_argument(
@@ -6082,7 +6050,7 @@ def main() -> None:
         level=getattr(logging, args.log_level.upper(), logging.INFO),
         format="%(asctime)s | %(levelname)s | %(message)s",
     )
-    config = CollectorConfig(
+    config = DatasetBuildConfig(
         page_size=args.page_size,
         graphql_batch_size=args.batch_size,
         max_workers=args.workers,
@@ -6090,8 +6058,8 @@ def main() -> None:
     client = RCSBClient(config=config)
 
     if DatasetKind.METHOD_COUNTS in args.datasets:
-        method_collector = PDBMethodYearlyCollector(client=client, config=config)
-        method_records = method_collector.collect(
+        method_builder = PDBMethodYearlyBuilder(client=client, config=config)
+        method_records = method_builder.build(
             [
                 ExperimentalMethod.X_RAY,
                 ExperimentalMethod.CRYO_EM,
@@ -6102,14 +6070,12 @@ def main() -> None:
         LOGGER.info("Saved %d records to %s", len(method_records), args.counts_output)
 
     if DatasetKind.MEMBRANE_PROTEIN_COUNTS in args.datasets:
-        membrane_collector = MembraneProteinYearlyCollector(
-            client=client, config=config
-        )
-        membrane_records = membrane_collector.collect()
+        membrane_builder = MembraneProteinYearlyBuilder(client=client, config=config)
+        membrane_records = membrane_builder.build()
         write_membrane_counts_csv(
             records=membrane_records, output_path=args.membrane_counts_output
         )
-        membrane_method_records = membrane_collector.collect_by_method(
+        membrane_method_records = membrane_builder.build_by_method(
             [
                 ExperimentalMethod.X_RAY,
                 ExperimentalMethod.CRYO_EM,
@@ -6132,13 +6098,13 @@ def main() -> None:
         )
 
     if DatasetKind.SOLUTION_NMR_PROGRAM_COUNTS in args.datasets:
-        nmr_program_collector = SolutionNMRProgramYearlyCollector(
+        nmr_program_builder = SolutionNMRProgramYearlyBuilder(
             client=client,
             config=config,
             cache_dir=Path(args.solution_nmr_program_cache_dir),
             download_missing=not args.solution_nmr_program_cache_only,
         )
-        nmr_program_records = nmr_program_collector.collect()
+        nmr_program_records = nmr_program_builder.build()
         write_solution_nmr_program_counts_csv(
             records=nmr_program_records,
             output_path=args.solution_nmr_program_counts_output,
@@ -6150,8 +6116,8 @@ def main() -> None:
         )
 
     if DatasetKind.SOLUTION_NMR_WEIGHTS in args.datasets:
-        nmr_weight_collector = SolutionNMRWeightCollector(client=client, config=config)
-        nmr_weight_records = nmr_weight_collector.collect()
+        nmr_weight_builder = SolutionNMRWeightBuilder(client=client, config=config)
+        nmr_weight_records = nmr_weight_builder.build()
         write_solution_nmr_weights_csv(
             records=nmr_weight_records, output_path=args.solution_nmr_output
         )
@@ -6177,7 +6143,7 @@ def main() -> None:
             ),
             modeled_first_stride_executable,
         )
-        modeled_stride_collector = SolutionNMRMonomerStrideModeledFirstModelCollector(
+        modeled_stride_builder = SolutionNMRMonomerStrideModeledFirstModelBuilder(
             client=client,
             config=config,
             stride_executable=modeled_first_stride_executable,
@@ -6186,7 +6152,7 @@ def main() -> None:
         )
         modeled_stride_count = (
             stream_solution_nmr_monomer_stride_modeled_first_model_csv(
-                records=modeled_stride_collector.iter_records(),
+                records=modeled_stride_builder.iter_records(),
                 output_path=Path(
                     args.solution_nmr_monomer_stride_modeled_first_model_output
                 ),
@@ -6227,8 +6193,8 @@ def main() -> None:
                 len(existing_records),
             )
 
-        precision_stride_collector = (
-            SolutionNMRMonomerPrecisionStrideModeledFirstModelCollector(
+        precision_stride_builder = (
+            SolutionNMRMonomerPrecisionStrideModeledFirstModelBuilder(
                 client=client,
                 config=config,
                 cache_dir=Path(args.precision_cache_dir),
@@ -6255,7 +6221,7 @@ def main() -> None:
                 writer.writerow(_solution_nmr_monomer_precision_csv_row(record))
                 csvfile.flush()
 
-            new_records = precision_stride_collector.collect(
+            new_records = precision_stride_builder.build(
                 max_entries=args.precision_max_entries,
                 skip_entry_ids=skip_entry_ids,
                 on_record=_on_precision_stride_record,
@@ -6269,10 +6235,8 @@ def main() -> None:
         )
 
     if DatasetKind.SOLUTION_NMR_MONOMER_QUALITY in args.datasets:
-        quality_collector = SolutionNMRMonomerQualityCollector(
-            client=client, config=config
-        )
-        quality_records = quality_collector.collect()
+        quality_builder = SolutionNMRMonomerQualityBuilder(client=client, config=config)
+        quality_records = quality_builder.build()
         write_solution_nmr_monomer_quality_csv(
             records=quality_records,
             output_path=args.solution_nmr_monomer_quality_output,
@@ -6291,12 +6255,12 @@ def main() -> None:
                 "solution_nmr_monomer_program_clusters requires a non-empty quality "
                 f"CSV at {quality_input_path}"
             )
-        cluster_collector = SolutionNMRMonomerProgramClusterCollector(
+        cluster_builder = SolutionNMRMonomerProgramClusterBuilder(
             quality_records=quality_records,
             cache_dir=Path(args.solution_nmr_monomer_program_cluster_cache_dir),
             max_workers=config.max_workers,
         )
-        assignment_records, summary_records = cluster_collector.collect()
+        assignment_records, summary_records = cluster_builder.build()
         write_solution_nmr_monomer_program_cluster_assignments_csv(
             records=assignment_records,
             output_path=Path(
@@ -6361,7 +6325,7 @@ def main() -> None:
             "SOLUTION NMR monomer X-ray homologs: using STRIDE executable %s",
             homolog_stride_executable,
         )
-        homolog_collector = SolutionNMRMonomerXrayHomologCollector(
+        homolog_builder = SolutionNMRMonomerXrayHomologBuilder(
             client=client,
             config=config,
             stride_executable=homolog_stride_executable,
@@ -6369,7 +6333,9 @@ def main() -> None:
             stride_cache_dir=Path(args.stride_cache_dir),
         )
         homolog_95_output_path = Path(args.solution_nmr_monomer_xray_homolog_95_output)
-        homolog_100_output_path = Path(args.solution_nmr_monomer_xray_homolog_100_output)
+        homolog_100_output_path = Path(
+            args.solution_nmr_monomer_xray_homolog_100_output
+        )
         homolog_95_output_path.parent.mkdir(parents=True, exist_ok=True)
         homolog_100_output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -6398,7 +6364,7 @@ def main() -> None:
                 file_95.flush()
                 file_100.flush()
 
-            records_95, records_100 = homolog_collector.collect(
+            records_95, records_100 = homolog_builder.build(
                 on_record_pair=_on_homolog_record_pair
             )
         LOGGER.info(
@@ -6415,12 +6381,8 @@ def main() -> None:
     if DatasetKind.SOLUTION_NMR_MONOMER_XRAY_HOMOLOGS_HISTORICAL in args.datasets:
         homolog_95_input_path = Path(args.solution_nmr_monomer_xray_homolog_95_output)
         homolog_100_input_path = Path(args.solution_nmr_monomer_xray_homolog_100_output)
-        records_95 = read_solution_nmr_monomer_xray_homolog_csv(
-            homolog_95_input_path
-        )
-        records_100 = read_solution_nmr_monomer_xray_homolog_csv(
-            homolog_100_input_path
-        )
+        records_95 = read_solution_nmr_monomer_xray_homolog_csv(homolog_95_input_path)
+        records_100 = read_solution_nmr_monomer_xray_homolog_csv(homolog_100_input_path)
         if not records_95 or not records_100:
             raise SystemExit(
                 "No X-ray homolog records found for historical filtering. Run "
@@ -6468,7 +6430,7 @@ def main() -> None:
             if args.xray_rmsd_sequence_identity == 95
             else Path(args.solution_nmr_monomer_xray_homolog_100_output)
         )
-        collect_solution_nmr_monomer_xray_rmsd_to_csv(
+        build_solution_nmr_monomer_xray_rmsd_to_csv(
             client=client,
             config=config,
             homolog_input_path=homolog_input_path,
@@ -6487,7 +6449,7 @@ def main() -> None:
             if args.xray_rmsd_sequence_identity == 95
             else Path(args.solution_nmr_monomer_xray_homolog_100_historical_output)
         )
-        collect_solution_nmr_monomer_xray_rmsd_to_csv(
+        build_solution_nmr_monomer_xray_rmsd_to_csv(
             client=client,
             config=config,
             homolog_input_path=homolog_input_path,
@@ -6506,7 +6468,7 @@ def main() -> None:
             if args.xray_rmsd_sequence_identity == 95
             else Path(args.solution_nmr_monomer_xray_homolog_100_output)
         )
-        collect_solution_nmr_monomer_xray_rmsd_extremes_to_csv(
+        build_solution_nmr_monomer_xray_rmsd_extremes_to_csv(
             client=client,
             config=config,
             homolog_input_path=homolog_input_path,
@@ -6519,16 +6481,13 @@ def main() -> None:
             log_label="SOLUTION NMR X-ray RMSD extremes",
         )
 
-    if (
-        DatasetKind.SOLUTION_NMR_MONOMER_XRAY_RMSD_EXTREMES_HISTORICAL
-        in args.datasets
-    ):
+    if DatasetKind.SOLUTION_NMR_MONOMER_XRAY_RMSD_EXTREMES_HISTORICAL in args.datasets:
         homolog_input_path = (
             Path(args.solution_nmr_monomer_xray_homolog_95_historical_output)
             if args.xray_rmsd_sequence_identity == 95
             else Path(args.solution_nmr_monomer_xray_homolog_100_historical_output)
         )
-        collect_solution_nmr_monomer_xray_rmsd_extremes_to_csv(
+        build_solution_nmr_monomer_xray_rmsd_extremes_to_csv(
             client=client,
             config=config,
             homolog_input_path=homolog_input_path,

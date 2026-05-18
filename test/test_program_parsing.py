@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from pdb_data_collector import (
+from pdb_dataset_builder import (
     _normalize_refinement_program_name,
     extract_raw_refinement_program_text_from_pdb,
     extract_refinement_programs_from_pdb,

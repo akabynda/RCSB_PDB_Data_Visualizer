@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from pdb_data_collector import SolutionNMRMonomerXrayRmsdCollector
+from pdb_dataset_builder import SolutionNMRMonomerXrayRmsdBuilder
 
 
 def _ca_line(serial: int, resid: int, x: float, y: float, z: float) -> str:
@@ -44,7 +44,7 @@ class XrayRmsdFirstModelTests(unittest.TestCase):
                 xray_lines.append(_ca_line(resid, resid, x + 10.0, y - 3.0, z + 2.0))
             xray_path.write_text("".join(xray_lines), encoding="utf-8")
 
-            result = SolutionNMRMonomerXrayRmsdCollector._compute_ca_rmsd_to_xray(
+            result = SolutionNMRMonomerXrayRmsdBuilder._compute_ca_rmsd_to_xray(
                 nmr_pdb_path=nmr_path,
                 nmr_chain_id="A",
                 nmr_core_start_seq_id=1,
@@ -77,7 +77,7 @@ class XrayRmsdFirstModelTests(unittest.TestCase):
                 xray_lines.append(_ca_line(serial, serial, x + 2.0, y - 4.0, z + 6.0))
             xray_path.write_text("".join(xray_lines), encoding="utf-8")
 
-            result = SolutionNMRMonomerXrayRmsdCollector._compute_ca_rmsd_to_xray(
+            result = SolutionNMRMonomerXrayRmsdBuilder._compute_ca_rmsd_to_xray(
                 nmr_pdb_path=nmr_path,
                 nmr_chain_id="A",
                 nmr_core_start_seq_id=1,
