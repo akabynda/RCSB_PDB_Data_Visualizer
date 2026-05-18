@@ -1,6 +1,6 @@
 import unittest
 
-from pdb_dataset_builder import _extract_stride_core_range_for_modeled_auth_seq_ids
+from src.pdb_dataset_builder import _extract_stride_core_range_for_modeled_auth_seq_ids
 
 
 class ExtractStrideCoreRangeForModeledAuthSeqIdsTests(unittest.TestCase):

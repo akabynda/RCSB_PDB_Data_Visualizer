@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from pdb_dataset_builder import (
+from src.pdb_dataset_builder import (
     DatasetBuildConfig,
     RCSBClient,
     SolutionNMRWeightRecord,

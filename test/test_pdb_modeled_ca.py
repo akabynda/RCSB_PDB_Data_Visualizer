@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from pdb_dataset_builder import (
+from src.pdb_dataset_builder import (
     parse_first_model_ca_residues,
     parse_first_model_modeled_ca_auth_seq_ids,
     parse_models_ca_coords_with_stats,

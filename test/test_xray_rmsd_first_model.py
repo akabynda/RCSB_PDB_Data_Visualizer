@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from pdb_dataset_builder import SolutionNMRMonomerXrayRmsdBuilder
+from src.pdb_dataset_builder import SolutionNMRMonomerXrayRmsdBuilder
 
 
 def _ca_line(serial: int, resid: int, x: float, y: float, z: float) -> str:

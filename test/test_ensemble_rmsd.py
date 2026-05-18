@@ -3,7 +3,7 @@ import unittest
 
 import numpy as np
 
-from pdb_dataset_builder import _ca_rmsd_to_mean_structure
+from src.pdb_dataset_builder import _ca_rmsd_to_mean_structure
 
 
 class CaRmsdToMeanStructureTests(unittest.TestCase):

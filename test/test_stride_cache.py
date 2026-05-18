@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from pdb_dataset_builder import load_first_model_stride_state_by_chain
+from src.pdb_dataset_builder import load_first_model_stride_state_by_chain
 
 
 def _ca_line(serial: int, resid: int) -> str:
@@ -36,7 +36,7 @@ class StrideCacheTests(unittest.TestCase):
 
             expected_states = {"A": {1: "H"}}
             with patch(
-                "pdb_dataset_builder._run_stride_for_model_text",
+                "src.pdb_dataset_builder._run_stride_for_model_text",
                 return_value=expected_states,
             ) as run_stride:
                 first_states, first_model_count = (

@@ -1,6 +1,6 @@
 import unittest
 
-from pdb_dataset_builder import DatasetBuildConfig, RCSBClient
+from src.pdb_dataset_builder import DatasetBuildConfig, RCSBClient
 
 
 class _NullResultSetResponse:

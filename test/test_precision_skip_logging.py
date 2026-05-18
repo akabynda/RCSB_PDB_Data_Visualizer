@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from pdb_dataset_builder import (
+from src.pdb_dataset_builder import (
     DatasetBuildConfig,
     RCSBClient,
     SolutionNMRMonomerPrecisionBuilder,
@@ -40,7 +40,7 @@ class PrecisionSkipLoggingTests(unittest.TestCase):
                 precision_workers=1,
             )
 
-            with self.assertLogs("pdb_dataset_builder", level="INFO") as logs:
+            with self.assertLogs("src.pdb_dataset_builder", level="INFO") as logs:
                 record = builder._build_record_from_core_range(
                     pdb_path=pdb_path,
                     entry_id="TEST",
