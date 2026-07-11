@@ -16,6 +16,10 @@ from matplotlib import font_manager
 from matplotlib.ticker import AutoMinorLocator, FuncFormatter, MultipleLocator
 
 
+DEFAULT_FIGURE_HEIGHT_INCHES: float = 5.0
+JMR_TWO_COLUMN_WIDTH_INCHES: float = 2244 / 300
+
+
 class PlotKind(str, Enum):
     METHOD_COUNTS = "method_counts"
     MEMBRANE_PROTEIN_COUNTS = "membrane_protein_counts"
@@ -56,159 +60,166 @@ class PlotKind(str, Enum):
 
 @dataclass(frozen=True)
 class PlotConfig:
-    width_inches: float = 8.6
-    height_inches: float = 5.0
+    height_inches: float = DEFAULT_FIGURE_HEIGHT_INCHES
+    aspect_ratio: float = (
+        JMR_TWO_COLUMN_WIDTH_INCHES / DEFAULT_FIGURE_HEIGHT_INCHES
+    )
+    titleless_suffix: str = "_no_title"
     dpi: int = 600
     x_label: str = "Deposition year"
     annual_title: str = (
-        "Number of annually deposited PDB structures by experimental method"
+        "Number of PDB structures by deposition year and experimental method"
     )
-    annual_y_label: str = "Number of deposited structures"
+    annual_y_label: str = "Number of structures"
     membrane_annual_title: str = (
-        "Number of annually deposited membrane protein structures in PDB"
+        "Number of membrane protein structures in PDB by deposition year"
     )
-    membrane_annual_y_label: str = "Number of deposited membrane protein structures"
+    membrane_annual_y_label: str = "Number of membrane protein structures"
     membrane_cumulative_title: str = (
-        "Cumulative number of deposited membrane protein structures in PDB"
+        "Cumulative number of membrane protein structures in PDB by deposition year"
     )
     membrane_cumulative_y_label: str = (
-        "Cumulative number of deposited membrane protein structures"
+        "Cumulative number of membrane protein structures"
     )
     membrane_method_annual_title: str = (
-        "Number of annually deposited membrane protein structures by experimental method"
+        "Number of membrane protein structures by deposition year and experimental method"
     )
     membrane_method_cumulative_title: str = (
-        "Cumulative number of deposited membrane protein structures by experimental method"
+        "Cumulative number of membrane protein structures by deposition year and experimental method"
     )
     nmr_program_annual_title: str = (
-        "Number of annually deposited solution NMR structures by refinement program"
+        "Number of NMR structures by deposition year and refinement program"
     )
-    nmr_program_annual_y_label: str = "Number of deposited structures"
+    nmr_program_annual_y_label: str = "Number of structures"
     nmr_monomer_program_clusters_title: str = (
-        "Solution NMR monomer program clusters and quality metrics by year"
+        "NMR program clusters and quality metrics by deposition year"
     )
     nmr_monomer_program_cluster_share_title: str = (
-        "Share of solution NMR monomer program mentions by year"
+        "Share of NMR structures by structure-determination software"
     )
     nmr_monomer_program_cluster_share_y_label: str = "Share of program mentions (%)"
     cumulative_title: str = (
-        "Cumulative number of deposited PDB structures by experimental method"
+        "Cumulative number of PDB structures by deposition year and experimental method"
     )
-    cumulative_y_label: str = "Cumulative number of deposited structures"
+    cumulative_y_label: str = "Cumulative number of structures"
     nmr_avg_title: str = (
-        "Mean molecular weight of annually deposited solution NMR structures"
+        "Mean molecular weight of NMR structures by deposition year"
     )
     nmr_avg_y_label: str = "Mean molecular weight (kDa)"
     nmr_median_title: str = (
-        "Median molecular weight of annually deposited solution NMR structures"
+        "Median molecular weight of NMR structures by deposition year"
     )
     nmr_median_y_label: str = "Median molecular weight (kDa)"
     nmr_max_title: str = (
-        "Maximum molecular weight of annually deposited solution NMR structures"
+        "Maximum molecular weight of NMR structures by deposition year"
     )
     nmr_max_y_label: str = "Maximum molecular weight (kDa)"
     nmr_boxplot_title: str = (
-        "Molecular weight distribution of solution NMR structures by period"
+        "Molecular weight distribution of NMR structures by period"
     )
     nmr_area_title: str = (
-        "Cumulative number of solution NMR structures by weight category"
+        "Cumulative number of NMR structures by weight range"
     )
     nmr_area_y_label: str = "Cumulative number of structures"
     nmr_area_share_title: str = (
-        "Share of solution NMR structures by weight category and year"
+        "Share of NMR structures by weight range"
     )
     nmr_area_share_y_label: str = "Share of structures (%)"
     nmr_area_cumulative_share_title: str = (
-        "Share of cumulative solution NMR structures by weight category"
+        "Cumulative share of NMR structures by weight range"
     )
     nmr_area_cumulative_share_y_label: str = "Share of cumulative structures (%)"
     nmr_monomer_stride_modeled_first_model_title: str = (
-        "STRIDE(H+G+I+E+B)-derived secondary structure content of modeled residues in first model by year"
+        "Secondary-structure content of NMR structures by deposition year"
     )
     nmr_monomer_stride_modeled_first_model_y_label: str = (
-        "Secondary structure content (%)"
+        "Secondary-structure content (%)"
     )
     nmr_monomer_precision_stride_mean_title: str = (
-        "Mean ensemble RMSD of solution NMR monomeric proteins by year (STRIDE-defined core)"
+        "Mean ensemble RMSD of NMR structures by deposition year"
     )
     nmr_monomer_precision_stride_mean_y_label: str = (
         "Mean RMSD to average structure (Å)"
     )
     nmr_monomer_precision_stride_median_title: str = (
-        "Median ensemble RMSD of solution NMR monomeric proteins by year (STRIDE-defined core)"
+        "Median ensemble RMSD of NMR structures by deposition year"
     )
     nmr_monomer_precision_stride_median_y_label: str = (
         "Median RMSD to average structure (Å)"
     )
     nmr_monomer_quality_clash_title: str = (
-        "Mean clashscore of solution NMR monomeric proteins by year"
+        "Mean clash score for NMR structures by deposition year"
     )
-    nmr_monomer_quality_clash_y_label: str = "Mean clashscore"
+    nmr_monomer_quality_clash_y_label: str = "Mean clash score"
     nmr_monomer_quality_rama_title: str = (
-        "Mean Ramachandran outliers of solution NMR monomeric proteins by year"
+        "Mean percentage of Ramachandran outliers for NMR structures by deposition year"
     )
-    nmr_monomer_quality_rama_y_label: str = "Mean Ramachandran outliers (%)"
+    nmr_monomer_quality_rama_y_label: str = (
+        "Mean fraction of Ramachandran outliers (%)"
+    )
     nmr_monomer_quality_side_title: str = (
-        "Mean sidechain outliers of solution NMR monomeric proteins by year"
+        "Mean percentage of side-chain outliers for NMR structures by deposition year"
     )
-    nmr_monomer_quality_side_y_label: str = "Mean sidechain outliers (%)"
+    nmr_monomer_quality_side_y_label: str = "Mean fraction of side-chain outliers (%)"
     nmr_monomer_xray_homolog_95_title: str = (
-        "Share of solution NMR monomeric proteins with X-ray analogs (95% sequence identity) by year"
+        "Share of NMR structures with X-ray analog by deposition year (95% identity)"
     )
     nmr_monomer_xray_homolog_100_title: str = (
-        "Share of solution NMR monomeric proteins with X-ray analogs (100% sequence identity) by year"
+        "Share of NMR structures with X-ray analog by deposition year (100% identity)"
     )
     nmr_monomer_xray_homolog_y_label: str = "Structures with X-ray analog (%)"
     nmr_monomer_xray_homolog_95_historical_title: str = (
-        "Share of solution NMR monomeric proteins with already-released X-ray analogs (95% sequence identity) by year"
+        "Share of NMR structures with prior X-ray analog by deposition year (95% identity)"
     )
     nmr_monomer_xray_homolog_100_historical_title: str = (
-        "Share of solution NMR monomeric proteins with already-released X-ray analogs (100% sequence identity) by year"
+        "Share of NMR structures with prior X-ray analog by deposition year (100% identity)"
     )
     nmr_monomer_xray_homolog_95_cumulative_title: str = (
-        "Cumulative share of solution NMR monomeric proteins with X-ray analogs (95% sequence identity)"
+        "Cumulative share of NMR structures with X-ray analog (95% identity)"
     )
     nmr_monomer_xray_homolog_100_cumulative_title: str = (
-        "Cumulative share of solution NMR monomeric proteins with X-ray analogs (100% sequence identity)"
+        "Cumulative share of NMR structures with X-ray analog (100% identity)"
     )
     nmr_monomer_xray_homolog_95_historical_cumulative_title: str = (
-        "Cumulative share of solution NMR monomeric proteins with already-released X-ray analogs (95% sequence identity)"
+        "Cumulative share of NMR structures with prior X-ray analog (95% identity)"
     )
     nmr_monomer_xray_homolog_100_historical_cumulative_title: str = (
-        "Cumulative share of solution NMR monomeric proteins with already-released X-ray analogs (100% sequence identity)"
+        "Cumulative share of NMR structures with prior X-ray analog (100% identity)"
     )
     nmr_monomer_xray_homolog_95_timing_share_title: str = (
-        "Share of solution NMR monomeric proteins by X-ray analog release timing (95% sequence identity)"
+        "Share of NMR structures by availability of X-ray analog (95% identity)"
     )
     nmr_monomer_xray_homolog_100_timing_share_title: str = (
-        "Share of solution NMR monomeric proteins by X-ray analog release timing (100% sequence identity)"
+        "Share of NMR structures by availability of X-ray analog (100% identity)"
     )
     nmr_monomer_xray_homolog_timing_share_y_label: str = "Share of structures (%)"
     nmr_monomer_xray_rmsd_title: str = (
-        "Mean RMSD(CA) of solution NMR monomeric proteins to best-resolution X-ray analogs by year"
+        "Mean RMSD(CA) of NMR structures to best-resolution X-ray analog by deposition year"
     )
     nmr_monomer_xray_rmsd_y_label: str = "Mean RMSD(CA) (Å)"
     nmr_monomer_xray_median_rmsd_title: str = (
-        "Median RMSD(CA) of solution NMR monomeric proteins to best-resolution X-ray analogs by year"
+        "Median RMSD between NMR and analog X-ray structures by deposition year"
     )
-    nmr_monomer_xray_median_rmsd_y_label: str = "Median RMSD(CA) (Å)"
+    nmr_monomer_xray_median_rmsd_y_label: str = (
+        "Median RMSD to X-ray structure (Å)"
+    )
     nmr_monomer_xray_min_rmsd_title: str = (
-        "Mean RMSD(CA) of solution NMR monomeric proteins to minimum-RMSD X-ray analogs by year"
+        "Mean RMSD(CA) of NMR structures to minimum-RMSD X-ray analog by deposition year"
     )
     nmr_monomer_xray_min_rmsd_y_label: str = "Mean minimum RMSD(CA) (Å)"
     nmr_monomer_xray_min_median_rmsd_title: str = (
-        "Median RMSD(CA) of solution NMR monomeric proteins to minimum-RMSD X-ray analogs by year"
+        "Median RMSD(CA) of NMR structures to minimum-RMSD X-ray analog by deposition year"
     )
     nmr_monomer_xray_min_median_rmsd_y_label: str = "Median minimum RMSD(CA) (Å)"
     nmr_monomer_xray_rmsd_extremes_mean_title: str = (
-        "Mean RMSD(CA) to best-resolution, minimum-RMSD, and maximum-RMSD X-ray analogs by year"
+        "Mean RMSD(CA) to X-ray analogs by deposition year"
     )
     nmr_monomer_xray_rmsd_extremes_median_title: str = (
-        "Median RMSD(CA) to best-resolution, minimum-RMSD, and maximum-RMSD X-ray analogs by year"
+        "Median RMSD(CA) to X-ray analogs by deposition year"
     )
     nmr_monomer_xray_rmsd_extremes_y_label: str = "RMSD(CA) (Å)"
     nmr_monomer_xray_rmsd_precision_scatter_title: str = (
-        "Minimum X-ray RMSD(CA) vs solution NMR ensemble precision"
+        "NMR / X-ray RMSD vs. NMR ensemble RMSD"
     )
     nmr_monomer_xray_rmsd_precision_yearly_corr_title: str = (
         "Within-year correlation between minimum X-ray RMSD(CA) and NMR precision"
@@ -232,12 +243,17 @@ class PlotConfig:
         "#bab0ac",
     )
 
+    def figure_size(self, height_scale: float = 1.0) -> tuple[float, float]:
+        width = self.height_inches * self.aspect_ratio
+        height = self.height_inches * height_scale
+        return (width, height)
+
 
 NMR_WEIGHT_BINS: tuple[float, ...] = (0.0, 10.0, 20.0, float("inf"))
 NMR_WEIGHT_LABELS: tuple[str, ...] = ("<10 kDa", "10-20 kDa", ">20 kDa")
 XRAY_HOMOLOG_TIMING_LABELS: tuple[str, str, str] = (
-    "Already-released X-ray analog",
-    "Later-released X-ray analog",
+    "X-ray analog released prior to deposition",
+    "X-ray analog released at a later date",
     "No X-ray analog",
 )
 MAX_PLOT_YEAR: int = 2024
@@ -324,6 +340,20 @@ def parse_plot_kinds(raw_value: str) -> list[PlotKind]:
     if not selected:
         raise argparse.ArgumentTypeError("No plots selected.")
     return selected
+
+
+def parse_positive_float(raw_value: str) -> float:
+    try:
+        value = float(raw_value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            f"Expected a positive number, got '{raw_value}'."
+        ) from exc
+    if value <= 0.0:
+        raise argparse.ArgumentTypeError(
+            f"Expected a positive number, got {value}."
+        )
+    return value
 
 
 class PDBScientificPlotter:
@@ -453,15 +483,56 @@ class PDBScientificPlotter:
 
     @staticmethod
     def _remove_zero_y_tick(ax: plt.Axes) -> None:
-        y_bottom, _ = ax.get_ylim()
+        y_bottom, y_top = ax.get_ylim()
         if y_bottom >= 0.0:
-            filtered_ticks = [tick for tick in ax.get_yticks() if float(tick) > 0.0]
+            filtered_ticks = [
+                tick
+                for tick in ax.get_yticks()
+                if 0.0 < float(tick) <= y_top + 1e-9
+            ]
         else:
             filtered_ticks = [
-                tick for tick in ax.get_yticks() if abs(float(tick)) > 1e-9
+                tick
+                for tick in ax.get_yticks()
+                if y_bottom - 1e-9 <= float(tick) <= y_top + 1e-9
+                and abs(float(tick)) > 1e-9
             ]
         if filtered_ticks:
             ax.set_yticks(filtered_ticks)
+
+    @staticmethod
+    def _configure_boxed_axes(
+        ax: plt.Axes,
+        *,
+        y_tick_labels_on_both_sides: bool = False,
+    ) -> None:
+        for spine in ax.spines.values():
+            spine.set_visible(True)
+
+        ax.tick_params(
+            axis="y",
+            which="major",
+            left=True,
+            right=True,
+            labelleft=True,
+            labelright=y_tick_labels_on_both_sides,
+        )
+        ax.tick_params(
+            axis="y",
+            which="minor",
+            left=True,
+            right=True,
+            labelleft=False,
+            labelright=False,
+        )
+        ax.tick_params(
+            axis="x",
+            which="both",
+            bottom=True,
+            top=True,
+            labelbottom=True,
+            labeltop=False,
+        )
 
     @staticmethod
     def _set_adaptive_title(
@@ -503,6 +574,45 @@ class PDBScientificPlotter:
         if legend:
             legend.get_frame().set_linewidth(0.8)
 
+    def _titleless_output_path(self, path: Path) -> Path:
+        return path.with_name(
+            f"{path.stem}{self.config.titleless_suffix}{path.suffix}"
+        )
+
+    @staticmethod
+    def _apply_tight_layout(
+        fig: plt.Figure,
+        tight_layout_rect: tuple[float, float, float, float] | None,
+    ) -> None:
+        if tight_layout_rect is None:
+            fig.tight_layout()
+        else:
+            fig.tight_layout(rect=tight_layout_rect)
+
+    def _save_figure_files(
+        self,
+        fig: plt.Figure,
+        output_png: Path,
+        output_svg: Path,
+        *,
+        savefig_bbox_inches: str | None = None,
+        savefig_pad_inches: float = 0.1,
+    ) -> None:
+        output_png.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(
+            output_png,
+            dpi=self.config.dpi,
+            bbox_inches=savefig_bbox_inches,
+            pad_inches=savefig_pad_inches,
+        )
+        if self.generate_svg:
+            output_svg.parent.mkdir(parents=True, exist_ok=True)
+            fig.savefig(
+                output_svg,
+                bbox_inches=savefig_bbox_inches,
+                pad_inches=savefig_pad_inches,
+            )
+
     def _render_figure(
         self,
         output_png: Path,
@@ -517,44 +627,43 @@ class PDBScientificPlotter:
         savefig_pad_inches: float = 0.1,
         height_scale: float = 1.0,
     ) -> None:
-        fig, ax = plt.subplots(
-            figsize=(
-                self.config.width_inches,
-                self.config.height_inches * height_scale,
+        def render_variant(
+            variant_output_png: Path,
+            variant_output_svg: Path,
+            *,
+            with_title: bool,
+        ) -> None:
+            fig, ax = plt.subplots(figsize=self.config.figure_size(height_scale))
+            draw_fn(ax)
+            if use_year_x_ticks:
+                self._configure_year_axis_ticks(ax)
+            y_bottom, _ = ax.get_ylim()
+            if y_bottom < 0.0:
+                ax.set_ylim(bottom=0.0)
+            self._remove_zero_y_tick(ax)
+            self._configure_minor_ticks(ax=ax, use_year_x_ticks=use_year_x_ticks)
+            if with_title:
+                self._set_adaptive_title(fig=fig, ax=ax, title=title)
+            ax.set_xlabel(x_label if x_label is not None else self.config.x_label)
+            ax.set_ylabel(y_label)
+            self._configure_boxed_axes(ax)
+            ax.margins(x=0)
+            self._apply_tight_layout(fig=fig, tight_layout_rect=tight_layout_rect)
+            self._save_figure_files(
+                fig=fig,
+                output_png=variant_output_png,
+                output_svg=variant_output_svg,
+                savefig_bbox_inches=savefig_bbox_inches,
+                savefig_pad_inches=savefig_pad_inches,
             )
+            plt.close(fig)
+
+        render_variant(output_png, output_svg, with_title=True)
+        render_variant(
+            self._titleless_output_path(output_png),
+            self._titleless_output_path(output_svg),
+            with_title=False,
         )
-        draw_fn(ax)
-        if use_year_x_ticks:
-            self._configure_year_axis_ticks(ax)
-        y_bottom, _ = ax.get_ylim()
-        if y_bottom < 0.0:
-            ax.set_ylim(bottom=0.0)
-        self._remove_zero_y_tick(ax)
-        self._configure_minor_ticks(ax=ax, use_year_x_ticks=use_year_x_ticks)
-        self._set_adaptive_title(fig=fig, ax=ax, title=title)
-        ax.set_xlabel(x_label if x_label is not None else self.config.x_label)
-        ax.set_ylabel(y_label)
-        ax.spines["top"].set_visible(False)
-        ax.spines["right"].set_visible(False)
-        ax.margins(x=0)
-        if tight_layout_rect is None:
-            fig.tight_layout()
-        else:
-            fig.tight_layout(rect=tight_layout_rect)
-        output_png.parent.mkdir(parents=True, exist_ok=True)
-        fig.savefig(
-            output_png,
-            dpi=self.config.dpi,
-            bbox_inches=savefig_bbox_inches,
-            pad_inches=savefig_pad_inches,
-        )
-        if self.generate_svg:
-            fig.savefig(
-                output_svg,
-                bbox_inches=savefig_bbox_inches,
-                pad_inches=savefig_pad_inches,
-            )
-        plt.close(fig)
 
     @staticmethod
     def _limit_year_column(table: pd.DataFrame) -> pd.DataFrame:
@@ -828,7 +937,7 @@ class PDBScientificPlotter:
                     left=effective_left,
                     right=effective_right,
                 )
-            self._add_legend(ax, loc=legend_loc, title="Weight category")
+            self._add_legend(ax, loc=legend_loc, title="Weight range")
 
         self._render_figure(
             output_png=output_png,
@@ -865,7 +974,7 @@ class PDBScientificPlotter:
                 base = top
             ax.set_ylim(0.0, 100.0)
             ax.set_xlim(float(x_step_edges[0]), float(x_step_edges[-1]))
-            self._add_legend(ax, loc="upper left", title="X-ray analog status")
+            self._add_legend(ax, loc="upper left")
 
         self._render_figure(
             output_png=output_png,
@@ -1050,16 +1159,87 @@ class PDBScientificPlotter:
             else:
                 self._add_legend(ax, loc="upper left", title="Program cluster", ncol=1)
 
+        if legend_outside:
+            self._render_cluster_stackplot_with_bottom_legend(
+                output_png=output_png,
+                output_svg=output_svg,
+                title=title,
+                y_label=y_label,
+                draw_fn=draw,
+                height_scale=height_scale,
+            )
+            return
+
         self._render_figure(
             output_png=output_png,
             output_svg=output_svg,
             title=title,
             y_label=y_label,
             draw_fn=draw,
-            tight_layout_rect=(0.0, 0.03, 1.0, 1.0) if legend_outside else None,
-            savefig_bbox_inches="tight" if legend_outside else None,
-            savefig_pad_inches=0.04 if legend_outside else 0.1,
+            savefig_pad_inches=0.1,
             height_scale=height_scale,
+        )
+
+    def _render_cluster_stackplot_with_bottom_legend(
+        self,
+        output_png: Path,
+        output_svg: Path,
+        title: str,
+        y_label: str,
+        draw_fn: Callable[[plt.Axes], None],
+        height_scale: float = 1.0,
+    ) -> None:
+        def render_variant(
+            variant_output_png: Path,
+            variant_output_svg: Path,
+            *,
+            with_title: bool,
+        ) -> None:
+            fig = plt.figure(figsize=self.config.figure_size(height_scale))
+            ax = fig.add_axes((0.11, 0.285, 0.84, 0.585 if with_title else 0.665))
+            draw_fn(ax)
+            self._configure_year_axis_ticks(ax)
+            y_bottom, _ = ax.get_ylim()
+            if y_bottom < 0.0:
+                ax.set_ylim(bottom=0.0)
+            self._remove_zero_y_tick(ax)
+            self._configure_minor_ticks(ax=ax, use_year_x_ticks=True)
+            if with_title:
+                self._set_adaptive_title(fig=fig, ax=ax, title=title)
+            ax.set_xlabel(self.config.x_label)
+            ax.set_ylabel(y_label)
+            self._configure_boxed_axes(ax)
+            ax.margins(x=0)
+
+            handles, labels = ax.get_legend_handles_labels()
+            legend = fig.legend(
+                handles,
+                labels,
+                loc="lower center",
+                bbox_to_anchor=(0.5, 0.025),
+                ncol=5,
+                frameon=True,
+                fancybox=False,
+                framealpha=1.0,
+                facecolor="white",
+                edgecolor="black",
+            )
+            legend.get_frame().set_linewidth(0.8)
+            if ax.legend_ is not None:
+                ax.legend_.remove()
+
+            self._save_figure_files(
+                fig=fig,
+                output_png=variant_output_png,
+                output_svg=variant_output_svg,
+            )
+            plt.close(fig)
+
+        render_variant(output_png, output_svg, with_title=True)
+        render_variant(
+            self._titleless_output_path(output_png),
+            self._titleless_output_path(output_svg),
+            with_title=False,
         )
 
     @classmethod
@@ -1110,7 +1290,7 @@ class PDBScientificPlotter:
         fig, axes = plt.subplots(
             2,
             2,
-            figsize=(self.config.width_inches * 1.65, self.config.height_inches * 1.9),
+            figsize=self.config.figure_size(height_scale=1.9),
         )
         axes_flat = list(axes.flat)
 
@@ -1152,22 +1332,34 @@ class PDBScientificPlotter:
             ax.set_yticks(np.arange(-0.5, len(cluster_labels), 1), minor=True)
             ax.grid(which="minor", color="white", linestyle="-", linewidth=0.5)
             ax.tick_params(which="minor", bottom=False, left=False)
-            ax.spines["top"].set_visible(False)
-            ax.spines["right"].set_visible(False)
+            self._configure_boxed_axes(ax, y_tick_labels_on_both_sides=False)
+            ax.tick_params(
+                which="minor",
+                bottom=False,
+                top=False,
+                left=False,
+                right=False,
+            )
             colorbar = fig.colorbar(image, ax=ax, fraction=0.046, pad=0.02)
             colorbar.ax.tick_params(labelsize=10)
 
-        fig.suptitle(
+        suptitle = fig.suptitle(
             self.config.nmr_monomer_program_clusters_title,
             fontsize=15,
             fontweight="bold",
             y=0.98,
         )
-        fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.96))
-        output_png.parent.mkdir(parents=True, exist_ok=True)
-        fig.savefig(output_png, dpi=self.config.dpi)
-        if self.generate_svg:
-            fig.savefig(output_svg)
+        self._apply_tight_layout(fig=fig, tight_layout_rect=(0.0, 0.0, 1.0, 0.96))
+        self._save_figure_files(fig=fig, output_png=output_png, output_svg=output_svg)
+
+        suptitle.set_visible(False)
+        suptitle.set_in_layout(False)
+        self._apply_tight_layout(fig=fig, tight_layout_rect=None)
+        self._save_figure_files(
+            fig=fig,
+            output_png=self._titleless_output_path(output_png),
+            output_svg=self._titleless_output_path(output_svg),
+        )
         plt.close(fig)
 
     @staticmethod
@@ -1404,7 +1596,6 @@ class PDBScientificPlotter:
             x_right=float(count_share_table.index.max()),
             use_step_segments=True,
             legend_outside=True,
-            height_scale=1.25,
         )
         self._render_cluster_stackplot(
             table=count_share_without_other_table,
@@ -1420,7 +1611,6 @@ class PDBScientificPlotter:
             x_right=float(count_share_without_other_table.index.max()),
             use_step_segments=True,
             legend_outside=True,
-            height_scale=1.25,
         )
         self._render_cluster_metric_heatmaps(
             table=table,
@@ -1596,7 +1786,7 @@ class PDBScientificPlotter:
             x_left=float(yearly_share.index.min()),
             x_right=float(yearly_share.index.max()),
             use_step_segments=True,
-            legend_loc="lower right",
+            legend_loc="lower left",
         )
 
     def plot_solution_nmr_period_area_cumulative_share(
@@ -2324,6 +2514,8 @@ class PDBScientificPlotter:
         x = table["precision_rmsd"].to_numpy(dtype=float)
         y = table["min_xray_rmsd"].to_numpy(dtype=float)
         origin_slope = float(np.dot(x, y) / np.dot(x, x))
+        max_y = float(table["min_xray_rmsd"].max())
+        y_top = 35.0 if max_y <= 35.0 else 36.0 if max_y <= 36.0 else None
 
         def draw_scatter(ax: plt.Axes) -> None:
             ax.scatter(
@@ -2345,18 +2537,22 @@ class PDBScientificPlotter:
                     origin_slope * x_values,
                     color="#d62728",
                     linewidth=2.0,
-                    label="Fit y = kx",
                 )
-                ax.set_xlim(left=0.0)
-                self._add_legend(ax, loc="upper left")
+            ax.set_xlim(left=0.0)
+            if y_top is not None:
+                ax.set_ylim(0.0, y_top)
+                ax.yaxis.set_major_locator(MultipleLocator(5.0))
+            else:
+                ax.set_ylim(bottom=0.0)
+            ax.xaxis.set_major_locator(MultipleLocator(1.0))
             ax.text(
-                0.98,
-                0.04,
-                f"n={len(table)}\nk={origin_slope:.3f}\nPearson r={pearson:.3f}\nSpearman rho={spearman:.3f}",
+                0.96,
+                0.94,
+                f"n = {len(table)}\n$r$ = {pearson:.2f}\n$\\rho$ = {spearman:.2f}",
                 transform=ax.transAxes,
                 ha="right",
-                va="bottom",
-                fontsize=8,
+                va="top",
+                fontsize=12,
                 bbox={
                     "boxstyle": "square,pad=0.25",
                     "facecolor": "white",
@@ -2370,10 +2566,11 @@ class PDBScientificPlotter:
             output_png=scatter_output_png,
             output_svg=scatter_output_svg,
             title=self.config.nmr_monomer_xray_rmsd_precision_scatter_title,
-            y_label="Minimum X-ray RMSD(CA) (Å)",
-            x_label="NMR ensemble precision RMSD(CA) (Å)",
+            y_label=r"RMSD$_{\mathrm{NMR,X-ray}}$ (Å)",
+            x_label=r"RMSD$_{\mathrm{NMR}}$ (Å)",
             draw_fn=draw_scatter,
             use_year_x_ticks=False,
+            height_scale=self.config.aspect_ratio,
         )
 
         yearly_correlations: dict[int, float] = {}
@@ -3304,13 +3501,25 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Disable SVG output generation.",
     )
+    parser.add_argument(
+        "--aspect-ratio",
+        type=parse_positive_float,
+        default=PlotConfig().aspect_ratio,
+        help=(
+            "Figure width-to-height ratio. Lower values make plots narrower "
+            "(default: 1.496, matching a 7.48 x 5 in two-column figure)."
+        ),
+    )
 
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    plotter = PDBScientificPlotter(config=PlotConfig(), generate_svg=not args.no_svg)
+    plotter = PDBScientificPlotter(
+        config=PlotConfig(aspect_ratio=args.aspect_ratio),
+        generate_svg=not args.no_svg,
+    )
 
     if PlotKind.METHOD_COUNTS in args.plots:
         plotter.plot_method_counts(
