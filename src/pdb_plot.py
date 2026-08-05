@@ -65,6 +65,7 @@ class PlotConfig:
         JMR_TWO_COLUMN_WIDTH_INCHES / DEFAULT_FIGURE_HEIGHT_INCHES
     )
     titleless_suffix: str = "_no_title"
+    open_axes_suffix: str = "_open_axes"
     dpi: int = 600
     x_label: str = "Deposition year"
     annual_title: str = (
@@ -357,7 +358,7 @@ def parse_positive_float(raw_value: str) -> float:
 
 
 class PDBScientificPlotter:
-    def __init__(self, config: PlotConfig, generate_svg: bool = True) -> None:
+    def __init__(self, config: PlotConfig, generate_svg: bool = False) -> None:
         self.config = config
         self.generate_svg = generate_svg
         self._csv_cache: dict[Path, pd.DataFrame] = {}
@@ -535,6 +536,15 @@ class PDBScientificPlotter:
         )
 
     @staticmethod
+    def _configure_open_axes(ax: plt.Axes) -> None:
+        ax.spines["left"].set_visible(True)
+        ax.spines["bottom"].set_visible(True)
+        ax.spines["right"].set_visible(False)
+        ax.spines["top"].set_visible(False)
+        ax.tick_params(axis="y", which="both", left=True, right=False)
+        ax.tick_params(axis="x", which="both", bottom=True, top=False)
+
+    @staticmethod
     def _set_adaptive_title(
         fig: plt.Figure,
         ax: plt.Axes,
@@ -579,6 +589,25 @@ class PDBScientificPlotter:
             f"{path.stem}{self.config.titleless_suffix}{path.suffix}"
         )
 
+    def _open_axes_output_path(self, path: Path) -> Path:
+        return path.with_name(
+            f"{path.stem}{self.config.open_axes_suffix}{path.suffix}"
+        )
+
+    def _grouped_figure_output_path(self, path: Path) -> Path:
+        stem = path.stem
+        for suffix in (
+            f"{self.config.titleless_suffix}{self.config.open_axes_suffix}",
+            self.config.open_axes_suffix,
+            self.config.titleless_suffix,
+        ):
+            if stem.endswith(suffix):
+                stem = stem.removesuffix(suffix)
+                break
+        if path.parent.name == stem:
+            return path
+        return path.parent / stem / path.name
+
     @staticmethod
     def _apply_tight_layout(
         fig: plt.Figure,
@@ -598,6 +627,7 @@ class PDBScientificPlotter:
         savefig_bbox_inches: str | None = None,
         savefig_pad_inches: float = 0.1,
     ) -> None:
+        output_png = self._grouped_figure_output_path(output_png)
         output_png.parent.mkdir(parents=True, exist_ok=True)
         fig.savefig(
             output_png,
@@ -606,6 +636,7 @@ class PDBScientificPlotter:
             pad_inches=savefig_pad_inches,
         )
         if self.generate_svg:
+            output_svg = self._grouped_figure_output_path(output_svg)
             output_svg.parent.mkdir(parents=True, exist_ok=True)
             fig.savefig(
                 output_svg,
@@ -632,6 +663,7 @@ class PDBScientificPlotter:
             variant_output_svg: Path,
             *,
             with_title: bool,
+            open_axes: bool = False,
         ) -> None:
             fig, ax = plt.subplots(figsize=self.config.figure_size(height_scale))
             draw_fn(ax)
@@ -647,6 +679,8 @@ class PDBScientificPlotter:
             ax.set_xlabel(x_label if x_label is not None else self.config.x_label)
             ax.set_ylabel(y_label)
             self._configure_boxed_axes(ax)
+            if open_axes:
+                self._configure_open_axes(ax)
             ax.margins(x=0)
             self._apply_tight_layout(fig=fig, tight_layout_rect=tight_layout_rect)
             self._save_figure_files(
@@ -664,7 +698,18 @@ class PDBScientificPlotter:
             self._titleless_output_path(output_svg),
             with_title=False,
         )
-
+        render_variant(
+            self._open_axes_output_path(output_png),
+            self._open_axes_output_path(output_svg),
+            with_title=True,
+            open_axes=True,
+        )
+        render_variant(
+            self._open_axes_output_path(self._titleless_output_path(output_png)),
+            self._open_axes_output_path(self._titleless_output_path(output_svg)),
+            with_title=False,
+            open_axes=True,
+        )
     @staticmethod
     def _limit_year_column(table: pd.DataFrame) -> pd.DataFrame:
         if "year" not in table.columns:
@@ -1194,6 +1239,7 @@ class PDBScientificPlotter:
             variant_output_svg: Path,
             *,
             with_title: bool,
+            open_axes: bool = False,
         ) -> None:
             fig = plt.figure(figsize=self.config.figure_size(height_scale))
             ax = fig.add_axes((0.11, 0.285, 0.84, 0.585 if with_title else 0.665))
@@ -1209,6 +1255,8 @@ class PDBScientificPlotter:
             ax.set_xlabel(self.config.x_label)
             ax.set_ylabel(y_label)
             self._configure_boxed_axes(ax)
+            if open_axes:
+                self._configure_open_axes(ax)
             ax.margins(x=0)
 
             handles, labels = ax.get_legend_handles_labels()
@@ -1240,6 +1288,18 @@ class PDBScientificPlotter:
             self._titleless_output_path(output_png),
             self._titleless_output_path(output_svg),
             with_title=False,
+        )
+        render_variant(
+            self._open_axes_output_path(output_png),
+            self._open_axes_output_path(output_svg),
+            with_title=True,
+            open_axes=True,
+        )
+        render_variant(
+            self._open_axes_output_path(self._titleless_output_path(output_png)),
+            self._open_axes_output_path(self._titleless_output_path(output_svg)),
+            with_title=False,
+            open_axes=True,
         )
 
     @classmethod
@@ -1352,9 +1412,37 @@ class PDBScientificPlotter:
         self._apply_tight_layout(fig=fig, tight_layout_rect=(0.0, 0.0, 1.0, 0.96))
         self._save_figure_files(fig=fig, output_png=output_png, output_svg=output_svg)
 
+        for ax in axes_flat:
+            self._configure_open_axes(ax)
+            ax.tick_params(which="minor", top=False, right=False)
+        self._save_figure_files(
+            fig=fig,
+            output_png=self._open_axes_output_path(output_png),
+            output_svg=self._open_axes_output_path(output_svg),
+        )
+
         suptitle.set_visible(False)
         suptitle.set_in_layout(False)
         self._apply_tight_layout(fig=fig, tight_layout_rect=None)
+        self._save_figure_files(
+            fig=fig,
+            output_png=self._open_axes_output_path(
+                self._titleless_output_path(output_png)
+            ),
+            output_svg=self._open_axes_output_path(
+                self._titleless_output_path(output_svg)
+            ),
+        )
+
+        for ax in axes_flat:
+            self._configure_boxed_axes(ax, y_tick_labels_on_both_sides=False)
+            ax.tick_params(
+                which="minor",
+                bottom=False,
+                top=False,
+                left=False,
+                right=False,
+            )
         self._save_figure_files(
             fig=fig,
             output_png=self._titleless_output_path(output_png),
@@ -3497,9 +3585,9 @@ def parse_args() -> argparse.Namespace:
         help="Output SVG for cumulative correlation between minimum X-ray RMSD and precision.",
     )
     parser.add_argument(
-        "--no-svg",
+        "--svg",
         action="store_true",
-        help="Disable SVG output generation.",
+        help="Also generate SVG files. By default only PNG files are generated.",
     )
     parser.add_argument(
         "--aspect-ratio",
@@ -3518,7 +3606,7 @@ def main() -> None:
     args = parse_args()
     plotter = PDBScientificPlotter(
         config=PlotConfig(aspect_ratio=args.aspect_ratio),
-        generate_svg=not args.no_svg,
+        generate_svg=args.svg,
     )
 
     if PlotKind.METHOD_COUNTS in args.plots:

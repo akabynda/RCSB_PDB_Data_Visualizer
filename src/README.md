@@ -339,7 +339,8 @@ Output:
 
 After the CSV files are ready, build figures with `src/pdb_plot.py`.
 
-By default, `src/pdb_plot.py` reads the standard CSV paths in `data/` and writes PNG/SVG figures to `figures/`.
+By default, `src/pdb_plot.py` reads the standard CSV paths in `data/` and writes
+four PNG variants of each figure to `figures/<figure_name>/`.
 
 Build only selected plot groups with `--plots`:
 
@@ -354,10 +355,10 @@ Use `all` to build every available plot group:
 python src/pdb_plot.py --plots all
 ```
 
-Use `--no-svg` if only PNG output is needed:
+Use `--svg` to additionally generate SVG files:
 
 ```bash
-python src/pdb_plot.py --no-svg
+python src/pdb_plot.py --svg
 ```
 
 Input and output paths can be overridden with the corresponding flags, for example:

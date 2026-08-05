@@ -89,6 +89,7 @@ class DatasetKind(str, Enum):
         "solution_nmr_monomer_precision_stride_modeled_first_model"
     )
     SOLUTION_NMR_MONOMER_QUALITY = "solution_nmr_monomer_quality"
+    SOLUTION_NMR_MONOMER_EXPERIMENTS = "solution_nmr_monomer_experiments"
     SOLUTION_NMR_MONOMER_XRAY_HOMOLOGS = "solution_nmr_monomer_xray_homologs"
     SOLUTION_NMR_MONOMER_XRAY_HOMOLOGS_HISTORICAL = (
         "solution_nmr_monomer_xray_homologs_historical"
@@ -186,6 +187,13 @@ class SolutionNMRWeightRecord:
     entry_id: str
     year: int
     molecular_weight_kda: float
+
+
+@dataclass(frozen=True)
+class SolutionNMRMonomerExperimentsRecord:
+    entry_id: str
+    year: int
+    nmr_experiments_conducted: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -383,6 +391,11 @@ def fetch_solution_nmr_entry_ids(client: RCSBClient, log_label: str) -> list[str
     )
     LOGGER.info("%s: total unique IDs collected: %d", log_label, len(entry_ids))
     return entry_ids
+
+
+def contains_noesy_experiment(experiments: Iterable[str]) -> bool:
+    """Return whether at least one experiment contains NOESY."""
+    return any("NOESY" in experiment.upper() for experiment in experiments)
 
 
 def resolve_stride_executable(explicit_value: str) -> str | None:
@@ -2526,6 +2539,59 @@ class RCSBClient:
             )
         return records
 
+    def fetch_solution_nmr_monomer_experiment_records_for_ids(
+        self, entry_ids: list[str]
+    ) -> list[SolutionNMRMonomerExperimentsRecord]:
+        """Fetch NMR experiments for eligible monomeric SOLUTION NMR entries."""
+        query = """
+        query($ids:[String!]!) {
+          entries(entry_ids:$ids) {
+            rcsb_id
+            rcsb_entry_info {
+              deposited_model_count
+            }
+            rcsb_accession_info {
+              deposit_date
+            }
+            polymer_entities {
+              entity_poly {
+                type
+                rcsb_entity_polymer_type
+                pdbx_strand_id
+              }
+            }
+            pdbx_nmr_exptl {
+              type
+            }
+          }
+        }
+        """
+        payload = {"query": query, "variables": {"ids": entry_ids}}
+        data = self._post_json(self.config.graphql_url, payload)
+        entries = data.get("data", {}).get("entries") or []
+
+        records: list[SolutionNMRMonomerExperimentsRecord] = []
+        for entry in entries:
+            if not entry:
+                continue
+            context = self._extract_solution_nmr_monomer_context(entry)
+            if context is None:
+                continue
+            entry_id, year, _, _, _ = context
+            experiments = tuple(
+                str(item.get("type")).strip()
+                for item in entry.get("pdbx_nmr_exptl") or []
+                if item and item.get("type")
+            )
+            records.append(
+                SolutionNMRMonomerExperimentsRecord(
+                    entry_id=entry_id,
+                    year=year,
+                    nmr_experiments_conducted=experiments,
+                )
+            )
+        return records
+
     def iter_solution_nmr_monomer_stride_modeled_first_model_records_for_ids(
         self,
         entry_ids: list[str],
@@ -3259,6 +3325,30 @@ class SolutionNMRWeightBuilder:
             max_workers=self.config.max_workers,
             fetch_fn=self.client.fetch_solution_nmr_weight_records_for_ids,
             progress_label="SOLUTION NMR weights",
+        ):
+            records.extend(batch_records)
+        return sorted(records, key=lambda record: (record.year, record.entry_id))
+
+
+class SolutionNMRMonomerExperimentsBuilder:
+    def __init__(self, client: RCSBClient, config: DatasetBuildConfig) -> None:
+        """Initialize the SOLUTION NMR monomer experiment builder."""
+        self.client = client
+        self.config = config
+
+    def build(self) -> list[SolutionNMRMonomerExperimentsRecord]:
+        """Collect experiment descriptions for all eligible NMR monomers."""
+        entry_ids = fetch_solution_nmr_entry_ids(
+            client=self.client,
+            log_label="SOLUTION NMR monomer experiments",
+        )
+        batches = list(chunked(entry_ids, self.config.graphql_batch_size))
+        records: list[SolutionNMRMonomerExperimentsRecord] = []
+        for batch_records in collect_batch_results(
+            batches=batches,
+            max_workers=self.config.max_workers,
+            fetch_fn=self.client.fetch_solution_nmr_monomer_experiment_records_for_ids,
+            progress_label="SOLUTION NMR monomer experiments",
         ):
             records.extend(batch_records)
         return sorted(records, key=lambda record: (record.year, record.entry_id))
@@ -4891,6 +4981,24 @@ def write_solution_nmr_weights_csv(
     )
 
 
+def write_solution_nmr_monomer_experiments_csv(
+    records: list[SolutionNMRMonomerExperimentsRecord], output_path: Path
+) -> None:
+    """Write one combined NMR-experiment field per monomeric entry."""
+    write_csv_rows(
+        output_path=output_path,
+        header=["entry_id", "year", "nmr_experiments_conducted"],
+        rows=(
+            (
+                record.entry_id,
+                record.year,
+                "; ".join(record.nmr_experiments_conducted),
+            )
+            for record in records
+        ),
+    )
+
+
 def stream_solution_nmr_monomer_stride_modeled_first_model_csv(
     records: Iterator[SolutionNMRMonomerStrideModeledFirstModelRecord],
     output_path: Path,
@@ -5719,6 +5827,7 @@ def parse_dataset_kinds(raw_value: str) -> list[DatasetKind]:
             DatasetKind.SOLUTION_NMR_MONOMER_STRIDE_MODELED_FIRST_MODEL,
             DatasetKind.SOLUTION_NMR_MONOMER_PRECISION_STRIDE_MODELED_FIRST_MODEL,
             DatasetKind.SOLUTION_NMR_MONOMER_QUALITY,
+            DatasetKind.SOLUTION_NMR_MONOMER_EXPERIMENTS,
             DatasetKind.SOLUTION_NMR_MONOMER_XRAY_HOMOLOGS,
             DatasetKind.SOLUTION_NMR_MONOMER_XRAY_HOMOLOGS_HISTORICAL,
             DatasetKind.SOLUTION_NMR_MONOMER_XRAY_RMSD,
@@ -5754,8 +5863,11 @@ def parse_args() -> argparse.Namespace:
             DatasetKind.SOLUTION_NMR_WEIGHTS,
             DatasetKind.SOLUTION_NMR_MONOMER_STRIDE_MODELED_FIRST_MODEL,
         ],
-        help="Comma-separated dataset kinds or 'all'. "
-        "Available: method_counts, membrane_protein_counts, solution_nmr_program_counts, solution_nmr_monomer_program_clusters, solution_nmr_weights, solution_nmr_monomer_stride_modeled_first_model, solution_nmr_monomer_precision_stride_modeled_first_model, solution_nmr_monomer_quality, solution_nmr_monomer_xray_homologs, solution_nmr_monomer_xray_homologs_historical, solution_nmr_monomer_xray_rmsd, solution_nmr_monomer_xray_rmsd_historical, solution_nmr_monomer_xray_rmsd_extremes, solution_nmr_monomer_xray_rmsd_extremes_historical.",
+        help=(
+            "Comma-separated dataset kinds or 'all'. Available: "
+            + ", ".join(dataset.value for dataset in DatasetKind)
+            + ", all."
+        ),
     )
     parser.add_argument(
         "--counts-output",
@@ -5783,6 +5895,12 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("data/solution_nmr_structure_weights.csv"),
         help="Output CSV path for solution_nmr_weights dataset.",
+    )
+    parser.add_argument(
+        "--solution-nmr-monomer-experiments-output",
+        type=Path,
+        default=Path("data/solution_nmr_monomer_experiments.csv"),
+        help="Output CSV path for NMR experiments of monomeric SOLUTION NMR entries.",
     )
     parser.add_argument(
         "--solution-nmr-program-counts-output",
@@ -6125,6 +6243,27 @@ def main() -> None:
             "Saved %d records to %s",
             len(nmr_weight_records),
             args.solution_nmr_output,
+        )
+
+    if DatasetKind.SOLUTION_NMR_MONOMER_EXPERIMENTS in args.datasets:
+        experiments_builder = SolutionNMRMonomerExperimentsBuilder(
+            client=client,
+            config=config,
+        )
+        experiment_records = experiments_builder.build()
+        write_solution_nmr_monomer_experiments_csv(
+            records=experiment_records,
+            output_path=args.solution_nmr_monomer_experiments_output,
+        )
+        noesy_count = sum(
+            contains_noesy_experiment(record.nmr_experiments_conducted)
+            for record in experiment_records
+        )
+        LOGGER.info(
+            "Saved %d records to %s; NOESY entries: %d",
+            len(experiment_records),
+            args.solution_nmr_monomer_experiments_output,
+            noesy_count,
         )
 
     if DatasetKind.SOLUTION_NMR_MONOMER_STRIDE_MODELED_FIRST_MODEL in args.datasets:
