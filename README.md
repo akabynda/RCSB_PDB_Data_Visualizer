@@ -276,6 +276,8 @@ python src/pdb_dataset_builder.py --datasets solution_nmr_program_counts,solutio
 python src/pdb_dataset_builder.py --datasets solution_nmr_monomer_program_clusters
 ```
 
+A program name is assigned to a cluster by case-insensitive substring matching: the cluster keyword just has to appear anywhere inside the normalized program name (for example, `if "AMBER" in text`). The clusters are `AMBER`, `ARIA`, `CNS`, `CYANA`, `DISCOVER`, `DIANA_DYANA` (`DIANA` or `DYANA`), `XPLOR` (without `NIH`), `XPLOR_NIH`, and `OTHER` (used only when no known cluster matches).
+
 Render all article panels:
 
 ```bash

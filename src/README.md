@@ -193,6 +193,20 @@ Useful options:
 
 Assigns SOLUTION NMR protein monomers to all unique refinement-program clusters mentioned in PDB `REMARK 3 PROGRAM` records. This is multi-label: one structure can contribute to multiple clusters. In the per-cluster CSVs, `structure_count` therefore means cluster mentions/assignments; yearly totals remain unique structure counts. `OTHER` is used only when no known program cluster is found.
 
+Cluster assignment is case-insensitive substring matching: a program name belongs to a cluster when the cluster keyword appears anywhere inside the normalized program name. The cluster definitions are:
+
+- `CLUSTER1` — `AMBER`
+- `CLUSTER2` — `ARIA`
+- `CLUSTER3` — `CNS`
+- `CLUSTER4` — `CYANA`
+- `CLUSTER5` — `DISCOVER`
+- `CLUSTER6` — `DIANA` or `DYANA`
+- `CLUSTER7` — `XPLOR` (also `X-PLOR`), only when the name does not contain `NIH`
+- `CLUSTER8` — `XPLOR_NIH` (also `X-PLOR NIH`, `X-PLOR-NIH`, `XPLOR-NIH`)
+- `CLUSTER9` — `OTHER`, used only when no known cluster matches
+
+For example, `AMBER 3.0` matches `CLUSTER1`, `CNS MODIFIED CNS WITH CONFORMATIONAL` matches `CLUSTER3`, and `X-PLOR NIH 2.9` matches `CLUSTER8` rather than `CLUSTER7`. Because the match is by substring, program names can be matched even when they include versions or extra words.
+
 This dataset requires an existing quality CSV and cached PDB files with refinement program remarks.
 
 Requires:
