@@ -19,6 +19,63 @@ make -C /tmp/stride_src/src
 
 After that, the commands below can be run exactly as written. If STRIDE is installed somewhere else, pass its path with `--solution-nmr-monomer-stride-executable /path/to/stride`.
 
+## Generating Datasets
+
+Run dataset commands from the repository root. By default,
+`src/pdb_dataset_builder.py` writes CSV files to `data/`, downloads reusable PDB
+and mmCIF files to `data/pdb_cache/`, and stores STRIDE results in
+`data/stride_cache/`.
+
+Build all available datasets in dependency order:
+
+```bash
+python src/pdb_dataset_builder.py --datasets all
+```
+
+This is a long-running workflow: it uses the RCSB APIs, downloads coordinate
+files, runs STRIDE, searches for X-ray homologs, and computes RMSD values. To
+build only selected datasets, pass one name or a comma-separated list:
+
+```bash
+python src/pdb_dataset_builder.py \
+  --datasets method_counts,solution_nmr_weights,solution_nmr_monomer_quality
+```
+
+Existing coordinate and STRIDE caches are reused. Some precision and X-ray RMSD
+CSVs also support resuming an interrupted calculation. Use
+`python src/pdb_dataset_builder.py --help` for dataset names, output-path
+options, worker limits, and overwrite flags. The dependency-aware commands for
+the article datasets are also given below in Figure 1–8 order.
+
+## Generating Figures
+
+After the required CSV files exist in `data/`, render every plot group with:
+
+```bash
+python src/pdb_plot.py --plots all
+```
+
+Each logical figure is written to its own directory. By default, that directory
+contains four PNG variants:
+
+```text
+figures/<figure_name>/
+  <figure_name>.png
+  <figure_name>_no_title.png
+  <figure_name>_open_axes.png
+  <figure_name>_no_title_open_axes.png
+```
+
+Render selected plot groups with a comma-separated list, for example:
+
+```bash
+python src/pdb_plot.py --plots method_counts,solution_nmr_weight_stats
+```
+
+PNG is the default and the article workflow does not require SVG. Run
+`python src/pdb_plot.py --help` for all plot groups and input/output path
+options.
+
 ## Reproducing the Article Figures
 
 Run the commands below from the repository root. For each figure, the dataset-builder command creates the required CSV inputs, and the plotting command renders the article figure. Some plot groups also write companion plots that are not used in the article. Figures 3-7 require a STRIDE executable. Figures 6 and 7 use the 100% sequence-identity X-ray RMSD datasets.
@@ -39,7 +96,7 @@ python src/pdb_plot.py --plots method_counts
 
 Article output:
 
-- `figures/pdb_method_trends.png`
+- `figures/pdb_method_trends/pdb_method_trends.png`
 
 ### Figure 2
 
@@ -57,8 +114,8 @@ python src/pdb_plot.py --plots solution_nmr_weight_stats,solution_nmr_period_are
 
 Article outputs:
 
-- Figure 2A: `figures/solution_nmr_mean_weight_by_year.png`
-- Figure 2B: `figures/solution_nmr_area_share_by_weight_category.png`
+- Figure 2A: `figures/solution_nmr_mean_weight_by_year/solution_nmr_mean_weight_by_year.png`
+- Figure 2B: `figures/solution_nmr_area_share_by_weight_category/solution_nmr_area_share_by_weight_category.png`
 
 ### Figure 3
 
@@ -76,7 +133,7 @@ python src/pdb_plot.py --plots solution_nmr_monomer_stride_modeled_first_model
 
 Article output:
 
-- `figures/solution_nmr_monomer_stride_modeled_first_model_by_year.png`
+- `figures/solution_nmr_monomer_stride_modeled_first_model_by_year/solution_nmr_monomer_stride_modeled_first_model_by_year.png`
 
 ### Figure 4
 
@@ -94,7 +151,7 @@ python src/pdb_plot.py --plots solution_nmr_monomer_precision_stride_modeled_fir
 
 Article output:
 
-- `figures/solution_nmr_monomer_precision_stride_modeled_first_model_median_rmsd_by_year.png`
+- `figures/solution_nmr_monomer_precision_stride_modeled_first_model_median_rmsd_by_year/solution_nmr_monomer_precision_stride_modeled_first_model_median_rmsd_by_year.png`
 
 ### Figure 5
 
@@ -112,7 +169,7 @@ python src/pdb_plot.py --plots solution_nmr_monomer_xray_homolog_timing_share
 
 Article output:
 
-- `figures/solution_nmr_monomer_xray_homologs_95_timing_share_by_year.png`
+- `figures/solution_nmr_monomer_xray_homologs_95_timing_share_by_year/solution_nmr_monomer_xray_homologs_95_timing_share_by_year.png`
 
 ### Figure 6
 
@@ -134,7 +191,7 @@ python src/pdb_plot.py --plots solution_nmr_monomer_xray_rmsd
 
 Article output:
 
-- `figures/solution_nmr_monomer_xray_min_median_rmsd_by_year.png`
+- `figures/solution_nmr_monomer_xray_min_median_rmsd_by_year/solution_nmr_monomer_xray_min_median_rmsd_by_year.png`
 
 ### Figure 7
 
@@ -158,7 +215,7 @@ python src/pdb_plot.py --plots solution_nmr_monomer_xray_rmsd_precision_correlat
 
 Article output:
 
-- `figures/solution_nmr_monomer_xray_min_rmsd_precision_correlation.png`
+- `figures/solution_nmr_monomer_xray_min_rmsd_precision_correlation/solution_nmr_monomer_xray_min_rmsd_precision_correlation.png`
 
 ### Figure 8
 
@@ -178,10 +235,10 @@ python src/pdb_plot.py --plots solution_nmr_monomer_quality,solution_nmr_monomer
 
 Article outputs:
 
-- Figure 8A: `figures/solution_nmr_monomer_quality_clashscore_by_year.png`
-- Figure 8B: `figures/solution_nmr_monomer_quality_ramachandran_outliers_by_year.png`
-- Figure 8C: `figures/solution_nmr_monomer_quality_sidechain_outliers_by_year.png`
-- Figure 8D: `figures/solution_nmr_monomer_program_cluster_share_by_year.png`
+- Figure 8A: `figures/solution_nmr_monomer_quality_clashscore_by_year/solution_nmr_monomer_quality_clashscore_by_year.png`
+- Figure 8B: `figures/solution_nmr_monomer_quality_ramachandran_outliers_by_year/solution_nmr_monomer_quality_ramachandran_outliers_by_year.png`
+- Figure 8C: `figures/solution_nmr_monomer_quality_sidechain_outliers_by_year/solution_nmr_monomer_quality_sidechain_outliers_by_year.png`
+- Figure 8D: `figures/solution_nmr_monomer_program_cluster_share_by_year/solution_nmr_monomer_program_cluster_share_by_year.png`
 
 ## Technical Pipeline Reference
 
