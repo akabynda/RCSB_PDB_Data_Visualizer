@@ -76,6 +76,55 @@ PNG is the default and the article workflow does not require SVG. Run
 `python src/pdb_plot.py --help` for all plot groups and input/output path
 options.
 
+## RMSD Definitions
+
+The pipeline uses the following RMSD measures.
+
+### NMR ensemble precision
+
+For `solution_nmr_monomer_precision_stride_modeled_first_model`, let `N` be the
+number of NMR models, `n` the number of common CA residues in the first-model
+STRIDE core, and `r_ij(aligned)` the coordinate of residue `j` in model `i`
+after aligning every model to the first NMR model. The per-residue mean is
+
+```text
+r_mean,j = (1/N) * sum_i r_ij(aligned),
+```
+
+and the reported ensemble precision is
+
+```text
+P = sqrt[(1 / (N*n)) * sum_i sum_j ||r_ij(aligned) - r_mean,j||^2].
+```
+
+If `RMSD_i` denotes the RMSD of aligned model `i` from the mean coordinates,
+then
+
+```text
+P = sqrt[mean_i(RMSD_i^2)]
+```
+
+### NMR-to-X-ray RMSD
+
+For NMR entry `e` and X-ray homolog candidate `h`, the current X-ray comparison
+uses matched standard-`ATOM` CA coordinates from the first NMR model and the
+first X-ray model:
+
+```text
+d_eh = RMSD_superposed(NMR_e,model1, Xray_h,model1)
+```
+
+`solution_nmr_monomer_xray_rmsd_extremes` stores
+`d_e,min = min_h(d_eh)` and `d_e,max = max_h(d_eh)`. Figure 6,
+`solution_nmr_monomer_xray_min_median_rmsd_by_year`, reports
+
+```text
+Y_y = median_{e: year(e)=y}(d_e,min)
+```
+
+Figure 7 correlates `d_e,min` with the separately calculated NMR ensemble
+precision `P`.
+
 ## Reproducing the Article Figures
 
 Run the commands below from the repository root. For each figure, the dataset-builder command creates the required CSV inputs, and the plotting command renders the article figure. Some plot groups also write companion plots that are not used in the article. Figures 3-7 require a STRIDE executable. Figures 6 and 7 use the 100% sequence-identity X-ray RMSD datasets.

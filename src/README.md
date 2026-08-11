@@ -233,7 +233,30 @@ Output:
 
 ### `solution_nmr_monomer_precision_stride_modeled_first_model`
 
-Computes NMR ensemble precision for eligible SOLUTION NMR protein monomers. Models are aligned to the first model, then precision is measured as `sqrt(1 / (N*n) * sum_i sum_j |r_ij - r_mean,j|^2)` across models and CA atoms. The residue range is the STRIDE core region from the first model.
+Computes NMR ensemble precision for eligible SOLUTION NMR protein monomers. The
+residue range is the STRIDE core region from the first model. Only CA residues
+present in every coordinate model inside that core are used.
+
+Every NMR model is first rigidly aligned to the first NMR model. Let `N` be the
+number of models, `n` the number of common CA residues, `r_ij(aligned)` the
+aligned coordinate of residue `j` in model `i`, and
+
+```text
+r_mean,j = (1/N) * sum_i r_ij(aligned).
+```
+
+The current ensemble precision is
+
+```text
+P = sqrt[(1 / (N*n)) * sum_i sum_j ||r_ij(aligned) - r_mean,j||^2].
+```
+
+Equivalently, if `RMSD_i` is the RMSD of aligned model `i` from the mean
+coordinates, then
+
+```text
+P = sqrt[mean_i(RMSD_i^2)],
+```
 
 Requires:
 
@@ -298,7 +321,23 @@ Outputs:
 
 ### `solution_nmr_monomer_xray_rmsd`
 
-Computes CA RMSD between the NMR STRIDE core region and the best matching X-ray homolog candidate. The homolog input is selected with `--xray-rmsd-sequence-identity`. X-ray `HETATM` CA residues may still be considered while finding candidate sequence matches, but the final RMSD is computed only from matched residue pairs whose NMR and X-ray coordinates both come from standard `ATOM` records.
+Computes CA RMSD between the NMR STRIDE core region and a matching X-ray
+homolog candidate. The homolog input is selected with
+`--xray-rmsd-sequence-identity`; the final modeled-core matching performed by
+the current RMSD calculator requires 100% residue identity. X-ray `HETATM` CA
+residues may be considered while finding candidate sequence matches, but the
+final RMSD uses only matched residue pairs whose NMR and X-ray coordinates both
+come from standard `ATOM` records.
+
+For NMR entry `e` and X-ray homolog candidate `h`, the current calculation uses
+only the first NMR coordinate model and the first X-ray coordinate model:
+
+```text
+d_eh = RMSD_superposed(NMR_e,model1, Xray_h,model1),
+```
+
+where `RMSD_superposed` includes centering and optimal rigid-body
+superposition.
 
 Requires one of:
 
@@ -324,7 +363,25 @@ Output:
 
 ### `solution_nmr_monomer_xray_rmsd_extremes`
 
-Computes the minimum and maximum CA RMSD among suitable X-ray homolog candidates for each eligible NMR monomer. This captures the spread between the best and worst modeled homolog matches.
+Computes the minimum and maximum first-model CA RMSD among suitable X-ray
+homolog candidates for each eligible NMR monomer. If `d_eh` is the
+first-NMR-model-to-first-X-ray-model value defined above, the stored values are
+
+```text
+d_e,min = min_h(d_eh)
+d_e,max = max_h(d_eh).
+```
+
+The plot
+`solution_nmr_monomer_xray_min_median_rmsd_by_year` uses the minimum column and
+reports, for each deposition year `y`,
+
+```text
+Y_y = median_{e: year(e)=y}(d_e,min).
+```
+
+The precision-correlation plot joins `d_e,min` to the NMR ensemble precision
+`P`.
 
 Requires one of:
 
