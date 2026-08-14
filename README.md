@@ -294,7 +294,7 @@ python src/pdb_dataset_builder.py --datasets solution_nmr_program_counts,solutio
 python src/pdb_dataset_builder.py --datasets solution_nmr_monomer_program_clusters
 ```
 
-A program name is assigned to a cluster by case-insensitive substring matching: the cluster keyword just has to appear anywhere inside the normalized program name (for example, `if "AMBER" in text`). The clusters are `AMBER`, `ARIA`, `CNS`, `CYANA`, `DISCOVER`, `DIANA_DYANA` (`DIANA` or `DYANA`), `XPLOR` (without `NIH`), `XPLOR_NIH`, and `OTHER` (used only when no known cluster matches).
+Programs are collected from both `REMARK 3 PROGRAM` and `REMARK 210 SOFTWARE USED`, including wrapped `REMARK 210` lines. The clusters are `AMBER`, `ARIA`, `CNS`, `CYANA`, `DISCOVER`, `DIANA_DYANA` (`DIANA` or `DYANA`), `XPLOR` (without `NIH`), `XPLOR_NIH`, and `OTHER`. A structure with `n` distinct known clusters contributes `1/n` to each; if none are found, it contributes `1` to `OTHER`. Matching includes audited spelling/separator aliases and avoids the false positives `VARIAN` → `ARIA` and `DISCOVERY STUDIO` → `DISCOVER`.
 
 Render all article panels:
 

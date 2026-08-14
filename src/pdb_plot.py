@@ -98,7 +98,7 @@ class PlotConfig:
     nmr_monomer_program_cluster_share_title: str = (
         "Share of NMR structures by structure-determination software"
     )
-    nmr_monomer_program_cluster_share_y_label: str = "Share of program mentions (%)"
+    nmr_monomer_program_cluster_share_y_label: str = "Allocated structure share (%)"
     cumulative_title: str = (
         "Cumulative number of PDB structures by deposition year and experimental method"
     )
@@ -1094,7 +1094,7 @@ class PDBScientificPlotter:
         prepared["year"] = prepared["year"].astype(int)
         prepared["cluster_id"] = prepared["cluster_id"].astype(str)
         prepared["cluster_name"] = prepared["cluster_name"].astype(str)
-        prepared["structure_count"] = prepared["structure_count"].astype(int)
+        prepared["structure_count"] = prepared["structure_count"].astype(float)
         for metric in (
             "avg_ramachandran_outliers_percent",
             "avg_sidechain_outliers_percent",
@@ -1333,7 +1333,7 @@ class PDBScientificPlotter:
         output_svg: Path,
     ) -> None:
         metrics = (
-            ("structure_count", "Structure count", "Blues"),
+            ("structure_count", "Weighted structure score", "Blues"),
             (
                 "avg_ramachandran_outliers_percent",
                 "Avg. Ramachandran outliers (%)",

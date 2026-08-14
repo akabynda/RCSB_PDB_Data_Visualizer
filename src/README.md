@@ -209,21 +209,21 @@ Useful options:
 
 ### `solution_nmr_monomer_program_clusters`
 
-Assigns SOLUTION NMR protein monomers to all unique refinement-program clusters mentioned in PDB `REMARK 3 PROGRAM` records. This is multi-label: one structure can contribute to multiple clusters. In the per-cluster CSVs, `structure_count` therefore means cluster mentions/assignments; yearly totals remain unique structure counts. `OTHER` is used only when no known program cluster is found.
+Assigns SOLUTION NMR protein monomers to all unique refinement-program clusters mentioned in PDB `REMARK 3 PROGRAM` and `REMARK 210 SOFTWARE USED` records. Wrapped `REMARK 210` software lists are joined before classification. If a structure mentions `n` distinct known clusters, each cluster receives a score of `1/n`; consequently, every structure contributes exactly `1` in total. `OTHER` receives `1` only when no known cluster is found. In per-cluster CSVs, `structure_count` is this weighted score, while yearly totals remain unique integer structure counts. Assignment rows expose the same value as `cluster_score`.
 
-Cluster assignment is case-insensitive substring matching: a program name belongs to a cluster when the cluster keyword appears anywhere inside the normalized program name. The cluster definitions are:
+Cluster assignment is case-insensitive and recognizes versions, separators, compound program strings, and the audited aliases listed below. Matches use program-aware boundaries so unrelated names such as `VARIAN` and `DISCOVERY STUDIO` are not mistaken for `ARIA` and `DISCOVER`. The cluster definitions are:
 
 - `CLUSTER1` — `AMBER`
 - `CLUSTER2` — `ARIA`
 - `CLUSTER3` — `CNS`
 - `CLUSTER4` — `CYANA`
-- `CLUSTER5` — `DISCOVER`
+- `CLUSTER5` — `DISCOVER` (standalone `INSIGHT II` rows are included)
 - `CLUSTER6` — `DIANA` or `DYANA`
 - `CLUSTER7` — `XPLOR` (also `X-PLOR`), only when the name does not contain `NIH`
-- `CLUSTER8` — `XPLOR_NIH` (also `X-PLOR NIH`, `X-PLOR-NIH`, `XPLOR-NIH`)
+- `CLUSTER8` — `XPLOR_NIH` (also underscore, reversed `NIH-XPLOR`, compact `NIHXPLOR`, parenthesized NIH, and the observed `NHI` typo)
 - `CLUSTER9` — `OTHER`, used only when no known cluster matches
 
-For example, `AMBER 3.0` matches `CLUSTER1`, `CNS MODIFIED CNS WITH CONFORMATIONAL` matches `CLUSTER3`, and `X-PLOR NIH 2.9` matches `CLUSTER8` rather than `CLUSTER7`. Because the match is by substring, program names can be matched even when they include versions or extra words.
+For example, `AMBER 3.0` matches `CLUSTER1`, `X-PLOR NIH 2.9` matches `CLUSTER8` rather than `CLUSTER7`, and `CNS ARIA` contributes `0.5` to both `CLUSTER3` and `CLUSTER2`.
 
 This dataset requires an existing quality CSV and cached PDB files with refinement program remarks.
 

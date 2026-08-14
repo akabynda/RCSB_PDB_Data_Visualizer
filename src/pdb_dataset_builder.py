@@ -209,6 +209,7 @@ class SolutionNMRMonomerProgramClusterAssignmentRecord:
     year: int
     cluster_id: str
     cluster_name: str
+    cluster_score: float
     has_program_text: bool
     program_text: str
 
@@ -218,7 +219,7 @@ class SolutionNMRMonomerProgramClusterSummaryRecord:
     year: int
     cluster_id: str
     cluster_name: str
-    structure_count: int
+    structure_count: float
     avg_ramachandran_outliers_percent: float | None
     avg_sidechain_outliers_percent: float | None
     avg_clashscore: float | None
@@ -236,7 +237,7 @@ class SolutionNMRMonomerProgramClusterYearlySummaryRecord:
 @dataclass(frozen=True)
 class SolutionNMRMonomerProgramClusterTotalRecord:
     cluster_name: str
-    structure_count: int
+    structure_count: float
     avg_ramachandran_outliers_percent: float | None
     avg_sidechain_outliers_percent: float | None
     avg_clashscore: float | None
@@ -788,6 +789,12 @@ def write_csv_rows(
 
 
 PROGRAM_REMARK_PATTERN = re.compile(r"^REMARK\s+3\s+PROGRAM\s*:\s*(.*)$")
+NMR_SOFTWARE_REMARK_PATTERN = re.compile(
+    r"^REMARK\s+210\s+SOFTWARE\s+USED\s*:\s*(.*)$",
+    re.IGNORECASE,
+)
+NMR_REMARK_PATTERN = re.compile(r"^REMARK\s+210(?P<payload>.*)$")
+NMR_REMARK_FIELD_PATTERN = re.compile(r"^\s*[A-Z][A-Z0-9 ,()/_-]*\s*:")
 PROGRAM_SPLIT_PATTERN = re.compile(
     r"\s*(?:,|;|/|\+|\|\||\bAND\b)\s*",
     re.IGNORECASE,
@@ -823,6 +830,28 @@ PROGRAM_CLUSTER_DEFINITIONS: tuple[tuple[str, str], ...] = (
     ("CLUSTER9", "OTHER"),
 )
 PROGRAM_CLUSTER_NAME_BY_ID: dict[str, str] = dict(PROGRAM_CLUSTER_DEFINITIONS)
+PROGRAM_CLUSTER_MATCH_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("CLUSTER1", re.compile(r"(?<![A-Z])AMBER")),
+    # The left boundary prevents VARIAN from being classified as ARIA.
+    ("CLUSTER2", re.compile(r"(?<![A-Z])ARIA")),
+    ("CLUSTER3", re.compile(r"(?<![A-Z])CNS")),
+    ("CLUSTER4", re.compile(r"CYANA")),
+    # DISCOVERY STUDIO is a separate program, while the standalone INSIGHT II
+    # rows in the audited token table refer to the DISCOVER/Insight II suite.
+    (
+        "CLUSTER5",
+        re.compile(
+            r"(?<![A-Z])DISCOVER(?![A-Z])|"
+            r"(?<!MODULE OF )INSIGHT II(?: II)?(?! VER)"
+        ),
+    ),
+    ("CLUSTER6", re.compile(r"DIANA|DYANA")),
+)
+XPLOR_PATTERN = re.compile(r"X[-_ ]?PLOR")
+XPLOR_NIH_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"X[-_ ]?PLOR[-_ ]*\(?N(?:IH|HI)\)?"),
+    re.compile(r"N(?:IH|HI)[-_ ]*X[-_ ]?PLOR"),
+)
 
 
 def _normalize_refinement_program_name(raw_value: str) -> str | None:
@@ -852,34 +881,69 @@ def _normalize_refinement_program_name(raw_value: str) -> str | None:
 
 
 def extract_raw_refinement_program_text_from_pdb(pdb_path: Path) -> str:
-    """Extract the raw refinement program remark text from a PDB file."""
+    """Extract program text from REMARK 3 and REMARK 210 SOFTWARE USED."""
     values: list[str] = []
-    with pdb_path.open("r", encoding="utf-8", errors="ignore") as handle:
-        for line in handle:
-            match = PROGRAM_REMARK_PATTERN.match(line)
-            if not match:
-                continue
-            value = match.group(1).strip()
+    nmr_software_parts: list[str] = []
+    collecting_nmr_software = False
+
+    def flush_nmr_software() -> None:
+        nonlocal nmr_software_parts
+        if nmr_software_parts:
+            value = " ".join(nmr_software_parts).strip()
             if value:
                 values.append(value)
+            nmr_software_parts = []
+
+    with pdb_path.open("r", encoding="utf-8", errors="ignore") as handle:
+        for line in handle:
+            if line[:6].strip() in {"ATOM", "HETATM", "MODEL"}:
+                break
+            match = PROGRAM_REMARK_PATTERN.match(line)
+            if match:
+                value = match.group(1).strip()
+                if value:
+                    values.append(value)
+                continue
+
+            software_match = NMR_SOFTWARE_REMARK_PATTERN.match(line)
+            if software_match:
+                flush_nmr_software()
+                collecting_nmr_software = True
+                value = software_match.group(1).strip()
+                if value:
+                    nmr_software_parts.append(value)
+                continue
+
+            if not collecting_nmr_software:
+                continue
+            remark_match = NMR_REMARK_PATTERN.match(line)
+            if not remark_match:
+                flush_nmr_software()
+                collecting_nmr_software = False
+                continue
+            payload = remark_match.group("payload")
+            stripped_payload = payload.strip()
+            if (
+                not stripped_payload
+                or NMR_REMARK_FIELD_PATTERN.match(payload) is not None
+            ):
+                flush_nmr_software()
+                collecting_nmr_software = False
+                continue
+            nmr_software_parts.append(stripped_payload)
+
+    flush_nmr_software()
     return " || ".join(values)
 
 
 def extract_refinement_programs_from_pdb(pdb_path: Path) -> set[str]:
     """Extract canonical refinement program names from PDB remarks."""
     programs: set[str] = set()
-    with pdb_path.open("r", encoding="utf-8", errors="ignore") as handle:
-        for line in handle:
-            match = PROGRAM_REMARK_PATTERN.match(line)
-            if not match:
-                continue
-            value = match.group(1).strip()
-            if not value:
-                continue
-            for raw_token in PROGRAM_SPLIT_PATTERN.split(value):
-                normalized = _normalize_refinement_program_name(raw_token)
-                if normalized is not None:
-                    programs.add(normalized)
+    raw_text = extract_raw_refinement_program_text_from_pdb(pdb_path)
+    for raw_token in PROGRAM_SPLIT_PATTERN.split(raw_text):
+        normalized = _normalize_refinement_program_name(raw_token)
+        if normalized is not None:
+            programs.add(normalized)
     return programs
 
 
@@ -887,29 +951,52 @@ def _classify_normalized_program_cluster(
     program: str,
 ) -> tuple[str, str] | None:
     """Assign one normalized refinement program name to a broad cluster."""
-    text = program.upper()
-    if "AMBER" in text:
-        return "CLUSTER1", PROGRAM_CLUSTER_NAME_BY_ID["CLUSTER1"]
-    if "ARIA" in text:
-        return "CLUSTER2", PROGRAM_CLUSTER_NAME_BY_ID["CLUSTER2"]
-    if "CNS" in text:
-        return "CLUSTER3", PROGRAM_CLUSTER_NAME_BY_ID["CLUSTER3"]
-    if "CYANA" in text:
-        return "CLUSTER4", PROGRAM_CLUSTER_NAME_BY_ID["CLUSTER4"]
-    if "DISCOVER" in text:
-        return "CLUSTER5", PROGRAM_CLUSTER_NAME_BY_ID["CLUSTER5"]
-    if "DIANA" in text or "DYANA" in text:
-        return "CLUSTER6", PROGRAM_CLUSTER_NAME_BY_ID["CLUSTER6"]
-    if ("X-PLOR" in text or "XPLOR" in text) and "NIH" not in text:
-        return "CLUSTER7", PROGRAM_CLUSTER_NAME_BY_ID["CLUSTER7"]
-    if (
-        "X-PLOR NIH" in text
-        or "XPLOR NIH" in text
-        or "X-PLOR-NIH" in text
-        or "XPLOR-NIH" in text
-    ):
-        return "CLUSTER8", PROGRAM_CLUSTER_NAME_BY_ID["CLUSTER8"]
-    return None
+    matches = _extract_program_cluster_matches(program)
+    if not matches:
+        return None
+    _, cluster_id, cluster_name = matches[0]
+    return cluster_id, cluster_name
+
+
+def _extract_program_cluster_matches(
+    program_text: str,
+) -> list[tuple[int, str, str]]:
+    """Return every known cluster match as (position, id, name)."""
+    text = program_text.upper()
+    matches: list[tuple[int, str, str]] = []
+    xplor_nih_spans: list[tuple[int, int]] = []
+
+    for cluster_id, pattern in PROGRAM_CLUSTER_MATCH_PATTERNS:
+        for match in pattern.finditer(text):
+            matches.append(
+                (match.start(), cluster_id, PROGRAM_CLUSTER_NAME_BY_ID[cluster_id])
+            )
+
+    for pattern in XPLOR_NIH_PATTERNS:
+        for match in pattern.finditer(text):
+            xplor_nih_spans.append(match.span())
+            matches.append(
+                (
+                    match.start(),
+                    "CLUSTER8",
+                    PROGRAM_CLUSTER_NAME_BY_ID["CLUSTER8"],
+                )
+            )
+
+    for match in XPLOR_PATTERN.finditer(text):
+        if any(
+            match.start() < nih_end and match.end() > nih_start
+            for nih_start, nih_end in xplor_nih_spans
+        ):
+            continue
+        matches.append(
+            (
+                match.start(),
+                "CLUSTER7",
+                PROGRAM_CLUSTER_NAME_BY_ID["CLUSTER7"],
+            )
+        )
+    return sorted(matches, key=lambda item: (item[0], item[1]))
 
 
 def extract_solution_nmr_program_clusters(
@@ -919,18 +1006,11 @@ def extract_solution_nmr_program_clusters(
     clusters: list[tuple[str, str]] = []
     seen_cluster_ids: set[str] = set()
     text = (program_text or "").strip()
-    for raw_token in PROGRAM_SPLIT_PATTERN.split(text):
-        normalized = _normalize_refinement_program_name(raw_token)
-        if normalized is None:
-            continue
-        cluster = _classify_normalized_program_cluster(normalized)
-        if cluster is None:
-            continue
-        cluster_id, _ = cluster
+    for _, cluster_id, cluster_name in _extract_program_cluster_matches(text):
         if cluster_id in seen_cluster_ids:
             continue
         seen_cluster_ids.add(cluster_id)
-        clusters.append(cluster)
+        clusters.append((cluster_id, cluster_name))
 
     if clusters:
         return clusters
@@ -3218,6 +3298,7 @@ class SolutionNMRMonomerProgramClusterBuilder:
                     empty_program_count += 1
 
                 clusters = extract_solution_nmr_program_clusters(program_text)
+                cluster_score = 1.0 / len(clusters)
                 for cluster_id, cluster_name in clusters:
                     assignments.append(
                         SolutionNMRMonomerProgramClusterAssignmentRecord(
@@ -3225,6 +3306,7 @@ class SolutionNMRMonomerProgramClusterBuilder:
                             year=quality_record.year,
                             cluster_id=cluster_id,
                             cluster_name=cluster_name,
+                            cluster_score=cluster_score,
                             has_program_text=bool(program_text),
                             program_text=program_text,
                         )
@@ -3239,12 +3321,14 @@ class SolutionNMRMonomerProgramClusterBuilder:
                             "clash_sum": 0.0,
                         },
                     )
-                    total_row["count"] += 1
-                    total_row[
-                        "rama_sum"
-                    ] += quality_record.ramachandran_outliers_percent
-                    total_row["side_sum"] += quality_record.sidechain_outliers_percent
-                    total_row["clash_sum"] += quality_record.clashscore
+                    total_row["count"] += cluster_score
+                    total_row["rama_sum"] += (
+                        quality_record.ramachandran_outliers_percent * cluster_score
+                    )
+                    total_row["side_sum"] += (
+                        quality_record.sidechain_outliers_percent * cluster_score
+                    )
+                    total_row["clash_sum"] += quality_record.clashscore * cluster_score
 
                 processed += 1
                 if processed % 500 == 0 or processed == total:
@@ -3283,7 +3367,7 @@ class SolutionNMRMonomerProgramClusterBuilder:
                         )
                     )
                     continue
-                count = int(totals["count"])
+                count = float(totals["count"])
                 summaries.append(
                     SolutionNMRMonomerProgramClusterSummaryRecord(
                         year=year,
@@ -4770,6 +4854,7 @@ def write_solution_nmr_monomer_program_cluster_assignments_csv(
             "year",
             "cluster_id",
             "cluster_name",
+            "cluster_score",
             "has_program_text",
             "program_text",
         ],
@@ -4779,6 +4864,7 @@ def write_solution_nmr_monomer_program_cluster_assignments_csv(
                 r.year,
                 r.cluster_id,
                 r.cluster_name,
+                f"{r.cluster_score:.12g}",
                 int(r.has_program_text),
                 r.program_text,
             )
@@ -4805,6 +4891,7 @@ def read_solution_nmr_monomer_program_cluster_assignments_csv(
                     year=int(row["year"]),
                     cluster_id=str(row["cluster_id"]),
                     cluster_name=str(row["cluster_name"]),
+                    cluster_score=float(row.get("cluster_score") or 1.0),
                     has_program_text=bool(int(row["has_program_text"])),
                     program_text=str(row["program_text"]),
                 )
@@ -4833,7 +4920,7 @@ def write_solution_nmr_monomer_program_cluster_summary_csv(
                 r.year,
                 r.cluster_id,
                 r.cluster_name,
-                r.structure_count,
+                f"{r.structure_count:.12g}",
                 (
                     f"{r.avg_ramachandran_outliers_percent:.4f}"
                     if r.avg_ramachandran_outliers_percent is not None
@@ -5001,10 +5088,11 @@ def summarize_solution_nmr_monomer_program_cluster_quality_total(
                 "clash_sum": 0.0,
             },
         )
-        total_row["count"] += 1
-        total_row["rama_sum"] += quality_record.ramachandran_outliers_percent
-        total_row["side_sum"] += quality_record.sidechain_outliers_percent
-        total_row["clash_sum"] += quality_record.clashscore
+        score = assignment_record.cluster_score
+        total_row["count"] += score
+        total_row["rama_sum"] += quality_record.ramachandran_outliers_percent * score
+        total_row["side_sum"] += quality_record.sidechain_outliers_percent * score
+        total_row["clash_sum"] += quality_record.clashscore * score
 
     unmatched_quality_count = len(quality_by_key) - len(matched_quality_keys)
     LOGGER.info(
@@ -5030,7 +5118,7 @@ def summarize_solution_nmr_monomer_program_cluster_quality_total(
                 "clash_sum": 0.0,
             },
         )
-        count = int(total_row["count"])
+        count = float(total_row["count"])
         ordered_records.append(
             SolutionNMRMonomerProgramClusterTotalRecord(
                 cluster_name=str(total_row["cluster_name"]),
@@ -5066,7 +5154,7 @@ def write_solution_nmr_monomer_program_cluster_total_csv(
         rows=(
             (
                 r.cluster_name,
-                r.structure_count,
+                f"{r.structure_count:.12g}",
                 (
                     f"{r.avg_ramachandran_outliers_percent:.4f}"
                     if r.avg_ramachandran_outliers_percent is not None
