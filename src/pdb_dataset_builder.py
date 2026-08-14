@@ -683,6 +683,34 @@ def _pdb_download_sources(entry_id: str) -> tuple[tuple[str, bool], ...]:
     )
 
 
+def _mmcif_download_sources(entry_id: str) -> tuple[tuple[str, bool], ...]:
+    """Return independent mmCIF download routes and compression flags."""
+    normalized_entry_id = entry_id.upper()
+    lower_entry_id = normalized_entry_id.lower()
+    divided_directory = lower_entry_id[1:3]
+    return (
+        (
+            f"https://files.rcsb.org/download/{normalized_entry_id}.cif.gz",
+            True,
+        ),
+        (
+            "https://files.wwpdb.org/pub/pdb/data/structures/divided/mmCIF/"
+            f"{divided_directory}/{lower_entry_id}.cif.gz",
+            True,
+        ),
+        (
+            f"https://www.ebi.ac.uk/pdbe/entry-files/download/"
+            f"{lower_entry_id}.cif",
+            False,
+        ),
+        (
+            "https://ftp.ebi.ac.uk/pub/databases/pdb/data/structures/divided/mmCIF/"
+            f"{divided_directory}/{lower_entry_id}.cif.gz",
+            True,
+        ),
+    )
+
+
 def _prioritize_cached_source(
     sources: tuple[tuple[str, bool], ...],
     cached_source_url: str | None,
@@ -886,6 +914,7 @@ def _download_mmcif_if_needed(
     entry_id: str,
 ) -> Path:
     """Download or remotely revalidate an atomically cached mmCIF file."""
+    cache_dir.mkdir(parents=True, exist_ok=True)
     normalized_entry_id = entry_id.upper()
     cif_path = cache_dir / f"{normalized_entry_id}.cif"
     metadata_path = _pdb_cache_metadata_path(cif_path)
@@ -898,60 +927,89 @@ def _download_mmcif_if_needed(
     ):
         return cif_path
 
-    archive_url = (
-        "https://files.wwpdb.org/pub/pdb/data/structures/divided/mmCIF/"
-        f"{normalized_entry_id[1:3].lower()}/"
-        f"{normalized_entry_id.lower()}.cif.gz"
+    cached_source_url = (
+        str(metadata.get("source_url"))
+        if cache_is_valid and metadata and metadata.get("source_url")
+        else None
     )
-    headers: dict[str, str] = {}
+    sources = _prioritize_cached_source(
+        _mmcif_download_sources(normalized_entry_id), cached_source_url
+    )
+    conditional_headers: dict[str, str] = {}
     if cache_is_valid and metadata is not None:
         if metadata.get("etag"):
-            headers["If-None-Match"] = str(metadata["etag"])
+            conditional_headers["If-None-Match"] = str(metadata["etag"])
         if metadata.get("last_modified"):
-            headers["If-Modified-Since"] = str(metadata["last_modified"])
+            conditional_headers["If-Modified-Since"] = str(
+                metadata["last_modified"]
+            )
 
     last_error: Exception | None = None
+    unavailable_sources: set[str] = set()
     for attempt in range(1, config.retries + 1):
-        try:
-            response = session.get(
-                archive_url,
-                headers=headers,
-                stream=True,
-                timeout=config.timeout_seconds,
+        for source_url, compressed in sources:
+            if source_url in unavailable_sources:
+                continue
+            request_headers = (
+                conditional_headers if source_url == cached_source_url else {}
             )
-            if response.status_code == 304 and cache_is_valid and metadata is not None:
-                refreshed_metadata = dict(metadata)
-                refreshed_metadata["validated_at"] = _utc_now_iso()
-                _atomic_write_json(metadata_path, refreshed_metadata)
-                return cif_path
-            response.raise_for_status()
-            sha256, size_bytes, mtime_ns = _atomic_install_pdb_response(
-                response=response,
-                pdb_path=cif_path,
-                compressed=True,
-            )
-            _atomic_write_json(
-                metadata_path,
-                _cache_metadata_from_response(
-                    entry_id=normalized_entry_id,
-                    source_url=archive_url,
+            try:
+                response = session.get(
+                    source_url,
+                    headers=request_headers,
+                    stream=True,
+                    timeout=config.timeout_seconds,
+                )
+                if (
+                    response.status_code == 304
+                    and cache_is_valid
+                    and metadata is not None
+                    and source_url == cached_source_url
+                ):
+                    refreshed_metadata = dict(metadata)
+                    refreshed_metadata["validated_at"] = _utc_now_iso()
+                    _atomic_write_json(metadata_path, refreshed_metadata)
+                    return cif_path
+                if response.status_code == 404:
+                    unavailable_sources.add(source_url)
+                    last_error = requests.HTTPError(
+                        f"404 Client Error: Not Found for url: {source_url}"
+                    )
+                    continue
+                response.raise_for_status()
+                sha256, size_bytes, mtime_ns = _atomic_install_pdb_response(
                     response=response,
-                    sha256=sha256,
-                    size_bytes=size_bytes,
-                    mtime_ns=mtime_ns,
-                ),
-            )
-            return cif_path
-        except (
-            requests.RequestException,
-            OSError,
-            EOFError,
-            gzip.BadGzipFile,
-            RuntimeError,
-        ) as exc:
-            last_error = exc
-            if attempt < config.retries:
-                time.sleep(config.backoff_seconds * attempt)
+                    pdb_path=cif_path,
+                    compressed=compressed,
+                )
+                _atomic_write_json(
+                    metadata_path,
+                    _cache_metadata_from_response(
+                        entry_id=normalized_entry_id,
+                        source_url=source_url,
+                        response=response,
+                        sha256=sha256,
+                        size_bytes=size_bytes,
+                        mtime_ns=mtime_ns,
+                    ),
+                )
+                return cif_path
+            except (
+                requests.RequestException,
+                OSError,
+                EOFError,
+                gzip.BadGzipFile,
+                RuntimeError,
+            ) as exc:
+                last_error = exc
+                LOGGER.debug(
+                    "mmCIF download route failed for %s (%s): %s",
+                    normalized_entry_id,
+                    source_url,
+                    exc,
+                )
+        if attempt < config.retries:
+            time.sleep(config.backoff_seconds * attempt)
     raise RuntimeError(f"Failed to download {normalized_entry_id} mmCIF: {last_error}")
 
 

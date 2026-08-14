@@ -6,7 +6,11 @@ from pathlib import Path
 
 import requests
 
-from src.pdb_dataset_builder import DatasetBuildConfig, download_pdb_if_needed
+from src.pdb_dataset_builder import (
+    DatasetBuildConfig,
+    _download_mmcif_if_needed,
+    download_pdb_if_needed,
+)
 
 
 class _FakeResponse:
@@ -56,6 +60,17 @@ def _compressed_pdb(program: str) -> bytes:
             f"REMARK   3   PROGRAM     : {program}\n"
             "ATOM      1  CA  ALA A   1       0.000   0.000   0.000\n"
             "END\n"
+        ).encode("utf-8")
+    )
+
+
+def _compressed_mmcif(entry_id: str = "1ABC") -> bytes:
+    return gzip.compress(
+        (
+            f"data_{entry_id}\n"
+            "#\n"
+            "_entry.id 1ABC\n"
+            "#\n"
         ).encode("utf-8")
     )
 
@@ -187,6 +202,50 @@ class SafePDBCacheTests(unittest.TestCase):
             path.with_suffix(".pdb.cache.json").read_text(encoding="utf-8")
         )
         self.assertEqual(metadata["source_url"], session.calls[1]["url"])
+
+    def test_mmcif_timeout_switches_to_another_route_immediately(self) -> None:
+        session = _FakeSession(
+            [
+                requests.ReadTimeout("RCSB route timed out"),
+                _FakeResponse(
+                    200, _compressed_mmcif(), {"ETag": '"wwpdb-mirror"'}
+                ),
+            ]
+        )
+
+        path = _download_mmcif_if_needed(
+            session=session,  # type: ignore[arg-type]
+            config=DatasetBuildConfig(retries=1),
+            cache_dir=self.cache_dir,
+            entry_id="1ABC",
+        )
+
+        self.assertIn("data_1ABC", path.read_text(encoding="utf-8"))
+        self.assertIn("files.rcsb.org", str(session.calls[0]["url"]))
+        self.assertIn("files.wwpdb.org", str(session.calls[1]["url"]))
+        metadata = json.loads(
+            path.with_suffix(".cif.cache.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(metadata["source_url"], session.calls[1]["url"])
+
+    def test_mmcif_fallback_accepts_uncompressed_pdbe_response(self) -> None:
+        session = _FakeSession(
+            [
+                requests.ConnectionError("RCSB unavailable"),
+                requests.ConnectionError("wwPDB unavailable"),
+                _FakeResponse(200, gzip.decompress(_compressed_mmcif())),
+            ]
+        )
+
+        path = _download_mmcif_if_needed(
+            session=session,  # type: ignore[arg-type]
+            config=DatasetBuildConfig(retries=1),
+            cache_dir=self.cache_dir,
+            entry_id="1ABC",
+        )
+
+        self.assertIn("data_1ABC", path.read_text(encoding="utf-8"))
+        self.assertIn("www.ebi.ac.uk/pdbe", str(session.calls[2]["url"]))
 
     def test_interrupted_refresh_keeps_previous_file_intact(self) -> None:
         session = _FakeSession(

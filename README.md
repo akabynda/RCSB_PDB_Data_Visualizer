@@ -53,6 +53,8 @@ with an atomic replace, and `.cache.json` sidecars record the archive `ETag`,
 remotely every 24 hours by default. Pass `--pdb-cache-validation-hours 0` for a
 conditional check on every access. STRIDE and chain-subset caches are bound to
 the source coordinate content, so an updated coordinate file invalidates them.
+Both PDB and mmCIF downloads fall back through RCSB, wwPDB, PDBe, and the EBI
+archive mirror when a source is unavailable.
 
 If an X-ray homolog search finished with transient request failures, rerun the
 same command with `--xray-homolog-resume`. Matching completed rows in the 95%

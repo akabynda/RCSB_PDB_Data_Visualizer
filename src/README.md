@@ -21,6 +21,7 @@ python src/pdb_dataset_builder.py --datasets all
 Legacy PDB coordinate files are downloaded through a fallback chain: the RCSB
 download service, the wwPDB archive, PDBe, and the EBI archive mirror. A failed
 route immediately advances to the next one before another retry round begins.
+mmCIF downloads use the same four-source fallback strategy.
 Files are installed atomically. Every cached `.pdb`/`.cif` has a `.cache.json`
 sidecar containing its actual source URL, `ETag`, `Last-Modified`, SHA-256,
 size, mtime, and last remote validation time. The default validation window is
