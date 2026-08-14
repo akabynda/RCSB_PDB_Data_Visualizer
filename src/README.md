@@ -18,10 +18,13 @@ python src/pdb_dataset_builder.py --datasets all
 
 `all` can take a long time. Some datasets download PDB files, run STRIDE, and compute RMSD values.
 
-Coordinate files are downloaded from the versioned wwPDB archive and installed
-atomically. Every cached `.pdb`/`.cif` has a `.cache.json` sidecar containing
-its source URL, `ETag`, `Last-Modified`, SHA-256, size, mtime, and last remote
-validation time. The default validation window is 24 hours; use
+Legacy PDB coordinate files are downloaded through a fallback chain: the RCSB
+download service, the wwPDB archive, PDBe, and the EBI archive mirror. A failed
+route immediately advances to the next one before another retry round begins.
+Files are installed atomically. Every cached `.pdb`/`.cif` has a `.cache.json`
+sidecar containing its actual source URL, `ETag`, `Last-Modified`, SHA-256,
+size, mtime, and last remote validation time. The default validation window is
+24 hours; use
 `--pdb-cache-validation-hours 0` to issue a conditional request on every cache
 access. Derived multi-character-chain PDB subsets are tied to the source mmCIF
 SHA-256, while STRIDE entries are tied to the complete first-model SHA-1.

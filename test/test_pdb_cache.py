@@ -35,7 +35,7 @@ class _FakeResponse:
 
 
 class _FakeSession:
-    def __init__(self, responses: list[_FakeResponse]) -> None:
+    def __init__(self, responses: list[_FakeResponse | Exception]) -> None:
         self.responses = list(responses)
         self.calls: list[dict[str, object]] = []
 
@@ -43,7 +43,10 @@ class _FakeSession:
         self.calls.append({"url": url, **kwargs})
         if not self.responses:
             raise AssertionError("Unexpected cache HTTP request")
-        return self.responses.pop(0)
+        response = self.responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
 
 
 def _compressed_pdb(program: str) -> bytes:
@@ -162,6 +165,29 @@ class SafePDBCacheTests(unittest.TestCase):
         )
         self.assertEqual(metadata["etag"], '"v2"')
 
+    def test_timeout_switches_to_another_download_route_immediately(self) -> None:
+        session = _FakeSession(
+            [
+                requests.ReadTimeout("primary route timed out"),
+                _FakeResponse(200, _compressed_pdb("CNS"), {"ETag": '"mirror"'}),
+            ]
+        )
+
+        path = download_pdb_if_needed(
+            session=session,  # type: ignore[arg-type]
+            config=DatasetBuildConfig(retries=1),
+            cache_dir=self.cache_dir,
+            entry_id="11TJ",
+        )
+
+        self.assertIn("PROGRAM     : CNS", path.read_text(encoding="utf-8"))
+        self.assertIn("files.rcsb.org", str(session.calls[0]["url"]))
+        self.assertIn("files.wwpdb.org", str(session.calls[1]["url"]))
+        metadata = json.loads(
+            path.with_suffix(".pdb.cache.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(metadata["source_url"], session.calls[1]["url"])
+
     def test_interrupted_refresh_keeps_previous_file_intact(self) -> None:
         session = _FakeSession(
             [
@@ -172,6 +198,9 @@ class SafePDBCacheTests(unittest.TestCase):
                     {"ETag": '"v2"'},
                     fail_after_first_chunk=True,
                 ),
+                requests.ConnectionError("wwPDB unavailable"),
+                requests.ConnectionError("PDBe unavailable"),
+                requests.ConnectionError("EBI archive unavailable"),
             ]
         )
         config = DatasetBuildConfig(retries=1, pdb_cache_validation_hours=0)

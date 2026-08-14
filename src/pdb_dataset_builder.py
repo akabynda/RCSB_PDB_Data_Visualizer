@@ -655,6 +655,49 @@ def _cache_metadata_from_response(
     }
 
 
+def _pdb_download_sources(entry_id: str) -> tuple[tuple[str, bool], ...]:
+    """Return independent legacy-PDB download routes and compression flags."""
+    normalized_entry_id = entry_id.upper()
+    lower_entry_id = normalized_entry_id.lower()
+    divided_directory = lower_entry_id[1:3]
+    return (
+        (
+            f"https://files.rcsb.org/download/{normalized_entry_id}.pdb.gz",
+            True,
+        ),
+        (
+            "https://files.wwpdb.org/pub/pdb/data/structures/divided/pdb/"
+            f"{divided_directory}/pdb{lower_entry_id}.ent.gz",
+            True,
+        ),
+        (
+            f"https://www.ebi.ac.uk/pdbe/entry-files/download/"
+            f"pdb{lower_entry_id}.ent",
+            False,
+        ),
+        (
+            "https://ftp.ebi.ac.uk/pub/databases/pdb/data/structures/divided/pdb/"
+            f"{divided_directory}/pdb{lower_entry_id}.ent.gz",
+            True,
+        ),
+    )
+
+
+def _prioritize_cached_source(
+    sources: tuple[tuple[str, bool], ...],
+    cached_source_url: str | None,
+) -> tuple[tuple[str, bool], ...]:
+    """Try the previously validated source first without duplicating a route."""
+    if not cached_source_url:
+        return sources
+    cached_source = next(
+        (source for source in sources if source[0] == cached_source_url), None
+    )
+    if cached_source is None:
+        return sources
+    return (cached_source,) + tuple(source for source in sources if source != cached_source)
+
+
 def download_pdb_if_needed(
     session: requests.Session,
     config: DatasetBuildConfig,
@@ -675,16 +718,13 @@ def download_pdb_if_needed(
     ):
         return path
 
-    archive_url = (
-        "https://files.wwpdb.org/pub/pdb/data/structures/divided/pdb/"
-        f"{normalized_entry_id[1:3].lower()}/"
-        f"pdb{normalized_entry_id.lower()}.ent.gz"
-    )
-    direct_url = f"https://files.rcsb.org/download/{normalized_entry_id}.pdb"
-    source_url = (
+    cached_source_url = (
         str(metadata.get("source_url"))
         if cache_is_valid and metadata and metadata.get("source_url")
-        else archive_url
+        else None
+    )
+    sources = _prioritize_cached_source(
+        _pdb_download_sources(normalized_entry_id), cached_source_url
     )
     conditional_headers: dict[str, str] = {}
     if cache_is_valid and metadata is not None:
@@ -695,74 +735,49 @@ def download_pdb_if_needed(
 
     last_error: Exception | None = None
     saw_not_found = False
+    unavailable_sources: set[str] = set()
     for attempt in range(1, config.retries + 1):
-        try:
-            response = session.get(
-                source_url,
-                headers=conditional_headers,
-                stream=True,
-                timeout=config.timeout_seconds,
+        for source_url, compressed in sources:
+            if source_url in unavailable_sources:
+                continue
+            request_headers = (
+                conditional_headers if source_url == cached_source_url else {}
             )
-            if response.status_code == 304 and cache_is_valid and metadata is not None:
-                refreshed_metadata = dict(metadata)
-                refreshed_metadata["validated_at"] = _utc_now_iso()
-                _atomic_write_json(metadata_path, refreshed_metadata)
-                return path
-            if response.status_code == 404:
-                saw_not_found = True
-                last_error = requests.HTTPError(
-                    f"404 Client Error: Not Found for url: {source_url}"
+            try:
+                response = session.get(
+                    source_url,
+                    headers=request_headers,
+                    stream=True,
+                    timeout=config.timeout_seconds,
                 )
-                break
-            response.raise_for_status()
-            compressed = source_url.endswith(".gz")
-            sha256, size_bytes, mtime_ns = _atomic_install_pdb_response(
-                response=response,
-                pdb_path=path,
-                compressed=compressed,
-            )
-            _atomic_write_json(
-                metadata_path,
-                _cache_metadata_from_response(
-                    entry_id=normalized_entry_id,
-                    source_url=source_url,
-                    response=response,
-                    sha256=sha256,
-                    size_bytes=size_bytes,
-                    mtime_ns=mtime_ns,
-                ),
-            )
-            return path
-        except (
-            requests.RequestException,
-            OSError,
-            EOFError,
-            gzip.BadGzipFile,
-            RuntimeError,
-        ) as exc:
-            last_error = exc
-            wait_seconds = config.backoff_seconds * attempt
-            if attempt < config.retries:
-                time.sleep(wait_seconds)
-    if saw_not_found and source_url == archive_url:
-        try:
-            response = session.get(
-                direct_url,
-                stream=True,
-                timeout=config.timeout_seconds,
-            )
-            if response.status_code != 404:
+                if (
+                    response.status_code == 304
+                    and cache_is_valid
+                    and metadata is not None
+                    and source_url == cached_source_url
+                ):
+                    refreshed_metadata = dict(metadata)
+                    refreshed_metadata["validated_at"] = _utc_now_iso()
+                    _atomic_write_json(metadata_path, refreshed_metadata)
+                    return path
+                if response.status_code == 404:
+                    saw_not_found = True
+                    unavailable_sources.add(source_url)
+                    last_error = requests.HTTPError(
+                        f"404 Client Error: Not Found for url: {source_url}"
+                    )
+                    continue
                 response.raise_for_status()
                 sha256, size_bytes, mtime_ns = _atomic_install_pdb_response(
                     response=response,
                     pdb_path=path,
-                    compressed=False,
+                    compressed=compressed,
                 )
                 _atomic_write_json(
                     metadata_path,
                     _cache_metadata_from_response(
                         entry_id=normalized_entry_id,
-                        source_url=direct_url,
+                        source_url=source_url,
                         response=response,
                         sha256=sha256,
                         size_bytes=size_bytes,
@@ -770,8 +785,22 @@ def download_pdb_if_needed(
                     ),
                 )
                 return path
-        except (requests.RequestException, OSError) as exc:
-            last_error = exc
+            except (
+                requests.RequestException,
+                OSError,
+                EOFError,
+                gzip.BadGzipFile,
+                RuntimeError,
+            ) as exc:
+                last_error = exc
+                LOGGER.debug(
+                    "PDB download route failed for %s (%s): %s",
+                    normalized_entry_id,
+                    source_url,
+                    exc,
+                )
+        if attempt < config.retries:
+            time.sleep(config.backoff_seconds * attempt)
 
     if saw_not_found:
         cif_path = cache_dir / f"{normalized_entry_id}.cif"
@@ -826,7 +855,7 @@ def download_pdb_if_needed(
                         metadata_path,
                         _cache_metadata_from_response(
                             entry_id=normalized_entry_id,
-                            source_url=archive_url,
+                            source_url=sources[0][0],
                             response=response,
                             sha256=hashlib.sha256(pdb_bytes).hexdigest(),
                             size_bytes=stat.st_size,
