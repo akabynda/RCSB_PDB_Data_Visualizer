@@ -136,7 +136,7 @@ class PdbModeledCaTests(unittest.TestCase):
                 [{-5: 1, -4: 1, 1: 1}, {-5: 1, -4: 1, 1: 1}],
             )
 
-    def test_nmr_modeled_ids_use_only_atom_records(self) -> None:
+    def test_nmr_modeled_ids_include_hetatm_records(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             pdb_path = Path(tmpdir) / "hetatm.pdb"
             pdb_path.write_text(
@@ -154,8 +154,28 @@ class PdbModeledCaTests(unittest.TestCase):
 
             self.assertEqual(
                 parse_first_model_modeled_ca_auth_seq_ids(pdb_path, "A"),
-                {1},
+                {1, 2, 3},
             )
+
+    def test_model_coordinate_maps_include_hetatm_ca_atoms(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pdb_path = Path(tmpdir) / "hetatm_coords.pdb"
+            pdb_path.write_text(
+                "".join(
+                    [
+                        "MODEL        1\n",
+                        _ca_line(1, 1, 1.0),
+                        _hetatm_ca_line(2, "A1BEB", 2, 1.0),
+                        "ENDMDL\n",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            model_maps, raw_counts = parse_models_ca_coords_with_stats(pdb_path, "A")
+
+            self.assertEqual([set(model_map) for model_map in model_maps], [{1, 2}])
+            self.assertEqual(raw_counts, [{1: 1, 2: 1}])
 
     def test_xray_parser_keeps_long_name_hetatm_ca_records(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

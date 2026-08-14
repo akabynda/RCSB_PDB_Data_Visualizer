@@ -1,5 +1,5 @@
-data
-figures
+data*
+figures*
 __pycache__
 .venv
 helpers

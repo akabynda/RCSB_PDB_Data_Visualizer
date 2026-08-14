@@ -13,11 +13,49 @@ def _ca_line(serial: int, resid: int, x: float, y: float, z: float) -> str:
     )
 
 
+def _hetatm_ca_line(serial: int, resid: int, x: float, y: float, z: float) -> str:
+    return (
+        f"HETATM{serial:5d}  CA  MSE A{resid:4d}    "
+        f"{x:8.3f}{y:8.3f}{z:8.3f}{1.0:6.2f}{20.0:6.2f}"
+        "           C\n"
+    )
+
+
 def _coord_for_residue(resid: int) -> tuple[float, float, float]:
     return float(resid), float((resid * resid) % 7), float(resid % 5)
 
 
 class XrayRmsdFirstModelTests(unittest.TestCase):
+    def test_rejects_nmr_core_with_hetatm_ca_residue(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            nmr_path = Path(tmpdir) / "nmr_hetatm.pdb"
+            xray_path = Path(tmpdir) / "xray.pdb"
+            nmr_lines = ["MODEL        1\n"]
+            for resid in range(1, 12):
+                nmr_lines.append(_ca_line(resid, resid, *_coord_for_residue(resid)))
+            nmr_lines.append(_hetatm_ca_line(12, 12, *_coord_for_residue(12)))
+            nmr_lines.append("ENDMDL\n")
+            nmr_path.write_text("".join(nmr_lines), encoding="utf-8")
+            xray_path.write_text(
+                "".join(
+                    _ca_line(resid, resid, *_coord_for_residue(resid))
+                    for resid in range(1, 13)
+                ),
+                encoding="utf-8",
+            )
+
+            result = SolutionNMRMonomerXrayRmsdBuilder._compute_ca_rmsd_to_xray(
+                nmr_pdb_path=nmr_path,
+                nmr_chain_id="A",
+                nmr_core_start_seq_id=1,
+                nmr_core_end_seq_id=12,
+                xray_pdb_path=xray_path,
+                xray_chain_id="A",
+                sequence_identity_percent=100,
+            )
+
+            self.assertIsNone(result)
+
     def test_ignores_missing_ca_atoms_in_later_nmr_models(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             nmr_path = Path(tmpdir) / "nmr.pdb"

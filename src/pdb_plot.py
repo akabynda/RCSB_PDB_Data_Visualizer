@@ -2117,15 +2117,18 @@ class PDBScientificPlotter:
                 "entry_id",
                 "year",
                 "sequence_identity_percent",
+                "nmr_query_sequence_length",
                 "has_xray_homolog",
             },
             column_types={
                 "year": int,
                 "sequence_identity_percent": int,
+                "nmr_query_sequence_length": int,
                 "has_xray_homolog": int,
             },
             dataset_name="Monomer X-ray homolog CSV",
         )
+        prepared = prepared[prepared["nmr_query_sequence_length"] > 10].copy()
         return PDBScientificPlotter._limit_year_column(prepared)
 
     def plot_solution_nmr_monomer_xray_homologs(

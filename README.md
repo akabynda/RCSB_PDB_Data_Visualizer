@@ -47,6 +47,24 @@ CSVs also support resuming an interrupted calculation. Use
 options, worker limits, and overwrite flags. The dependency-aware commands for
 the article datasets are also given below in Figure 1–8 order.
 
+If an X-ray homolog search finished with transient request failures, rerun the
+same command with `--xray-homolog-resume`. Matching completed rows in the 95%
+and 100% CSV files and intentional exclusions are retained; missing or failed
+entries are searched again. Progress is stored next to the 95% CSV in a
+`.resume.tsv` checkpoint file.
+
+Every generated CSV has a sibling `.log` file with the same stem. The log is
+recreated on each run and contains warnings and errors for that specific
+dataset; an empty log means the build produced no warnings or errors.
+
+For coordinate-level monomer datasets, positive-occupancy CA atoms from both
+`ATOM` and `HETATM` records are included in the modeled part and STRIDE core.
+However, an NMR structure whose STRIDE core contains any `HETATM` CA residue is
+excluded from homology search and the downstream X-ray RMSD datasets.
+Structures for which no valid homology query was built are omitted from the
+homolog CSV files and from homolog-share denominators; `has_xray_homolog = 0`
+is written only after a valid search was actually performed.
+
 ## Generating Figures
 
 After the required CSV files exist in `data/`, render every plot group with:

@@ -18,6 +18,12 @@ python src/pdb_dataset_builder.py --datasets all
 
 `all` can take a long time. Some datasets download PDB files, run STRIDE, and compute RMSD values.
 
+Each output CSV receives a sibling `.log` file with the same stem. It is
+truncated at the beginning of every run and records only warnings and errors
+emitted while that dataset is active. Multi-output datasets write the same
+relevant warning or error to each of their output logs. Empty logs indicate a
+clean run.
+
 Build one dataset:
 
 ```bash
@@ -68,7 +74,7 @@ The monomer datasets (`monomer_*`) do not use all proteins. They keep only prote
 
 ## Modeled Part
 
-For the coordinate-level monomer datasets, the modeled part is defined directly from the first deposited coordinate model in the PDB file. A residue is counted as modeled only when that first model contains an `ATOM` CA record for it with positive occupancy. Residues without a first-model CA atom, and residues whose first-model CA occupancy is zero, are excluded.
+For the coordinate-level monomer datasets, the modeled part is defined directly from the first deposited coordinate model in the PDB file. A residue is counted as modeled when that first model contains an `ATOM` or `HETATM` CA record for it with positive occupancy. Residues without a first-model CA atom, and residues whose first-model CA occupancy is zero, are excluded.
 
 All downstream residue-level calculations use exactly this first-model modeled residue set and keep the author residue IDs from the PDB file instead of mapping label IDs from RCSB metadata. For STRIDE-based analyses, STRIDE is run on the first model and its assignments are then restricted to these modeled residues before secondary-structure fractions or core ranges are computed.
 
@@ -84,7 +90,7 @@ The builder runs STRIDE on the first model, keeps only modeled residues, and ide
 - `E`: beta strand
 - `B`: isolated beta bridge
 
-The STRIDE core region is the author-residue span from the first to the last modeled residue with one of those STRIDE core states. Author residue numbering does not have to be contiguous: downstream sequence and coordinate operations use the actually present CA residues inside that span. Entries are skipped when no usable core can be found. Homolog search also requires a usable core sequence, and the current implementation skips very short cores.
+The STRIDE core region is the author-residue span from the first to the last modeled residue with one of those STRIDE core states. Both `ATOM` and `HETATM` CA residues can define the endpoints. Author residue numbering does not have to be contiguous: downstream sequence and coordinate operations use the actually present CA residues inside that span. Entries are skipped when no usable core can be found. Homolog search also requires a usable core sequence, and the current implementation skips very short cores. In addition, an NMR structure is excluded entirely from homology search when any CA residue inside its STRIDE core comes from a `HETATM` record; it is consequently absent from the current and historical homolog CSV files and their downstream X-ray RMSD datasets. More generally, every entry for which a valid query cannot be built is omitted from the homolog CSV files and share denominators. A zero value of `has_xray_homolog` therefore means that a valid search was performed but yielded no usable homolog, rather than that the entry was never searched.
 
 ## STRIDE
 
@@ -104,6 +110,11 @@ python src/pdb_dataset_builder.py \
 
 First-model STRIDE state maps are cached by structure in `data/stride_cache/` by default and reused across STRIDE-based datasets. Use `--stride-cache-dir` to change that location.
 
+Changing whether modeled residues include `HETATM` does not require clearing
+this cache: cached STRIDE assignments are generated from and validated against
+the complete first-model coordinate text, which already contains both `ATOM`
+and `HETATM` records.
+
 ## Useful Options
 
 - `--datasets`: dataset kind list, or `all`.
@@ -114,6 +125,9 @@ First-model STRIDE state maps are cached by structure in `data/stride_cache/` by
 
 Long-running calculations:
 
+- `--xray-homolog-resume`: keep completed paired rows from the 95% and 100%
+  homolog CSVs, skip checkpointed intentional exclusions, and retry entries
+  that are missing or previously failed (including transient network errors).
 - `--precision-max-entries`: limit the number of entries processed for precision calculations.
 - `--precision-workers`: worker count for precision RMSD calculations.
 - `--precision-overwrite`: recompute the precision CSV from scratch.
@@ -121,6 +135,10 @@ Long-running calculations:
 - `--xray-rmsd-workers`: worker count for X-ray RMSD calculations.
 - `--xray-rmsd-overwrite`: recompute the X-ray RMSD CSV from scratch.
 - `--xray-rmsd-sequence-identity {95,100}`: choose which homolog CSV is used by the X-ray RMSD datasets.
+
+The homolog completion checkpoint is written beside the 95% output as
+`<95%-output-stem>.resume.tsv`. Run without `--xray-homolog-resume` to rebuild
+the homolog CSV pair and checkpoint from scratch.
 
 ## Recommended Run Order
 
@@ -231,7 +249,7 @@ Output:
 
 ### `solution_nmr_monomer_stride_modeled_first_model`
 
-Runs STRIDE on the first model of each eligible SOLUTION NMR protein monomer, restricts the STRIDE assignments to the modeled residues from that same first model, and summarizes the resulting state fractions over the modeled part only.
+Runs STRIDE on the first model of each eligible SOLUTION NMR protein monomer, restricts the STRIDE assignments to the modeled `ATOM` and `HETATM` CA residues from that same first model, and summarizes the resulting state fractions over the modeled part only.
 
 The output stores the modeled residue span and STRIDE fractions for `H`, `G`, `I`, `E`, `B`, `T`, and `C`.
 
@@ -248,8 +266,9 @@ Output:
 ### `solution_nmr_monomer_precision_stride_modeled_first_model`
 
 Computes NMR ensemble precision for eligible SOLUTION NMR protein monomers. The
-residue range is the STRIDE core region from the first model. Only CA residues
-present in every coordinate model inside that core are used.
+residue range is the STRIDE core region from the first model. CA coordinates
+from both `ATOM` and `HETATM` records are eligible; only residues present in
+every coordinate model inside that core are used.
 
 Every NMR model is first rigidly aligned to the first NMR model. Let `N` be the
 number of models, `n` the number of common CA residues, `r_ij(aligned)` the
@@ -305,7 +324,7 @@ Output:
 
 Builds a STRIDE-core query sequence for each eligible SOLUTION NMR protein monomer and searches RCSB for X-ray polymer-entity homologs. It writes separate CSV files for 95% and 100% sequence identity.
 
-Candidates are checked against the modeled NMR core sequence so that downstream RMSD calculations compare a residue range that is actually modeled. When checking whether an X-ray candidate models the NMR core sequence, X-ray CA residues from both `ATOM` and `HETATM` records may be used for sequence matching.
+Candidates are checked against the modeled NMR core sequence so that downstream RMSD calculations compare a residue range that is actually modeled. An NMR structure is excluded from this dataset if its STRIDE core contains any `HETATM` CA residue. For retained NMR structures, X-ray CA residues from both `ATOM` and `HETATM` records may be used for sequence matching.
 
 Requires:
 
@@ -338,10 +357,10 @@ Outputs:
 Computes CA RMSD between the NMR STRIDE core region and a matching X-ray
 homolog candidate. The homolog input is selected with
 `--xray-rmsd-sequence-identity`; the final modeled-core matching performed by
-the current RMSD calculator requires 100% residue identity. X-ray `HETATM` CA
-residues may be considered while finding candidate sequence matches, but the
-final RMSD uses only matched residue pairs whose NMR and X-ray coordinates both
-come from standard `ATOM` records.
+the current RMSD calculator requires 100% residue identity. NMR structures with
+any `HETATM` CA residue in the STRIDE core are rejected. For retained NMR
+structures, X-ray `ATOM` and `HETATM` CA residues may be used in matching and
+coordinate calculations.
 
 For NMR entry `e` and X-ray homolog candidate `h`, the current calculation uses
 only the first NMR coordinate model and the first X-ray coordinate model:
