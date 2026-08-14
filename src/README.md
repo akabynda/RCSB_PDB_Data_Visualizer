@@ -18,6 +18,14 @@ python src/pdb_dataset_builder.py --datasets all
 
 `all` can take a long time. Some datasets download PDB files, run STRIDE, and compute RMSD values.
 
+Coordinate files are downloaded from the versioned wwPDB archive and installed
+atomically. Every cached `.pdb`/`.cif` has a `.cache.json` sidecar containing
+its source URL, `ETag`, `Last-Modified`, SHA-256, size, mtime, and last remote
+validation time. The default validation window is 24 hours; use
+`--pdb-cache-validation-hours 0` to issue a conditional request on every cache
+access. Derived multi-character-chain PDB subsets are tied to the source mmCIF
+SHA-256, while STRIDE entries are tied to the complete first-model SHA-1.
+
 Each output CSV receives a sibling `.log` file with the same stem. It is
 truncated at the beginning of every run and records only warnings and errors
 emitted while that dataset is active. Multi-output datasets write the same
@@ -122,6 +130,8 @@ and `HETATM` records.
 - `--batch-size`: GraphQL batch size.
 - `--page-size`: RCSB Search API page size.
 - `--log-level`: logging level, for example `INFO` or `DEBUG`.
+- `--pdb-cache-validation-hours`: remote PDB/mmCIF validation interval; `0`
+  validates every access.
 
 Long-running calculations:
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import gzip
 import hashlib
 import json
 import logging
@@ -22,7 +23,7 @@ from collections import Counter
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any, TypeVar
@@ -113,6 +114,8 @@ PROTEIN_POLYMER_TYPE = "Protein"
 SEQUENCE_IDENTITY_AGGREGATION_METHOD = "sequence_identity"
 DEFAULT_PDB_CACHE_DIR = Path("data/pdb_cache")
 DEFAULT_STRIDE_CACHE_DIR = Path("data/stride_cache")
+DEFAULT_PDB_CACHE_VALIDATION_HOURS = 24.0
+PDB_CACHE_METADATA_SCHEMA_VERSION = 1
 LOCAL_STRIDE_CANDIDATE = Path("/tmp/stride_src/src/stride")
 STRIDE_STATE_CODES: tuple[str, ...] = ("H", "G", "I", "E", "B", "T", "C")
 STRIDE_CORE_STATE_CODES: frozenset[str] = frozenset({"H", "G", "I", "E", "B"})
@@ -174,6 +177,7 @@ class DatasetBuildConfig:
     timeout_seconds: int = 60
     retries: int = 4
     backoff_seconds: float = 1.3
+    pdb_cache_validation_hours: float = DEFAULT_PDB_CACHE_VALIDATION_HOURS
 
 
 @dataclass(frozen=True)
@@ -478,58 +482,335 @@ def resolve_stride_executable(explicit_value: str) -> str | None:
     return None
 
 
+def _pdb_cache_metadata_path(pdb_path: Path) -> Path:
+    """Return the sidecar metadata path for a cached coordinate file."""
+    return pdb_path.with_suffix(pdb_path.suffix + ".cache.json")
+
+
+def _utc_now_iso() -> str:
+    """Return a stable UTC timestamp for cache metadata."""
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _load_pdb_cache_metadata(pdb_path: Path) -> dict[str, Any] | None:
+    """Load validated cache metadata, returning None for old or damaged sidecars."""
+    metadata_path = _pdb_cache_metadata_path(pdb_path)
+    if not metadata_path.exists():
+        return None
+    try:
+        payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if (
+        not isinstance(payload, dict)
+        or payload.get("schema_version") != PDB_CACHE_METADATA_SCHEMA_VERSION
+    ):
+        return None
+    return payload
+
+
+def _cached_pdb_matches_metadata(pdb_path: Path, metadata: dict[str, Any]) -> bool:
+    """Return whether the local file still matches its recorded size and mtime."""
+    if not pdb_path.exists() or pdb_path.stat().st_size <= 0:
+        return False
+    stat = pdb_path.stat()
+    return (
+        metadata.get("size_bytes") == stat.st_size
+        and metadata.get("mtime_ns") == stat.st_mtime_ns
+        and isinstance(metadata.get("sha256"), str)
+        and bool(metadata["sha256"])
+    )
+
+
+def _pdb_cache_validation_is_fresh(
+    metadata: dict[str, Any], validation_hours: float
+) -> bool:
+    """Return whether remote validation is still inside the configured window."""
+    if validation_hours <= 0:
+        return False
+    raw_value = metadata.get("validated_at")
+    if not isinstance(raw_value, str):
+        return False
+    try:
+        validated_at = datetime.fromisoformat(raw_value.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if validated_at.tzinfo is None:
+        validated_at = validated_at.replace(tzinfo=timezone.utc)
+    age_seconds = (datetime.now(timezone.utc) - validated_at).total_seconds()
+    return 0 <= age_seconds <= validation_hours * 3600.0
+
+
+def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
+    """Write one JSON object using an atomic same-directory replace."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            suffix=".json.tmp",
+            prefix=f"{path.name}.",
+            dir=str(path.parent),
+            encoding="utf-8",
+            delete=False,
+        ) as handle:
+            temp_path = Path(handle.name)
+            json.dump(payload, handle, sort_keys=True, separators=(",", ":"))
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        temp_path.replace(path)
+    finally:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
+
+
+def _response_chunks(response: requests.Response) -> Iterator[bytes]:
+    """Yield non-empty response body chunks without loading the whole file."""
+    for chunk in response.iter_content(chunk_size=1024 * 1024):
+        if chunk:
+            yield chunk
+
+
+def _atomic_install_pdb_response(
+    response: requests.Response,
+    pdb_path: Path,
+    compressed: bool,
+) -> tuple[str, int, int]:
+    """Stream, validate, and atomically install a downloaded PDB response."""
+    pdb_path.parent.mkdir(parents=True, exist_ok=True)
+    download_path: Path | None = None
+    output_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "wb",
+            suffix=".download",
+            prefix=f"{pdb_path.name}.",
+            dir=str(pdb_path.parent),
+            delete=False,
+        ) as download_handle:
+            download_path = Path(download_handle.name)
+            for chunk in _response_chunks(response):
+                download_handle.write(chunk)
+            download_handle.flush()
+            os.fsync(download_handle.fileno())
+
+        digest = hashlib.sha256()
+        size_bytes = 0
+        with tempfile.NamedTemporaryFile(
+            "wb",
+            suffix=".pdb.tmp",
+            prefix=f"{pdb_path.name}.",
+            dir=str(pdb_path.parent),
+            delete=False,
+        ) as output_handle:
+            output_path = Path(output_handle.name)
+            source_handle: Any
+            if compressed:
+                source_handle = gzip.open(download_path, "rb")
+            else:
+                source_handle = download_path.open("rb")
+            with source_handle:
+                while True:
+                    chunk = source_handle.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    digest.update(chunk)
+                    size_bytes += len(chunk)
+                    output_handle.write(chunk)
+            output_handle.flush()
+            os.fsync(output_handle.fileno())
+
+        if size_bytes <= 0:
+            raise RuntimeError(f"Downloaded empty coordinate file for {pdb_path.stem}")
+        output_path.replace(pdb_path)
+        stat = pdb_path.stat()
+        return digest.hexdigest(), stat.st_size, stat.st_mtime_ns
+    finally:
+        if download_path is not None:
+            download_path.unlink(missing_ok=True)
+        if output_path is not None:
+            output_path.unlink(missing_ok=True)
+
+
+def _cache_metadata_from_response(
+    entry_id: str,
+    source_url: str,
+    response: requests.Response,
+    sha256: str,
+    size_bytes: int,
+    mtime_ns: int,
+) -> dict[str, Any]:
+    """Build the durable sidecar for one successfully installed PDB file."""
+    return {
+        "schema_version": PDB_CACHE_METADATA_SCHEMA_VERSION,
+        "entry_id": entry_id.upper(),
+        "source_url": source_url,
+        "etag": response.headers.get("ETag"),
+        "last_modified": response.headers.get("Last-Modified"),
+        "sha256": sha256,
+        "size_bytes": size_bytes,
+        "mtime_ns": mtime_ns,
+        "validated_at": _utc_now_iso(),
+    }
+
+
 def download_pdb_if_needed(
     session: requests.Session,
     config: DatasetBuildConfig,
     cache_dir: Path,
     entry_id: str,
 ) -> Path:
-    """Download and cache a PDB-format coordinate file if it is missing."""
+    """Download or remotely revalidate an atomically cached PDB file."""
     cache_dir.mkdir(parents=True, exist_ok=True)
-    path = cache_dir / f"{entry_id}.pdb"
-    if path.exists() and path.stat().st_size > 0:
+    normalized_entry_id = entry_id.upper()
+    path = cache_dir / f"{normalized_entry_id}.pdb"
+    metadata_path = _pdb_cache_metadata_path(path)
+    metadata = _load_pdb_cache_metadata(path)
+    cache_is_valid = metadata is not None and _cached_pdb_matches_metadata(
+        path, metadata
+    )
+    if cache_is_valid and _pdb_cache_validation_is_fresh(
+        metadata, config.pdb_cache_validation_hours
+    ):
         return path
 
-    url = f"https://files.rcsb.org/download/{entry_id}.pdb"
+    archive_url = (
+        "https://files.wwpdb.org/pub/pdb/data/structures/divided/pdb/"
+        f"{normalized_entry_id[1:3].lower()}/"
+        f"pdb{normalized_entry_id.lower()}.ent.gz"
+    )
+    direct_url = f"https://files.rcsb.org/download/{normalized_entry_id}.pdb"
+    source_url = (
+        str(metadata.get("source_url"))
+        if cache_is_valid and metadata and metadata.get("source_url")
+        else archive_url
+    )
+    conditional_headers: dict[str, str] = {}
+    if cache_is_valid and metadata is not None:
+        if metadata.get("etag"):
+            conditional_headers["If-None-Match"] = str(metadata["etag"])
+        if metadata.get("last_modified"):
+            conditional_headers["If-Modified-Since"] = str(metadata["last_modified"])
+
     last_error: Exception | None = None
     saw_not_found = False
     for attempt in range(1, config.retries + 1):
         try:
-            response = session.get(url, timeout=config.timeout_seconds)
+            response = session.get(
+                source_url,
+                headers=conditional_headers,
+                stream=True,
+                timeout=config.timeout_seconds,
+            )
+            if response.status_code == 304 and cache_is_valid and metadata is not None:
+                refreshed_metadata = dict(metadata)
+                refreshed_metadata["validated_at"] = _utc_now_iso()
+                _atomic_write_json(metadata_path, refreshed_metadata)
+                return path
             if response.status_code == 404:
                 saw_not_found = True
                 last_error = requests.HTTPError(
-                    f"404 Client Error: Not Found for url: {url}"
+                    f"404 Client Error: Not Found for url: {source_url}"
                 )
                 break
             response.raise_for_status()
-            path.write_text(response.text, encoding="utf-8")
+            compressed = source_url.endswith(".gz")
+            sha256, size_bytes, mtime_ns = _atomic_install_pdb_response(
+                response=response,
+                pdb_path=path,
+                compressed=compressed,
+            )
+            _atomic_write_json(
+                metadata_path,
+                _cache_metadata_from_response(
+                    entry_id=normalized_entry_id,
+                    source_url=source_url,
+                    response=response,
+                    sha256=sha256,
+                    size_bytes=size_bytes,
+                    mtime_ns=mtime_ns,
+                ),
+            )
             return path
-        except (requests.RequestException, OSError) as exc:
+        except (
+            requests.RequestException,
+            OSError,
+            EOFError,
+            gzip.BadGzipFile,
+            RuntimeError,
+        ) as exc:
             last_error = exc
             wait_seconds = config.backoff_seconds * attempt
             if attempt < config.retries:
                 time.sleep(wait_seconds)
+    if saw_not_found and source_url == archive_url:
+        try:
+            response = session.get(
+                direct_url,
+                stream=True,
+                timeout=config.timeout_seconds,
+            )
+            if response.status_code != 404:
+                response.raise_for_status()
+                sha256, size_bytes, mtime_ns = _atomic_install_pdb_response(
+                    response=response,
+                    pdb_path=path,
+                    compressed=False,
+                )
+                _atomic_write_json(
+                    metadata_path,
+                    _cache_metadata_from_response(
+                        entry_id=normalized_entry_id,
+                        source_url=direct_url,
+                        response=response,
+                        sha256=sha256,
+                        size_bytes=size_bytes,
+                        mtime_ns=mtime_ns,
+                    ),
+                )
+                return path
+        except (requests.RequestException, OSError) as exc:
+            last_error = exc
+
     if saw_not_found:
-        cif_path = cache_dir / f"{entry_id}.cif"
-        cif_url = f"https://files.rcsb.org/download/{entry_id}.cif"
+        cif_path = cache_dir / f"{normalized_entry_id}.cif"
+        cif_url = f"https://files.rcsb.org/download/{normalized_entry_id}.cif"
         LOGGER.info(
             "PDB file is unavailable for %s; trying mmCIF fallback",
-            entry_id,
+            normalized_entry_id,
         )
         for attempt in range(1, config.retries + 1):
             try:
-                response = session.get(cif_url, timeout=config.timeout_seconds)
+                response = session.get(
+                    cif_url,
+                    stream=True,
+                    timeout=config.timeout_seconds,
+                )
                 response.raise_for_status()
-                cif_path.write_text(response.text, encoding="utf-8")
-                structure = parse_mmcif_structure(entry_id, cif_path)
+                with tempfile.NamedTemporaryFile(
+                    "wb",
+                    suffix=".cif.tmp",
+                    prefix=f"{normalized_entry_id}.",
+                    dir=str(cache_dir),
+                    delete=False,
+                ) as handle:
+                    temp_cif_path = Path(handle.name)
+                    for chunk in _response_chunks(response):
+                        handle.write(chunk)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                temp_cif_path.replace(cif_path)
+                structure = parse_mmcif_structure(normalized_entry_id, cif_path)
                 chain_id_map = _coerce_structure_chain_ids_for_pdbio(structure)
                 io = PDBIO()
                 io.set_structure(structure)
-                io.save(str(path))
+                temp_pdb_path = cache_dir / f".{normalized_entry_id}.pdb.tmp"
+                io.save(str(temp_pdb_path))
+                temp_pdb_path.replace(path)
                 if path.exists() and path.stat().st_size > 0:
                     if chain_id_map:
-                        map_path = cache_dir / f"{entry_id}.chain_map.csv"
+                        map_path = cache_dir / f"{normalized_entry_id}.chain_map.csv"
                         write_csv_rows(
                             output_path=map_path,
                             header=["original_chain_id", "mapped_chain_id"],
@@ -537,7 +818,20 @@ def download_pdb_if_needed(
                         )
                     LOGGER.info(
                         "Converted mmCIF fallback to cached PDB for %s",
-                        entry_id,
+                        normalized_entry_id,
+                    )
+                    pdb_bytes = path.read_bytes()
+                    stat = path.stat()
+                    _atomic_write_json(
+                        metadata_path,
+                        _cache_metadata_from_response(
+                            entry_id=normalized_entry_id,
+                            source_url=archive_url,
+                            response=response,
+                            sha256=hashlib.sha256(pdb_bytes).hexdigest(),
+                            size_bytes=stat.st_size,
+                            mtime_ns=stat.st_mtime_ns,
+                        ),
                     )
                     return path
             except Exception as exc:
@@ -545,7 +839,7 @@ def download_pdb_if_needed(
                 wait_seconds = config.backoff_seconds * attempt
                 if attempt < config.retries:
                     time.sleep(wait_seconds)
-    raise RuntimeError(f"Failed to download {entry_id}: {last_error}")
+    raise RuntimeError(f"Failed to download {normalized_entry_id}: {last_error}")
 
 
 def parse_mmcif_structure(entry_id: str, cif_path: Path) -> Any:
@@ -554,6 +848,82 @@ def parse_mmcif_structure(entry_id: str, cif_path: Path) -> Any:
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", PDBConstructionWarning)
         return parser.get_structure(entry_id, str(cif_path))
+
+
+def _download_mmcif_if_needed(
+    session: requests.Session,
+    config: DatasetBuildConfig,
+    cache_dir: Path,
+    entry_id: str,
+) -> Path:
+    """Download or remotely revalidate an atomically cached mmCIF file."""
+    normalized_entry_id = entry_id.upper()
+    cif_path = cache_dir / f"{normalized_entry_id}.cif"
+    metadata_path = _pdb_cache_metadata_path(cif_path)
+    metadata = _load_pdb_cache_metadata(cif_path)
+    cache_is_valid = metadata is not None and _cached_pdb_matches_metadata(
+        cif_path, metadata
+    )
+    if cache_is_valid and _pdb_cache_validation_is_fresh(
+        metadata, config.pdb_cache_validation_hours
+    ):
+        return cif_path
+
+    archive_url = (
+        "https://files.wwpdb.org/pub/pdb/data/structures/divided/mmCIF/"
+        f"{normalized_entry_id[1:3].lower()}/"
+        f"{normalized_entry_id.lower()}.cif.gz"
+    )
+    headers: dict[str, str] = {}
+    if cache_is_valid and metadata is not None:
+        if metadata.get("etag"):
+            headers["If-None-Match"] = str(metadata["etag"])
+        if metadata.get("last_modified"):
+            headers["If-Modified-Since"] = str(metadata["last_modified"])
+
+    last_error: Exception | None = None
+    for attempt in range(1, config.retries + 1):
+        try:
+            response = session.get(
+                archive_url,
+                headers=headers,
+                stream=True,
+                timeout=config.timeout_seconds,
+            )
+            if response.status_code == 304 and cache_is_valid and metadata is not None:
+                refreshed_metadata = dict(metadata)
+                refreshed_metadata["validated_at"] = _utc_now_iso()
+                _atomic_write_json(metadata_path, refreshed_metadata)
+                return cif_path
+            response.raise_for_status()
+            sha256, size_bytes, mtime_ns = _atomic_install_pdb_response(
+                response=response,
+                pdb_path=cif_path,
+                compressed=True,
+            )
+            _atomic_write_json(
+                metadata_path,
+                _cache_metadata_from_response(
+                    entry_id=normalized_entry_id,
+                    source_url=archive_url,
+                    response=response,
+                    sha256=sha256,
+                    size_bytes=size_bytes,
+                    mtime_ns=mtime_ns,
+                ),
+            )
+            return cif_path
+        except (
+            requests.RequestException,
+            OSError,
+            EOFError,
+            gzip.BadGzipFile,
+            RuntimeError,
+        ) as exc:
+            last_error = exc
+            if attempt < config.retries:
+                time.sleep(config.backoff_seconds * attempt)
+    raise RuntimeError(f"Failed to download {normalized_entry_id} mmCIF: {last_error}")
 
 
 def parse_pdb_structure(entry_id: str, pdb_path: str | Path) -> Any:
@@ -699,42 +1069,42 @@ def download_pdb_chain_subset_if_needed(
     entry_id: str,
     chain_ids: Sequence[str],
 ) -> tuple[Path, dict[str, str]]:
-    """Create or reuse a cached PDB file containing only selected chains."""
+    """Create a source-hash-bound PDB cache containing selected chains."""
     selected_chain_ids = {str(chain_id) for chain_id in chain_ids if str(chain_id)}
     if not selected_chain_ids:
         raise RuntimeError(f"No chain IDs selected for {entry_id}")
 
     cache_dir.mkdir(parents=True, exist_ok=True)
+    if all(len(chain_id) == 1 for chain_id in selected_chain_ids):
+        full_pdb_path = download_pdb_if_needed(
+            session=session,
+            config=config,
+            cache_dir=cache_dir,
+            entry_id=entry_id,
+        )
+        return full_pdb_path, load_cached_chain_id_map(cache_dir, entry_id)
+
     stem = _chain_subset_cache_stem(entry_id, sorted(selected_chain_ids))
     path = cache_dir / f"{stem}.pdb"
     map_path = cache_dir / f"{stem}.chain_map.csv"
-    if path.exists() and path.stat().st_size > 0:
-        return path, load_chain_id_map(map_path)
-
-    full_pdb_path = cache_dir / f"{entry_id}.pdb"
+    metadata_path = _pdb_cache_metadata_path(path)
+    cif_path = _download_mmcif_if_needed(
+        session=session,
+        config=config,
+        cache_dir=cache_dir,
+        entry_id=entry_id,
+    )
+    cif_metadata = _load_pdb_cache_metadata(cif_path)
+    if cif_metadata is None:
+        raise RuntimeError(f"Missing validated mmCIF metadata for {entry_id}")
+    subset_metadata = _load_pdb_cache_metadata(path)
     if (
-        full_pdb_path.exists()
-        and full_pdb_path.stat().st_size > 0
-        and all(len(chain_id) == 1 for chain_id in selected_chain_ids)
+        subset_metadata is not None
+        and _cached_pdb_matches_metadata(path, subset_metadata)
+        and subset_metadata.get("source_cif_sha256") == cif_metadata.get("sha256")
+        and subset_metadata.get("chain_ids") == sorted(selected_chain_ids)
     ):
-        return full_pdb_path, {}
-
-    cif_path = cache_dir / f"{entry_id}.cif"
-    if not cif_path.exists() or cif_path.stat().st_size <= 0:
-        cif_url = f"https://files.rcsb.org/download/{entry_id}.cif"
-        last_error: Exception | None = None
-        for attempt in range(1, config.retries + 1):
-            try:
-                response = session.get(cif_url, timeout=config.timeout_seconds)
-                response.raise_for_status()
-                cif_path.write_text(response.text, encoding="utf-8")
-                break
-            except (requests.RequestException, OSError) as exc:
-                last_error = exc
-                if attempt < config.retries:
-                    time.sleep(config.backoff_seconds * attempt)
-        if not cif_path.exists() or cif_path.stat().st_size <= 0:
-            raise RuntimeError(f"Failed to download {entry_id} mmCIF: {last_error}")
+        return path, load_chain_id_map(map_path)
 
     structure = parse_mmcif_structure(entry_id, cif_path)
     chain_id_map, selected_chain_object_ids = (
@@ -751,11 +1121,30 @@ def download_pdb_chain_subset_if_needed(
         )
     io = PDBIO()
     io.set_structure(structure)
-    io.save(str(path), select=ChainSubsetSelect(selected_chain_object_ids))
+    temp_subset_path = cache_dir / f".{stem}.pdb.tmp"
+    io.save(str(temp_subset_path), select=ChainSubsetSelect(selected_chain_object_ids))
+    temp_subset_path.replace(path)
     write_csv_rows(
         output_path=map_path,
         header=["original_chain_id", "mapped_chain_id"],
         rows=sorted(chain_id_map.items()),
+    )
+    stat = path.stat()
+    _atomic_write_json(
+        metadata_path,
+        {
+            "schema_version": PDB_CACHE_METADATA_SCHEMA_VERSION,
+            "entry_id": entry_id.upper(),
+            "source_url": str(cif_metadata.get("source_url") or ""),
+            "source_cif_sha256": cif_metadata["sha256"],
+            "chain_ids": sorted(selected_chain_ids),
+            "etag": None,
+            "last_modified": None,
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            "size_bytes": stat.st_size,
+            "mtime_ns": stat.st_mtime_ns,
+            "validated_at": _utc_now_iso(),
+        },
     )
     return path, chain_id_map
 
@@ -3143,9 +3532,9 @@ class SolutionNMRProgramYearlyBuilder:
     def _load_programs_for_entry(self, entry_id: str) -> set[str] | None:
         """Load refinement program labels from one cached PDB file."""
         cached_pdb_path = self.cache_dir / f"{entry_id}.pdb"
-        if cached_pdb_path.exists() and cached_pdb_path.stat().st_size > 0:
-            return extract_refinement_programs_from_pdb(cached_pdb_path)
         if not self.download_missing:
+            if cached_pdb_path.exists() and cached_pdb_path.stat().st_size > 0:
+                return extract_refinement_programs_from_pdb(cached_pdb_path)
             return None
         try:
             downloaded_pdb_path = download_pdb_if_needed(
@@ -3246,15 +3635,31 @@ class SolutionNMRMonomerProgramClusterBuilder:
         quality_records: list[SolutionNMRMonomerQualityRecord],
         cache_dir: Path,
         max_workers: int,
+        client: RCSBClient | None = None,
+        config: DatasetBuildConfig | None = None,
     ) -> None:
         """Initialize the monomer refinement-program cluster builder."""
         self.quality_records = quality_records
         self.cache_dir = cache_dir
         self.max_workers = max(1, max_workers)
+        self.client = client
+        self.config = config
 
     def _load_program_text(self, entry_id: str) -> str:
         """Load raw refinement program text for one entry."""
-        pdb_path = self.cache_dir / f"{entry_id}.pdb"
+        if self.client is not None and self.config is not None:
+            try:
+                pdb_path = download_pdb_if_needed(
+                    session=self.client.session,
+                    config=self.config,
+                    cache_dir=self.cache_dir,
+                    entry_id=entry_id,
+                )
+            except Exception as exc:
+                LOGGER.warning("Failed to get PDB for %s: %s", entry_id, exc)
+                return ""
+        else:
+            pdb_path = self.cache_dir / f"{entry_id}.pdb"
         if not pdb_path.exists() or pdb_path.stat().st_size <= 0:
             return ""
         return extract_raw_refinement_program_text_from_pdb(pdb_path)
@@ -6197,6 +6602,15 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--pdb-cache-validation-hours",
+        type=float,
+        default=DEFAULT_PDB_CACHE_VALIDATION_HOURS,
+        help=(
+            "Hours between conditional remote validations of cached PDB files "
+            "(default: 24; use 0 to validate on every access)."
+        ),
+    )
+    parser.add_argument(
         "--solution-nmr-monomer-stride-modeled-first-model-output",
         type=Path,
         default=Path("data/solution_nmr_monomer_stride_modeled_first_model.csv"),
@@ -6514,6 +6928,7 @@ def main() -> None:
         page_size=args.page_size,
         graphql_batch_size=args.batch_size,
         max_workers=args.workers,
+        pdb_cache_validation_hours=args.pdb_cache_validation_hours,
     )
     client = RCSBClient(config=config)
 
@@ -6773,6 +7188,8 @@ def main() -> None:
             quality_records=quality_records,
             cache_dir=Path(args.solution_nmr_monomer_program_cluster_cache_dir),
             max_workers=config.max_workers,
+            client=client,
+            config=config,
         )
         assignment_records, summary_records = cluster_builder.build()
         write_solution_nmr_monomer_program_cluster_assignments_csv(

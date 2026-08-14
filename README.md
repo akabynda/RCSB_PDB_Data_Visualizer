@@ -47,6 +47,13 @@ CSVs also support resuming an interrupted calculation. Use
 options, worker limits, and overwrite flags. The dependency-aware commands for
 the article datasets are also given below in Figure 1–8 order.
 
+The coordinate cache is revision-aware and crash-safe: downloads are installed
+with an atomic replace, and `.cache.json` sidecars record the archive `ETag`,
+`Last-Modified`, SHA-256, size, and validation time. Cached files are checked
+remotely every 24 hours by default. Pass `--pdb-cache-validation-hours 0` for a
+conditional check on every access. STRIDE and chain-subset caches are bound to
+the source coordinate content, so an updated coordinate file invalidates them.
+
 If an X-ray homolog search finished with transient request failures, rerun the
 same command with `--xray-homolog-resume`. Matching completed rows in the 95%
 and 100% CSV files and intentional exclusions are retained; missing or failed
