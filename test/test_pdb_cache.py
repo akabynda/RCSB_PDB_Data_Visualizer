@@ -3,13 +3,16 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import requests
 
 from src.pdb_dataset_builder import (
     DatasetBuildConfig,
     _download_mmcif_if_needed,
+    download_pdb_chain_subset_if_needed,
     download_pdb_if_needed,
+    parse_pdb_structure,
 )
 
 
@@ -246,6 +249,57 @@ class SafePDBCacheTests(unittest.TestCase):
 
         self.assertIn("data_1ABC", path.read_text(encoding="utf-8"))
         self.assertIn("www.ebi.ac.uk/pdbe", str(session.calls[2]["url"]))
+
+    def test_single_character_chain_falls_back_to_mmcif_subset(self) -> None:
+        source_pdb = self.cache_dir / "source.pdb"
+        source_pdb.write_text(
+            "ATOM      1  CA  ALA a   1       0.000   0.000   0.000  1.00 20.00           C  \n"
+            "END\n",
+            encoding="utf-8",
+        )
+        structure = parse_pdb_structure("4W2E", source_pdb)
+        cif_path = self.cache_dir / "4W2E.cif"
+        cif_path.write_text("test fixture", encoding="utf-8")
+
+        def metadata(path: Path) -> dict[str, object] | None:
+            if path == cif_path:
+                return {
+                    "sha256": "cif-sha256",
+                    "source_url": "https://files.rcsb.org/download/4W2E.cif.gz",
+                }
+            return None
+
+        with (
+            patch(
+                "src.pdb_dataset_builder.download_pdb_if_needed",
+                side_effect=RuntimeError(
+                    "Atom serial number ('100000') exceeds PDB format limit"
+                ),
+            ),
+            patch(
+                "src.pdb_dataset_builder._download_mmcif_if_needed",
+                return_value=cif_path,
+            ),
+            patch(
+                "src.pdb_dataset_builder._load_pdb_cache_metadata",
+                side_effect=metadata,
+            ),
+            patch(
+                "src.pdb_dataset_builder.parse_mmcif_structure",
+                return_value=structure,
+            ),
+        ):
+            subset_path, chain_map = download_pdb_chain_subset_if_needed(
+                session=_FakeSession([]),  # type: ignore[arg-type]
+                config=DatasetBuildConfig(retries=1),
+                cache_dir=self.cache_dir,
+                entry_id="4W2E",
+                chain_ids=("a",),
+            )
+
+        self.assertTrue(subset_path.exists())
+        self.assertEqual(chain_map, {"a": "a"})
+        self.assertIn(" ALA a   1", subset_path.read_text(encoding="utf-8"))
 
     def test_interrupted_refresh_keeps_previous_file_intact(self) -> None:
         session = _FakeSession(

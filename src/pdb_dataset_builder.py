@@ -1163,13 +1163,21 @@ def download_pdb_chain_subset_if_needed(
 
     cache_dir.mkdir(parents=True, exist_ok=True)
     if all(len(chain_id) == 1 for chain_id in selected_chain_ids):
-        full_pdb_path = download_pdb_if_needed(
-            session=session,
-            config=config,
-            cache_dir=cache_dir,
-            entry_id=entry_id,
-        )
-        return full_pdb_path, load_cached_chain_id_map(cache_dir, entry_id)
+        try:
+            full_pdb_path = download_pdb_if_needed(
+                session=session,
+                config=config,
+                cache_dir=cache_dir,
+                entry_id=entry_id,
+            )
+        except RuntimeError as exc:
+            LOGGER.info(
+                "Full PDB is unavailable for %s (%s); creating an mmCIF chain subset",
+                entry_id.upper(),
+                exc,
+            )
+        else:
+            return full_pdb_path, load_cached_chain_id_map(cache_dir, entry_id)
 
     stem = _chain_subset_cache_stem(entry_id, sorted(selected_chain_ids))
     path = cache_dir / f"{stem}.pdb"

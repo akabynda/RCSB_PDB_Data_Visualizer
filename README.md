@@ -56,6 +56,13 @@ the source coordinate content, so an updated coordinate file invalidates them.
 Both PDB and mmCIF downloads fall back through RCSB, wwPDB, PDBe, and the EBI
 archive mirror when a source is unavailable.
 
+Some large structures cannot be represented as a single legacy PDB file because
+the format limits atom serial numbers to 99,999. When a homolog candidate has
+this problem, the builder automatically downloads its mmCIF representation and
+writes a PDB-compatible cache containing only the chain or chains needed for
+the comparison. This fallback also applies to single-character chain IDs; an
+oversized structure therefore does not cause the NMR seed to be discarded.
+
 If an X-ray homolog search finished with transient request failures, rerun the
 same command with `--xray-homolog-resume`. Matching completed rows in the 95%
 and 100% CSV files and intentional exclusions are retained; missing or failed

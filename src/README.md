@@ -27,8 +27,12 @@ sidecar containing its actual source URL, `ETag`, `Last-Modified`, SHA-256,
 size, mtime, and last remote validation time. The default validation window is
 24 hours; use
 `--pdb-cache-validation-hours 0` to issue a conditional request on every cache
-access. Derived multi-character-chain PDB subsets are tied to the source mmCIF
-SHA-256, while STRIDE entries are tied to the complete first-model SHA-1.
+access. If a complete structure cannot be written in legacy PDB format, for
+example because its atom serial numbers exceed the 99,999 limit, the builder
+creates a PDB-compatible subset containing only the requested mmCIF chains.
+This fallback is used for both single- and multi-character chain IDs. Derived
+chain subsets are tied to the source mmCIF SHA-256, while STRIDE entries are
+tied to the complete first-model SHA-1.
 
 Each output CSV receives a sibling `.log` file with the same stem. It is
 truncated at the beginning of every run and records only warnings and errors
