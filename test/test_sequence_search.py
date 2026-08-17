@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+import math
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -128,6 +129,42 @@ class SequenceSearchTests(unittest.TestCase):
 
         self.assertEqual(result, [])
 
+    def test_homolog_candidates_can_include_entries_without_resolution(self) -> None:
+        client = RCSBClient(DatasetBuildConfig())
+        entity_response = {
+            "data": {
+                "polymer_entities": [
+                    {
+                        "rcsb_id": "1MCD_1",
+                        "entity_poly": {"pdbx_strand_id": "A,B"},
+                        "rcsb_polymer_entity_container_identifiers": {
+                            "entry_id": "1MCD"
+                        },
+                    }
+                ]
+            }
+        }
+        empty_resolution_response = {"data": {"entries": []}}
+        client._post_json = Mock(
+            side_effect=[entity_response, empty_resolution_response]
+        )
+
+        default_result = client.fetch_xray_polymer_entity_candidates_for_ids(
+            ["1MCD_1"]
+        )
+
+        client._post_json = Mock(
+            side_effect=[entity_response, empty_resolution_response]
+        )
+        homolog_result = client.fetch_xray_polymer_entity_candidates_for_ids(
+            ["1MCD_1"], include_without_resolution=True
+        )
+
+        self.assertEqual(default_result, [])
+        self.assertEqual(len(homolog_result), 1)
+        self.assertEqual(homolog_result[0].polymer_entity_id, "1MCD_1")
+        self.assertTrue(math.isnan(homolog_result[0].resolution_angstrom))
+
     def test_excludes_nmr_entry_when_stride_core_contains_hetatm(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -247,7 +284,9 @@ class SequenceSearchTests(unittest.TestCase):
 
             def candidates_for_ids(
                 entity_ids: list[str],
+                include_without_resolution: bool = False,
             ) -> list[XrayPolymerEntityCandidateRecord]:
+                self.assertTrue(include_without_resolution)
                 return [
                     XrayPolymerEntityCandidateRecord(
                         polymer_entity_id=entity_id,
@@ -285,6 +324,55 @@ class SequenceSearchTests(unittest.TestCase):
             self.assertEqual(
                 client.fetch_xray_polymer_entity_candidates_for_ids.call_count,
                 3,
+            )
+
+    def test_evaluates_large_candidate_chain_sets_one_chain_at_a_time(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config = DatasetBuildConfig()
+            builder = SolutionNMRMonomerXrayHomologBuilder(
+                client=RCSBClient(config),
+                config=config,
+                stride_executable="stride",
+                cache_dir=root,
+                stride_cache_dir=root / "stride_cache",
+            )
+            candidate = XrayPolymerEntityCandidateRecord(
+                polymer_entity_id="4WIZ_1",
+                entry_id="4WIZ",
+                chain_ids=tuple(f"chain_{index}" for index in range(70)),
+                resolution_angstrom=3.0,
+            )
+
+            with (
+                patch(
+                    "src.pdb_dataset_builder.download_pdb_chain_subset_if_needed",
+                    return_value=(root / "subset.pdb", {}),
+                ) as download_subset,
+                patch(
+                    "src.pdb_dataset_builder.parse_first_model_ca_residues",
+                    return_value=[],
+                ),
+                patch(
+                    "src.pdb_dataset_builder.find_modeled_ca_core_identity_matches",
+                    side_effect=[False, True],
+                ),
+            ):
+                matched = builder._xray_candidate_has_modeled_core_match(
+                    nmr_core_residues=[],
+                    candidate=candidate,
+                    sequence_identity_percent=100,
+                )
+
+            self.assertTrue(matched)
+            self.assertEqual(download_subset.call_count, 2)
+            self.assertEqual(
+                download_subset.call_args_list[0].kwargs["chain_ids"],
+                ("chain_0",),
+            )
+            self.assertEqual(
+                download_subset.call_args_list[1].kwargs["chain_ids"],
+                ("chain_1",),
             )
 
 

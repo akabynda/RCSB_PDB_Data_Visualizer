@@ -1216,10 +1216,25 @@ def download_pdb_chain_subset_if_needed(
         )
     io = PDBIO()
     io.set_structure(structure)
-    temp_subset_path = cache_dir / f".{stem}.pdb.tmp"
-    io.save(str(temp_subset_path), select=ChainSubsetSelect(selected_chain_object_ids))
-    temp_subset_path.replace(path)
-    write_csv_rows(
+    temp_subset_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "wb",
+            suffix=".pdb.tmp",
+            prefix=f".{stem}.",
+            dir=str(cache_dir),
+            delete=False,
+        ) as handle:
+            temp_subset_path = Path(handle.name)
+        io.save(
+            str(temp_subset_path),
+            select=ChainSubsetSelect(selected_chain_object_ids),
+        )
+        temp_subset_path.replace(path)
+    finally:
+        if temp_subset_path is not None:
+            temp_subset_path.unlink(missing_ok=True)
+    _atomic_write_csv_rows(
         output_path=map_path,
         header=["original_chain_id", "mapped_chain_id"],
         rows=sorted(chain_id_map.items()),
@@ -1270,6 +1285,36 @@ def write_csv_rows(
         writer = csv.writer(csvfile)
         writer.writerow(header)
         writer.writerows(rows)
+
+
+def _atomic_write_csv_rows(
+    output_path: Path,
+    header: Sequence[str],
+    rows: Iterable[Sequence[Any]],
+) -> None:
+    """Atomically replace a CSV file using a collision-safe temporary path."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            newline="",
+            encoding="utf-8",
+            suffix=f"{output_path.suffix}.tmp",
+            prefix=f".{output_path.stem}.",
+            dir=str(output_path.parent),
+            delete=False,
+        ) as csvfile:
+            temp_path = Path(csvfile.name)
+            writer = csv.writer(csvfile)
+            writer.writerow(header)
+            writer.writerows(rows)
+            csvfile.flush()
+            os.fsync(csvfile.fileno())
+        temp_path.replace(output_path)
+    finally:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
 
 
 PROGRAM_REMARK_PATTERN = re.compile(r"^REMARK\s+3\s+PROGRAM\s*:\s*(.*)$")
@@ -2942,7 +2987,9 @@ class RCSBClient:
         return records
 
     def fetch_xray_polymer_entity_candidates_for_ids(
-        self, entity_ids: list[str]
+        self,
+        entity_ids: list[str],
+        include_without_resolution: bool = False,
     ) -> list[XrayPolymerEntityCandidateRecord]:
         """Fetch candidate X-ray polymer entities and coordinate metadata."""
         if not entity_ids:
@@ -2992,14 +3039,16 @@ class RCSBClient:
         records: list[XrayPolymerEntityCandidateRecord] = []
         for polymer_entity_id, entry_id, chain_ids in entity_rows:
             resolution = resolution_by_entry_id.get(entry_id)
-            if resolution is None:
+            if resolution is None and not include_without_resolution:
                 continue
             records.append(
                 XrayPolymerEntityCandidateRecord(
                     polymer_entity_id=polymer_entity_id,
                     entry_id=entry_id,
                     chain_ids=chain_ids,
-                    resolution_angstrom=resolution,
+                    resolution_angstrom=(
+                        resolution if resolution is not None else float("nan")
+                    ),
                 )
             )
         return records
@@ -4471,24 +4520,22 @@ class SolutionNMRMonomerXrayHomologBuilder:
         sequence_identity_percent: int,
     ) -> bool:
         """Check whether an X-ray candidate models the NMR core sequence."""
-        try:
-            (
-                xray_pdb_path,
-                xray_chain_map,
-            ) = download_pdb_chain_subset_if_needed(
-                session=self.client.session,
-                config=self.config,
-                cache_dir=self.cache_dir,
-                entry_id=candidate.entry_id,
-                chain_ids=candidate.chain_ids,
-            )
-        except Exception as exc:
-            raise XrayHomologEvaluationError(
-                "Could not download X-ray homolog candidate "
-                f"{candidate.polymer_entity_id}: {exc}"
-            ) from exc
-
+        chain_errors: list[tuple[str, Exception]] = []
         for xray_chain_id in candidate.chain_ids:
+            try:
+                (
+                    xray_pdb_path,
+                    xray_chain_map,
+                ) = download_pdb_chain_subset_if_needed(
+                    session=self.client.session,
+                    config=self.config,
+                    cache_dir=self.cache_dir,
+                    entry_id=candidate.entry_id,
+                    chain_ids=(xray_chain_id,),
+                )
+            except Exception as exc:
+                chain_errors.append((xray_chain_id, exc))
+                continue
             parsed_xray_chain_id = xray_chain_map.get(xray_chain_id, xray_chain_id)
             xray_residues = parse_first_model_ca_residues(
                 pdb_path=xray_pdb_path,
@@ -4501,6 +4548,13 @@ class SolutionNMRMonomerXrayHomologBuilder:
                 sequence_identity_percent=sequence_identity_percent,
             ):
                 return True
+        if chain_errors:
+            failed_chain_id, error = chain_errors[0]
+            raise XrayHomologEvaluationError(
+                "Could not evaluate X-ray homolog candidate "
+                f"{candidate.polymer_entity_id}: chain {failed_chain_id} failed: "
+                f"{error} ({len(chain_errors)}/{len(candidate.chain_ids)} chains failed)"
+            ) from error
         return False
 
     def _filter_modeled_xray_homolog_entity_ids(
@@ -4519,7 +4573,8 @@ class SolutionNMRMonomerXrayHomologBuilder:
         ):
             candidates.extend(
                 self.client.fetch_xray_polymer_entity_candidates_for_ids(
-                    entity_id_batch
+                    entity_id_batch,
+                    include_without_resolution=True,
                 )
             )
         candidate_by_entity_id = {
@@ -4783,28 +4838,28 @@ class SolutionNMRMonomerXrayRmsdBuilder:
         candidate: XrayPolymerEntityCandidateRecord,
     ) -> SolutionNMRMonomerXrayRmsdRecord | None:
         """Compute RMSD metrics for one NMR and X-ray candidate pair."""
-        try:
-            (
-                xray_pdb_path,
-                xray_chain_map,
-            ) = download_pdb_chain_subset_if_needed(
-                session=self.client.session,
-                config=self.config,
-                cache_dir=self.cache_dir,
-                entry_id=candidate.entry_id,
-                chain_ids=candidate.chain_ids,
-            )
-        except Exception as exc:
-            LOGGER.debug(
-                "Skipping X-ray RMSD candidate %s for %s: %s",
-                candidate.polymer_entity_id,
-                homolog.entry_id,
-                exc,
-            )
-            return None
-
         best_chain_result: tuple[str, int, float, int, int, int, int] | None = None
         for xray_chain_id in candidate.chain_ids:
+            try:
+                (
+                    xray_pdb_path,
+                    xray_chain_map,
+                ) = download_pdb_chain_subset_if_needed(
+                    session=self.client.session,
+                    config=self.config,
+                    cache_dir=self.cache_dir,
+                    entry_id=candidate.entry_id,
+                    chain_ids=(xray_chain_id,),
+                )
+            except Exception as exc:
+                LOGGER.debug(
+                    "Skipping X-ray RMSD chain %s/%s for %s: %s",
+                    candidate.entry_id,
+                    xray_chain_id,
+                    homolog.entry_id,
+                    exc,
+                )
+                continue
             parsed_xray_chain_id = xray_chain_map.get(
                 xray_chain_id,
                 xray_chain_id,

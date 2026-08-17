@@ -18,6 +18,7 @@ from matplotlib.ticker import AutoMinorLocator, FuncFormatter, MultipleLocator
 
 DEFAULT_FIGURE_HEIGHT_INCHES: float = 5.0
 JMR_TWO_COLUMN_WIDTH_INCHES: float = 2244 / 300
+TITLE_FONTSIZE: float = 12.0
 
 
 class PlotKind(str, Enum):
@@ -383,7 +384,7 @@ class PDBScientificPlotter:
             {
                 "font.family": ["Arial"],
                 "font.sans-serif": ["Arial"],
-                "axes.titlesize": 14,
+                "axes.titlesize": TITLE_FONTSIZE,
                 "axes.titleweight": "bold",
                 "axes.labelsize": 12,
                 "xtick.labelsize": 11,
@@ -545,31 +546,16 @@ class PDBScientificPlotter:
         ax.tick_params(axis="x", which="both", bottom=True, top=False)
 
     @staticmethod
-    def _set_adaptive_title(
-        fig: plt.Figure,
+    def _set_title(
         ax: plt.Axes,
         title: str,
-        max_fontsize: float = 16.0,
-        min_fontsize: float = 10.0,
     ) -> None:
-        title_text = ax.set_title(
+        ax.set_title(
             title,
             pad=10,
-            fontsize=max_fontsize,
-            fontweight=800,
+            fontsize=TITLE_FONTSIZE,
+            fontweight="bold",
         )
-        fig.canvas.draw()
-        renderer = fig.canvas.get_renderer()
-        axes_bbox = ax.get_window_extent(renderer=renderer)
-        while (
-            title_text.get_window_extent(renderer=renderer).width
-            > axes_bbox.width * 0.98
-            and title_text.get_fontsize() > min_fontsize
-        ):
-            title_text.set_fontsize(title_text.get_fontsize() - 0.5)
-            fig.canvas.draw()
-            renderer = fig.canvas.get_renderer()
-        title_text.set_fontweight("bold")
 
     @staticmethod
     def _add_legend(ax: plt.Axes, **kwargs: Any) -> None:
@@ -675,7 +661,7 @@ class PDBScientificPlotter:
             self._remove_zero_y_tick(ax)
             self._configure_minor_ticks(ax=ax, use_year_x_ticks=use_year_x_ticks)
             if with_title:
-                self._set_adaptive_title(fig=fig, ax=ax, title=title)
+                self._set_title(ax=ax, title=title)
             ax.set_xlabel(x_label if x_label is not None else self.config.x_label)
             ax.set_ylabel(y_label)
             self._configure_boxed_axes(ax)
@@ -1251,7 +1237,7 @@ class PDBScientificPlotter:
             self._remove_zero_y_tick(ax)
             self._configure_minor_ticks(ax=ax, use_year_x_ticks=True)
             if with_title:
-                self._set_adaptive_title(fig=fig, ax=ax, title=title)
+                self._set_title(ax=ax, title=title)
             ax.set_xlabel(self.config.x_label)
             ax.set_ylabel(y_label)
             self._configure_boxed_axes(ax)
@@ -1385,7 +1371,11 @@ class PDBScientificPlotter:
             )
             ax.set_yticks(list(range(len(cluster_labels))))
             ax.set_yticklabels(cluster_labels)
-            ax.set_title(panel_title, fontsize=12, fontweight="bold")
+            ax.set_title(
+                panel_title,
+                fontsize=TITLE_FONTSIZE,
+                fontweight="bold",
+            )
             ax.set_xlabel(self.config.x_label)
             ax.set_ylabel("Program cluster")
             ax.set_xticks(np.arange(-0.5, len(years), 1), minor=True)
@@ -1405,7 +1395,7 @@ class PDBScientificPlotter:
 
         suptitle = fig.suptitle(
             self.config.nmr_monomer_program_clusters_title,
-            fontsize=15,
+            fontsize=TITLE_FONTSIZE,
             fontweight="bold",
             y=0.98,
         )

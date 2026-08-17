@@ -29,10 +29,13 @@ size, mtime, and last remote validation time. The default validation window is
 `--pdb-cache-validation-hours 0` to issue a conditional request on every cache
 access. If a complete structure cannot be written in legacy PDB format, for
 example because its atom serial numbers exceed the 99,999 limit, the builder
-creates a PDB-compatible subset containing only the requested mmCIF chains.
-This fallback is used for both single- and multi-character chain IDs. Derived
-chain subsets are tied to the source mmCIF SHA-256, while STRIDE entries are
-tied to the complete first-model SHA-1.
+creates PDB-compatible subsets containing one requested mmCIF chain at a time.
+This also handles polymer entities with more chains than the legacy PDB chain-ID
+space permits and is used for both single- and multi-character chain IDs.
+Subset PDB and chain-map files are installed with unique temporary paths and
+atomic replacement, so concurrent workers can safely request the same cache
+entry. Derived chain subsets are tied to the source mmCIF SHA-256, while STRIDE
+entries are tied to the complete first-model SHA-1.
 
 Each output CSV receives a sibling `.log` file with the same stem. It is
 truncated at the beginning of every run and records only warnings and errors
@@ -342,7 +345,7 @@ Output:
 
 Builds a STRIDE-core query sequence for each eligible SOLUTION NMR protein monomer and searches RCSB for X-ray polymer-entity homologs. It writes separate CSV files for 95% and 100% sequence identity.
 
-Candidates are checked against the modeled NMR core sequence so that downstream RMSD calculations compare a residue range that is actually modeled. An NMR structure is excluded from this dataset if its STRIDE core contains any `HETATM` CA residue. For retained NMR structures, X-ray CA residues from both `ATOM` and `HETATM` records may be used for sequence matching.
+Candidates are checked against the modeled NMR core sequence so that downstream RMSD calculations compare a residue range that is actually modeled. Every chain belonging to a candidate polymer entity is checked separately, which avoids legacy PDB atom-serial and chain-ID limits for large structures. An NMR structure is excluded from this dataset if its STRIDE core contains any `HETATM` CA residue. For retained NMR structures, X-ray CA residues from both `ATOM` and `HETATM` records may be used for sequence matching. Missing `resolution_combined` metadata does not exclude a candidate from homolog validation when its entity, chains, and coordinates are available; downstream RMSD collection continues to require resolution metadata.
 
 Requires:
 

@@ -59,9 +59,18 @@ archive mirror when a source is unavailable.
 Some large structures cannot be represented as a single legacy PDB file because
 the format limits atom serial numbers to 99,999. When a homolog candidate has
 this problem, the builder automatically downloads its mmCIF representation and
-writes a PDB-compatible cache containing only the chain or chains needed for
-the comparison. This fallback also applies to single-character chain IDs; an
-oversized structure therefore does not cause the NMR seed to be discarded.
+writes a PDB-compatible cache containing only the chain needed for each
+comparison. Polymer entities represented by many chains are evaluated one
+chain at a time, so they do not exceed the legacy PDB chain-ID limit. This
+fallback also applies to single-character chain IDs. Temporary subset and
+chain-map files use collision-safe atomic writes, allowing different workers
+to request the same candidate concurrently.
+
+X-ray resolution is metadata for downstream reporting, not a prerequisite for
+modeled-core homolog validation. A candidate with usable coordinates is
+therefore retained in the homolog CSV even when RCSB does not provide
+`resolution_combined`; RMSD datasets that require resolution metadata skip
+such a candidate.
 
 If an X-ray homolog search finished with transient request failures, rerun the
 same command with `--xray-homolog-resume`. Matching completed rows in the 95%
