@@ -252,7 +252,7 @@ class PlotConfig:
 
 
 NMR_WEIGHT_BINS: tuple[float, ...] = (0.0, 10.0, 20.0, float("inf"))
-NMR_WEIGHT_LABELS: tuple[str, ...] = ("<10 kDa", "10-20 kDa", ">20 kDa")
+NMR_WEIGHT_LABELS: tuple[str, ...] = ("<10 kDa", "10-20 kDa", "≥20 kDa")
 XRAY_HOMOLOG_TIMING_LABELS: tuple[str, str, str] = (
     "X-ray analog released prior to deposition",
     "X-ray analog released at a later date",
