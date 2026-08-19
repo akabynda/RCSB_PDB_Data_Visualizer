@@ -1,3 +1,5 @@
+"""Tests for parsing modeled alpha-carbon residues from PDB files."""
+
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,6 +12,7 @@ from src.pdb_dataset_builder import (
 
 
 def _ca_line(serial: int, resid: int, occupancy: float, x: float = 0.0) -> str:
+    """Return a formatted ATOM alpha-carbon record for test fixtures."""
     return (
         f"ATOM  {serial:5d}  CA  ALA A{resid:4d}    "
         f"{x:8.3f}{0.0:8.3f}{0.0:8.3f}{occupancy:6.2f}{20.0:6.2f}"
@@ -18,6 +21,7 @@ def _ca_line(serial: int, resid: int, occupancy: float, x: float = 0.0) -> str:
 
 
 def _hetatm_ca_line(serial: int, resname: str, resid: int, occupancy: float) -> str:
+    """Return a formatted HETATM alpha-carbon record for test fixtures."""
     return (
         f"HETATM{serial:5d}  CA  {resname} A{resid:4d}    "
         f"{0.0:8.3f}{0.0:8.3f}{0.0:8.3f}{occupancy:6.2f}{20.0:6.2f}"
@@ -26,9 +30,12 @@ def _hetatm_ca_line(serial: int, resname: str, resid: int, occupancy: float) -> 
 
 
 class PdbModeledCaTests(unittest.TestCase):
+    """Verify modeled-residue and coordinate parsing edge cases."""
+
     def test_first_model_modeled_ids_skip_zero_occupancy_and_preserve_gaps(
         self,
     ) -> None:
+        """Skip zero-occupancy residues without collapsing sequence gaps."""
         with tempfile.TemporaryDirectory() as tmpdir:
             pdb_path = Path(tmpdir) / "modeled.pdb"
             pdb_path.write_text(
@@ -55,6 +62,7 @@ class PdbModeledCaTests(unittest.TestCase):
             )
 
     def test_model_coordinate_maps_skip_zero_occupancy_ca_atoms(self) -> None:
+        """Exclude zero-occupancy alpha carbons from per-model maps."""
         with tempfile.TemporaryDirectory() as tmpdir:
             pdb_path = Path(tmpdir) / "coords.pdb"
             pdb_path.write_text(
@@ -79,6 +87,7 @@ class PdbModeledCaTests(unittest.TestCase):
             self.assertEqual(raw_counts, [{1: 1}, {1: 1}])
 
     def test_first_model_modeled_ids_ignore_seqadv_labels(self) -> None:
+        """Ignore SEQADV annotations when collecting first-model residue IDs."""
         with tempfile.TemporaryDirectory() as tmpdir:
             pdb_path = Path(tmpdir) / "artifact.pdb"
             pdb_path.write_text(
@@ -103,6 +112,7 @@ class PdbModeledCaTests(unittest.TestCase):
             )
 
     def test_model_coordinate_maps_ignore_seqadv_labels(self) -> None:
+        """Ignore SEQADV annotations when parsing model coordinates."""
         with tempfile.TemporaryDirectory() as tmpdir:
             pdb_path = Path(tmpdir) / "artifact_coords.pdb"
             pdb_path.write_text(
@@ -137,6 +147,7 @@ class PdbModeledCaTests(unittest.TestCase):
             )
 
     def test_nmr_modeled_ids_include_hetatm_records(self) -> None:
+        """Include HETATM alpha carbons in modeled NMR residue identifiers."""
         with tempfile.TemporaryDirectory() as tmpdir:
             pdb_path = Path(tmpdir) / "hetatm.pdb"
             pdb_path.write_text(
@@ -158,6 +169,7 @@ class PdbModeledCaTests(unittest.TestCase):
             )
 
     def test_model_coordinate_maps_include_hetatm_ca_atoms(self) -> None:
+        """Include HETATM alpha carbons in per-model coordinate maps."""
         with tempfile.TemporaryDirectory() as tmpdir:
             pdb_path = Path(tmpdir) / "hetatm_coords.pdb"
             pdb_path.write_text(
@@ -178,6 +190,7 @@ class PdbModeledCaTests(unittest.TestCase):
             self.assertEqual(raw_counts, [{1: 1, 2: 1}])
 
     def test_xray_parser_keeps_long_name_hetatm_ca_records(self) -> None:
+        """Preserve HETATM alpha carbons with nonstandard long residue names."""
         with tempfile.TemporaryDirectory() as tmpdir:
             pdb_path = Path(tmpdir) / "long_hetatm.pdb"
             pdb_path.write_text(

@@ -1,3 +1,5 @@
+"""Tests for logging skipped NMR precision calculations."""
+
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,6 +12,7 @@ from src.pdb_dataset_builder import (
 
 
 def _ca_line(serial: int, resid: int) -> str:
+    """Return a minimal alpha-carbon PDB record for ``resid``."""
     return (
         f"ATOM  {serial:5d}  CA  ALA A{resid:4d}    "
         f"{float(resid):8.3f}{0.0:8.3f}{0.0:8.3f}{1.0:6.2f}{20.0:6.2f}"
@@ -18,7 +21,10 @@ def _ca_line(serial: int, resid: int) -> str:
 
 
 class PrecisionSkipLoggingTests(unittest.TestCase):
+    """Verify diagnostic logging for unusable precision inputs."""
+
     def test_logs_when_core_has_fewer_than_two_coordinate_models(self) -> None:
+        """Log a skip reason when fewer than two models cover the core."""
         with tempfile.TemporaryDirectory() as tmpdir:
             pdb_path = Path(tmpdir) / "one_model.pdb"
             pdb_path.write_text(

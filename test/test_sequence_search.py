@@ -1,3 +1,5 @@
+"""Tests for sequence-based X-ray homolog searches and resume handling."""
+
 import tempfile
 import unittest
 import math
@@ -18,28 +20,41 @@ from src.pdb_dataset_builder import (
 
 
 class _NullResultSetResponse:
+    """Represent a successful RCSB response with a null result set."""
+
     status_code = 200
     text = ""
 
     def json(self) -> dict:
+        """Return a payload whose result set is explicitly null."""
         return {"total_count": 0, "result_set": None}
 
     def raise_for_status(self) -> None:
+        """Accept the fake response as successful without returning a value."""
         return None
 
 
 class _FakeSession:
+    """Return null-result responses for sequence-search POST requests."""
+
     def post(self, *args, **kwargs) -> _NullResultSetResponse:
+        """Return a deterministic null-result response for any request."""
         return _NullResultSetResponse()
 
 
 class _NullGraphqlListClient(RCSBClient):
+    """Return null GraphQL list fields for robustness tests."""
+
     def _post_json(self, url: str, payload: dict) -> dict:
+        """Return a GraphQL payload with a null polymer-entity list."""
         return {"data": {"polymer_entities": None}}
 
 
 class SequenceSearchTests(unittest.TestCase):
+    """Verify homolog discovery, eligibility, batching, and checkpointing."""
+
     def test_reads_latest_valid_homolog_resume_checkpoint_status(self) -> None:
+        """Use the latest valid status for each entry in a resume checkpoint."""
         with tempfile.TemporaryDirectory() as tmpdir:
             checkpoint_path = Path(tmpdir) / "homologs.resume.tsv"
             checkpoint_path.write_text(
@@ -57,6 +72,7 @@ class SequenceSearchTests(unittest.TestCase):
             )
 
     def test_homolog_build_skips_completed_entries_and_checkpoints_success(self) -> None:
+        """Skip completed entries and checkpoint newly successful searches."""
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             config = DatasetBuildConfig(graphql_batch_size=10, max_workers=1)
@@ -77,7 +93,9 @@ class SequenceSearchTests(unittest.TestCase):
             )
 
             def record_pair(seed):
+                """Build paired 95 and 100 percent records for ``seed``."""
                 def record(identity: int) -> SolutionNMRMonomerXrayHomologRecord:
+                    """Build one successful homolog record at ``identity``."""
                     return SolutionNMRMonomerXrayHomologRecord(
                         entry_id=seed.entry_id,
                         year=seed.year,
@@ -112,6 +130,7 @@ class SequenceSearchTests(unittest.TestCase):
             self.assertEqual(completed, [("2BBB", "success")])
 
     def test_treats_null_result_set_as_empty_search_result(self) -> None:
+        """Treat a null REST result set as an empty sequence-search result."""
         client = RCSBClient(DatasetBuildConfig(retries=1))
         client.session = _FakeSession()
 
@@ -123,6 +142,7 @@ class SequenceSearchTests(unittest.TestCase):
         self.assertEqual(result, [])
 
     def test_treats_null_candidate_entity_list_as_empty(self) -> None:
+        """Treat a null GraphQL candidate list as an empty result."""
         client = _NullGraphqlListClient(DatasetBuildConfig())
 
         result = client.fetch_xray_polymer_entity_candidates_for_ids(["1ABC_1"])
@@ -130,6 +150,7 @@ class SequenceSearchTests(unittest.TestCase):
         self.assertEqual(result, [])
 
     def test_homolog_candidates_can_include_entries_without_resolution(self) -> None:
+        """Retain homolog candidates even when resolution is unavailable."""
         client = RCSBClient(DatasetBuildConfig())
         entity_response = {
             "data": {
@@ -166,6 +187,7 @@ class SequenceSearchTests(unittest.TestCase):
         self.assertTrue(math.isnan(homolog_result[0].resolution_angstrom))
 
     def test_excludes_nmr_entry_when_stride_core_contains_hetatm(self) -> None:
+        """Exclude an NMR query whose STRIDE core includes a HETATM residue."""
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             pdb_path = root / "1ABC.pdb"
@@ -213,6 +235,7 @@ class SequenceSearchTests(unittest.TestCase):
                     builder._build_stride_core_query_sequence(seed)
 
     def test_excludes_nmr_entry_when_no_modeled_query_can_be_built(self) -> None:
+        """Exclude an entry when no modeled amino-acid query can be built."""
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             pdb_path = root / "1ABC.pdb"
@@ -238,6 +261,7 @@ class SequenceSearchTests(unittest.TestCase):
                     builder._build_stride_core_query_sequence(seed)
 
     def test_excludes_short_core_instead_of_recording_no_homolog(self) -> None:
+        """Mark short cores ineligible instead of recording a negative search."""
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             pdb_path = root / "1ABC.pdb"
@@ -277,6 +301,7 @@ class SequenceSearchTests(unittest.TestCase):
                     builder._build_stride_core_query_sequence(seed)
 
     def test_fetches_large_xray_candidate_sets_in_graphql_batches(self) -> None:
+        """Fetch large X-ray candidate sets in bounded GraphQL batches."""
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             config = DatasetBuildConfig(graphql_batch_size=2)
@@ -286,6 +311,7 @@ class SequenceSearchTests(unittest.TestCase):
                 entity_ids: list[str],
                 include_without_resolution: bool = False,
             ) -> list[XrayPolymerEntityCandidateRecord]:
+                """Return one deterministic candidate for each requested ID."""
                 self.assertTrue(include_without_resolution)
                 return [
                     XrayPolymerEntityCandidateRecord(
@@ -327,6 +353,7 @@ class SequenceSearchTests(unittest.TestCase):
             )
 
     def test_evaluates_large_candidate_chain_sets_one_chain_at_a_time(self) -> None:
+        """Evaluate large candidate sets without materializing all chain files."""
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             config = DatasetBuildConfig()

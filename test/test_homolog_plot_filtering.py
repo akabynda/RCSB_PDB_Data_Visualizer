@@ -1,3 +1,5 @@
+"""Tests for filtering X-ray homolog records before plotting."""
+
 import unittest
 
 import pandas as pd
@@ -6,7 +8,10 @@ from src.pdb_plot import PDBScientificPlotter
 
 
 class HomologPlotFilteringTests(unittest.TestCase):
+    """Verify that plot inputs contain only performed homolog searches."""
+
     def test_omits_entries_without_a_performed_sequence_search(self) -> None:
+        """Exclude records whose query sequence was too short for a search."""
         table = pd.DataFrame(
             [
                 {

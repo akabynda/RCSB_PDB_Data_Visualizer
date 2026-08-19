@@ -1,3 +1,5 @@
+"""Tests for caching STRIDE assignments for first PDB models."""
+
 import tempfile
 import unittest
 from pathlib import Path
@@ -7,6 +9,7 @@ from src.pdb_dataset_builder import load_first_model_stride_state_by_chain
 
 
 def _ca_line(serial: int, resid: int) -> str:
+    """Return a minimal alpha-carbon PDB record for ``resid``."""
     return (
         f"ATOM  {serial:5d}  CA  ALA A{resid:4d}    "
         f"{0.0:8.3f}{0.0:8.3f}{0.0:8.3f}{1.0:6.2f}{20.0:6.2f}"
@@ -15,7 +18,10 @@ def _ca_line(serial: int, resid: int) -> str:
 
 
 class StrideCacheTests(unittest.TestCase):
+    """Verify that identical STRIDE inputs reuse cached assignments."""
+
     def test_reuses_cached_first_model_stride_states(self) -> None:
+        """Avoid rerunning STRIDE when a matching cache entry exists."""
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             pdb_path = root / "1ABC.pdb"

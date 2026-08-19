@@ -1,3 +1,5 @@
+"""Tests for parsing and clustering NMR refinement-program metadata."""
+
 import tempfile
 import unittest
 from pathlib import Path
@@ -13,7 +15,10 @@ from src.pdb_dataset_builder import (
 
 
 class NormalizeRefinementProgramNameTests(unittest.TestCase):
+    """Verify canonical normalization of raw program labels."""
+
     def test_removes_versions_and_parenthetical_text(self) -> None:
+        """Strip version suffixes and explanatory parenthetical text."""
         self.assertEqual(
             _normalize_refinement_program_name(" AMBER 3.0 "),
             "AMBER",
@@ -28,13 +33,17 @@ class NormalizeRefinementProgramNameTests(unittest.TestCase):
         )
 
     def test_ignores_empty_unknown_and_numeric_values(self) -> None:
+        """Reject labels that contain no meaningful program name."""
         self.assertIsNone(_normalize_refinement_program_name(""))
         self.assertIsNone(_normalize_refinement_program_name("UNKNOWN"))
         self.assertIsNone(_normalize_refinement_program_name("3.0"))
 
 
 class ExtractSolutionNMRProgramClustersTests(unittest.TestCase):
+    """Verify mapping of raw software text to known program clusters."""
+
     def test_extracts_all_unique_clusters_in_program_order(self) -> None:
+        """Return unique cluster matches in their first textual order."""
         self.assertEqual(
             extract_solution_nmr_program_clusters("DIANA, FANTOM, AMBER 3.0"),
             [
@@ -44,12 +53,14 @@ class ExtractSolutionNMRProgramClustersTests(unittest.TestCase):
         )
 
     def test_uses_other_only_when_no_known_cluster_is_present(self) -> None:
+        """Use the OTHER cluster only when no recognized program is present."""
         self.assertEqual(
             extract_solution_nmr_program_clusters("FANTOM, AMBER 3.0"),
             [("CLUSTER1", "AMBER")],
         )
 
     def test_deduplicates_repeated_programs_and_cluster_aliases(self) -> None:
+        """Deduplicate repeated software names and aliases for one cluster."""
         self.assertEqual(
             extract_solution_nmr_program_clusters(
                 "CNS 1.0, CNS MODIFIED CNS WITH CONFORMATIONAL, CNS"
@@ -58,6 +69,7 @@ class ExtractSolutionNMRProgramClustersTests(unittest.TestCase):
         )
 
     def test_extracts_every_cluster_from_compound_strings(self) -> None:
+        """Extract every recognized cluster from compound program text."""
         self.assertEqual(
             extract_solution_nmr_program_clusters(
                 "DYANA AMBER, CNS ARIA, CYANA-DYANA, X-PLOR XPLOR-NIH"
@@ -74,6 +86,7 @@ class ExtractSolutionNMRProgramClustersTests(unittest.TestCase):
         )
 
     def test_handles_xplor_nih_aliases_and_typo(self) -> None:
+        """Recognize X-PLOR NIH aliases and the known NIH transposition typo."""
         for value in (
             "XPLOR_NIH",
             "X-PLOR_NIH",
@@ -89,6 +102,7 @@ class ExtractSolutionNMRProgramClustersTests(unittest.TestCase):
                 )
 
     def test_avoids_known_false_positive_substrings(self) -> None:
+        """Avoid matching program names embedded in unrelated words."""
         self.assertEqual(
             extract_solution_nmr_program_clusters("VNMR VARIAN INC"),
             [("CLUSTER9", "OTHER")],
@@ -99,6 +113,7 @@ class ExtractSolutionNMRProgramClustersTests(unittest.TestCase):
         )
 
     def test_handles_insight_ii_as_discover_but_not_dgii_description(self) -> None:
+        """Map standalone Insight II while excluding descriptive DGII text."""
         self.assertEqual(
             extract_solution_nmr_program_clusters("INSIGHT II"),
             [("CLUSTER5", "DISCOVER")],
@@ -117,6 +132,7 @@ class ExtractSolutionNMRProgramClustersTests(unittest.TestCase):
         )
 
     def test_returns_other_when_no_program_cluster_is_parsed(self) -> None:
+        """Return OTHER when program text contains no known cluster."""
         self.assertEqual(
             extract_solution_nmr_program_clusters("UNKNOWN"),
             [("CLUSTER9", "OTHER")],
@@ -128,7 +144,10 @@ class ExtractSolutionNMRProgramClustersTests(unittest.TestCase):
 
 
 class ExtractRefinementProgramsFromPDBTests(unittest.TestCase):
+    """Verify extraction of program metadata from PDB remark records."""
+
     def test_extracts_raw_program_lines_in_pdb_order(self) -> None:
+        """Preserve raw REMARK program lines in their original file order."""
         pdb_path = self._write_pdb(
             "\n".join(
                 [
@@ -147,6 +166,7 @@ class ExtractRefinementProgramsFromPDBTests(unittest.TestCase):
         )
 
     def test_extracts_normalized_program_set(self) -> None:
+        """Return a normalized set of programs extracted from PDB remarks."""
         pdb_path = self._write_pdb(
             "\n".join(
                 [
@@ -165,6 +185,7 @@ class ExtractRefinementProgramsFromPDBTests(unittest.TestCase):
         )
 
     def test_extracts_remark_210_software_and_continuation_lines(self) -> None:
+        """Join REMARK 210 software fields with their continuation lines."""
         pdb_path = self._write_pdb(
             "\n".join(
                 [
@@ -196,6 +217,7 @@ class ExtractRefinementProgramsFromPDBTests(unittest.TestCase):
         )
 
     def _write_pdb(self, text: str) -> Path:
+        """Write ``text`` to the temporary PDB fixture and return its path."""
         temp_dir = tempfile.TemporaryDirectory()
         self.addCleanup(temp_dir.cleanup)
         pdb_path = Path(temp_dir.name) / "test.pdb"
@@ -204,7 +226,10 @@ class ExtractRefinementProgramsFromPDBTests(unittest.TestCase):
 
 
 class ProgramClusterScoringTests(unittest.TestCase):
+    """Verify fractional weighting across software-cluster assignments."""
+
     def test_distributes_one_structure_equally_between_unique_clusters(self) -> None:
+        """Split one structure equally among its unique cluster assignments."""
         temp_dir = tempfile.TemporaryDirectory()
         self.addCleanup(temp_dir.cleanup)
         cache_dir = Path(temp_dir.name)
@@ -246,6 +271,7 @@ class ProgramClusterScoringTests(unittest.TestCase):
         )
 
     def test_supports_one_eighth_scores_for_all_known_clusters(self) -> None:
+        """Assign one-eighth weight when all eight known clusters occur."""
         temp_dir = tempfile.TemporaryDirectory()
         self.addCleanup(temp_dir.cleanup)
         cache_dir = Path(temp_dir.name)

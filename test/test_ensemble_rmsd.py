@@ -1,3 +1,5 @@
+"""Tests for ensemble alpha-carbon RMSD calculations."""
+
 import math
 import unittest
 
@@ -7,7 +9,10 @@ from src.pdb_dataset_builder import _ca_rmsd_to_mean_structure
 
 
 class CaRmsdToMeanStructureTests(unittest.TestCase):
+    """Verify RMSD aggregation across models and atoms."""
+
     def test_uses_root_mean_squared_deviation_across_models_and_atoms(self) -> None:
+        """Compute the square root of the mean squared coordinate deviation."""
         coords = np.array(
             [
                 [[0.0, 0.0, 0.0]],

@@ -1,3 +1,5 @@
+"""Tests for building solution-NMR molecular-weight datasets."""
+
 import tempfile
 import unittest
 from pathlib import Path
@@ -11,11 +13,15 @@ from src.pdb_dataset_builder import (
 
 
 class _WeightClient(RCSBClient):
+    """Provide deterministic weight-query responses for builder tests."""
+
     def __init__(self) -> None:
+        """Initialize the fake client with the default build configuration."""
         super().__init__(DatasetBuildConfig())
         self.last_payload: dict | None = None
 
     def _post_json(self, url: str, payload: dict) -> dict:
+        """Return weight fixture data selected from ``payload`` identifiers."""
         self.last_payload = payload
         return {
             "data": {
@@ -36,7 +42,10 @@ class _WeightClient(RCSBClient):
 
 
 class SolutionNMRWeightTests(unittest.TestCase):
+    """Verify molecular-weight retrieval and CSV serialization."""
+
     def test_fetches_only_entry_total_weight(self) -> None:
+        """Use only the total deposited entry molecular weight."""
         client = _WeightClient()
 
         records = client.fetch_solution_nmr_weight_records_for_ids(["1ABC", "2DEF"])
@@ -56,6 +65,7 @@ class SolutionNMRWeightTests(unittest.TestCase):
         self.assertNotIn("polymer_entities", query)
 
     def test_writes_single_weight_column(self) -> None:
+        """Write one normalized molecular-weight column to CSV."""
         with tempfile.TemporaryDirectory() as tmpdir:
             output_path = Path(tmpdir) / "weights.csv"
 

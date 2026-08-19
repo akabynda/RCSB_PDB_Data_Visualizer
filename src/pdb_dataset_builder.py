@@ -1,3 +1,5 @@
+"""Build reproducible RCSB PDB-derived CSV datasets for scientific plots."""
+
 from __future__ import annotations
 
 import argparse
@@ -41,10 +43,12 @@ class ActiveDatasetWarningLogFilter(logging.Filter):
     """Route warnings to the log files of the dataset currently being built."""
 
     def __init__(self, csv_output_path: Path) -> None:
+        """Track the CSV whose active build should receive warning records."""
         super().__init__()
         self.csv_output_path = csv_output_path
 
     def filter(self, record: logging.LogRecord) -> bool:
+        """Return whether ``record`` belongs in this dataset's warning log."""
         return self.csv_output_path in _ACTIVE_DATASET_WARNING_LOG_PATHS
 
 
@@ -80,6 +84,7 @@ class NMRHomologyQueryIneligibleError(Exception):
     """Signal that no homology search was performed for an NMR entry."""
 
     def __init__(self, entry_id: str, reason: str) -> None:
+        """Store the ineligible entry identifier and explanatory reason."""
         self.entry_id = entry_id
         self.reason = reason
         super().__init__(f"{entry_id}: {reason}")
@@ -89,6 +94,7 @@ class NMRCoreContainsHetatmError(NMRHomologyQueryIneligibleError):
     """Signal that an NMR core is ineligible because it contains HETATM CA."""
 
     def __init__(self, entry_id: str) -> None:
+        """Create an error for an entry whose core contains HETATM CA atoms."""
         super().__init__(entry_id, "STRIDE core contains HETATM CA residues")
 
 
@@ -97,6 +103,8 @@ class XrayHomologEvaluationError(Exception):
 
 
 class ChainSubsetSelect(Select):
+    """Select Biopython chain objects by identity for PDB serialization."""
+
     def __init__(self, chain_object_ids: set[int]) -> None:
         """Store the selected Biopython chain object identities."""
         self.chain_object_ids = chain_object_ids
@@ -124,6 +132,8 @@ print(f"Using up to {DEFAULT_MAX_WORKERS} worker threads for concurrent tasks")
 
 
 class ExperimentalMethod(Enum):
+    """Map supported experimental methods to labels and RCSB query values."""
+
     X_RAY = ("X-ray", ("X-RAY DIFFRACTION",))
     CRYO_EM = ("cryo-EM", ("ELECTRON MICROSCOPY",))
     NMR = ("NMR", ("SOLUTION NMR", "SOLID-STATE NMR"))
@@ -140,6 +150,8 @@ class ExperimentalMethod(Enum):
 
 
 class DatasetKind(str, Enum):
+    """Identify each CSV dataset that the command-line builder can produce."""
+
     METHOD_COUNTS = "method_counts"
     MEMBRANE_PROTEIN_COUNTS = "membrane_protein_counts"
     SOLUTION_NMR_PROGRAM_COUNTS = "solution_nmr_program_counts"
@@ -169,6 +181,8 @@ class DatasetKind(str, Enum):
 
 @dataclass(frozen=True)
 class DatasetBuildConfig:
+    """Configure RCSB endpoints, batching, retries, caches, and concurrency."""
+
     search_url: str = "https://search.rcsb.org/rcsbsearch/v2/query"
     graphql_url: str = "https://data.rcsb.org/graphql"
     page_size: int = 10000
@@ -182,6 +196,8 @@ class DatasetBuildConfig:
 
 @dataclass(frozen=True)
 class CAResidueRecord:
+    """Describe one modeled alpha-carbon residue parsed from a PDB file."""
+
     resid: int
     identity: str
     is_standard_atom: bool
@@ -189,6 +205,8 @@ class CAResidueRecord:
 
 @dataclass(frozen=True)
 class YearlyCountRecord:
+    """Store the annual structure count for an experimental method."""
+
     year: int
     method: str
     count: int
@@ -196,12 +214,16 @@ class YearlyCountRecord:
 
 @dataclass(frozen=True)
 class MembraneYearlyCountRecord:
+    """Store the number of membrane-protein structures in one year."""
+
     year: int
     count: int
 
 
 @dataclass(frozen=True)
 class SolutionNMRProgramYearlyCountRecord:
+    """Store a yearly count for one solution-NMR refinement program."""
+
     year: int
     program: str
     count: int
@@ -209,6 +231,8 @@ class SolutionNMRProgramYearlyCountRecord:
 
 @dataclass(frozen=True)
 class SolutionNMRMonomerProgramClusterAssignmentRecord:
+    """Store one monomer's weighted assignment to a software cluster."""
+
     entry_id: str
     year: int
     cluster_id: str
@@ -220,6 +244,8 @@ class SolutionNMRMonomerProgramClusterAssignmentRecord:
 
 @dataclass(frozen=True)
 class SolutionNMRMonomerProgramClusterSummaryRecord:
+    """Store yearly count and quality metrics for a software cluster."""
+
     year: int
     cluster_id: str
     cluster_name: str
@@ -231,6 +257,8 @@ class SolutionNMRMonomerProgramClusterSummaryRecord:
 
 @dataclass(frozen=True)
 class SolutionNMRMonomerProgramClusterYearlySummaryRecord:
+    """Store aggregate monomer count and quality metrics for one year."""
+
     year: int
     structure_count: int
     avg_ramachandran_outliers_percent: float | None
@@ -240,6 +268,8 @@ class SolutionNMRMonomerProgramClusterYearlySummaryRecord:
 
 @dataclass(frozen=True)
 class SolutionNMRMonomerProgramClusterTotalRecord:
+    """Store all-years count and quality metrics for a software cluster."""
+
     cluster_name: str
     structure_count: float
     avg_ramachandran_outliers_percent: float | None
@@ -249,6 +279,8 @@ class SolutionNMRMonomerProgramClusterTotalRecord:
 
 @dataclass(frozen=True)
 class SolutionNMRWeightRecord:
+    """Store a solution-NMR entry's deposition year and molecular weight."""
+
     entry_id: str
     year: int
     molecular_weight_kda: float
@@ -256,6 +288,8 @@ class SolutionNMRWeightRecord:
 
 @dataclass(frozen=True)
 class SolutionNMRMonomerExperimentsRecord:
+    """Store experiments reported for one solution-NMR monomer entry."""
+
     entry_id: str
     year: int
     nmr_experiments_conducted: tuple[str, ...]
@@ -263,6 +297,8 @@ class SolutionNMRMonomerExperimentsRecord:
 
 @dataclass(frozen=True)
 class SolutionNMRMonomerStrideModeledFirstModelRecord:
+    """Store STRIDE composition for an entry's first modeled chain."""
+
     entry_id: str
     year: int
     chain_id: str
@@ -281,6 +317,8 @@ class SolutionNMRMonomerStrideModeledFirstModelRecord:
 
 @dataclass(frozen=True)
 class SolutionNMRMonomerModeledFirstModelSeedRecord:
+    """Identify an eligible solution-NMR monomer and its modeled chain."""
+
     entry_id: str
     year: int
     chain_id: str
@@ -288,6 +326,8 @@ class SolutionNMRMonomerModeledFirstModelSeedRecord:
 
 @dataclass(frozen=True)
 class SolutionNMRMonomerPrecisionRecord:
+    """Store ensemble precision measured over a modeled structural core."""
+
     entry_id: str
     year: int
     chain_id: str
@@ -301,6 +341,8 @@ class SolutionNMRMonomerPrecisionRecord:
 
 @dataclass(frozen=True)
 class SolutionNMRMonomerQualityRecord:
+    """Store validation quality metrics for a solution-NMR monomer."""
+
     entry_id: str
     year: int
     clashscore: float
@@ -310,6 +352,8 @@ class SolutionNMRMonomerQualityRecord:
 
 @dataclass(frozen=True)
 class SolutionNMRMonomerXrayHomologRecord:
+    """Store X-ray homolog search results for a solution-NMR monomer."""
+
     entry_id: str
     year: int
     sequence_identity_percent: int
@@ -323,6 +367,8 @@ class SolutionNMRMonomerXrayHomologRecord:
 
 @dataclass(frozen=True)
 class SolutionNMRMonomerXrayHomologSeedRecord:
+    """Identify a solution-NMR monomer chain for an X-ray homolog search."""
+
     entry_id: str
     year: int
     chain_id: str
@@ -330,6 +376,8 @@ class SolutionNMRMonomerXrayHomologSeedRecord:
 
 @dataclass(frozen=True)
 class XrayEntityGroupMappingRecord:
+    """Map an X-ray polymer entity and chains to a sequence-identity group."""
+
     polymer_entity_id: str
     entry_id: str
     chain_ids: tuple[str, ...]
@@ -338,6 +386,8 @@ class XrayEntityGroupMappingRecord:
 
 @dataclass(frozen=True)
 class SolutionNMRMonomerXrayRmsdRecord:
+    """Store an NMR-to-X-ray alpha-carbon RMSD measurement."""
+
     entry_id: str
     year: int
     sequence_identity_percent: int
@@ -358,6 +408,8 @@ class SolutionNMRMonomerXrayRmsdRecord:
 
 @dataclass(frozen=True)
 class SolutionNMRMonomerXrayRmsdExtremesRecord:
+    """Store the minimum and maximum X-ray RMSD matches for an NMR entry."""
+
     entry_id: str
     year: int
     sequence_identity_percent: int
@@ -388,6 +440,8 @@ class SolutionNMRMonomerXrayRmsdExtremesRecord:
 
 @dataclass(frozen=True)
 class XrayPolymerEntityCandidateRecord:
+    """Describe an X-ray polymer entity eligible for RMSD comparison."""
+
     polymer_entity_id: str
     entry_id: str
     chain_ids: tuple[str, ...]
@@ -1416,6 +1470,7 @@ def extract_raw_refinement_program_text_from_pdb(pdb_path: Path) -> str:
     collecting_nmr_software = False
 
     def flush_nmr_software() -> None:
+        """Append and clear the currently buffered NMR software text."""
         nonlocal nmr_software_parts
         if nmr_software_parts:
             value = " ".join(nmr_software_parts).strip()
@@ -1474,17 +1529,6 @@ def extract_refinement_programs_from_pdb(pdb_path: Path) -> set[str]:
         if normalized is not None:
             programs.add(normalized)
     return programs
-
-
-def _classify_normalized_program_cluster(
-    program: str,
-) -> tuple[str, str] | None:
-    """Assign one normalized refinement program name to a broad cluster."""
-    matches = _extract_program_cluster_matches(program)
-    if not matches:
-        return None
-    _, cluster_id, cluster_name = matches[0]
-    return cluster_id, cluster_name
 
 
 def _extract_program_cluster_matches(
@@ -2447,16 +2491,12 @@ def _ca_rmsd_to_mean_structure(coords: np.ndarray) -> float:
     return float(np.sqrt(np.mean(squared_distances)))
 
 
-def _average_structure_aligned_to_first_model(coords: np.ndarray) -> np.ndarray:
-    """Build an average structure after aligning models to the first model."""
-    aligned = _coordinates_aligned_to_first_model(coords)
-    return np.mean(aligned, axis=0)
-
-
 MEMBRANE_ANNOTATION_TYPES: tuple[str, ...] = ("OPM", "PDBTM", "MemProtMD", "mpstruc")
 
 
 class RCSBClient:
+    """Query RCSB services and retrieve cached coordinate files."""
+
     def __init__(self, config: DatasetBuildConfig) -> None:
         """Initialize the RCSB API client session and configuration."""
         self.config = config
@@ -3597,6 +3637,8 @@ class RCSBClient:
 
 
 class PDBMethodYearlyBuilder:
+    """Build annual PDB structure counts by experimental method."""
+
     def __init__(self, client: RCSBClient, config: DatasetBuildConfig) -> None:
         """Initialize a yearly experimental-method count builder."""
         self.client = client
@@ -3646,6 +3688,8 @@ class PDBMethodYearlyBuilder:
 
 
 class SolutionNMRProgramYearlyBuilder:
+    """Build annual counts of refinement programs used by solution NMR."""
+
     def __init__(
         self,
         client: RCSBClient,
@@ -3774,6 +3818,8 @@ class SolutionNMRProgramYearlyBuilder:
 
 
 class SolutionNMRMonomerProgramClusterBuilder:
+    """Build weighted software-cluster assignments for NMR monomers."""
+
     def __init__(
         self,
         quality_records: list[SolutionNMRMonomerQualityRecord],
@@ -3934,6 +3980,8 @@ class SolutionNMRMonomerProgramClusterBuilder:
 
 
 class MembraneProteinYearlyBuilder:
+    """Build yearly membrane-protein counts overall and by method."""
+
     def __init__(self, client: RCSBClient, config: DatasetBuildConfig) -> None:
         """Initialize the membrane-protein yearly count builder."""
         self.client = client
@@ -4029,6 +4077,8 @@ class MembraneProteinYearlyBuilder:
 
 
 class SolutionNMRWeightBuilder:
+    """Build molecular-weight records for eligible solution-NMR entries."""
+
     def __init__(self, client: RCSBClient, config: DatasetBuildConfig) -> None:
         """Initialize the SOLUTION NMR molecular-weight builder."""
         self.client = client
@@ -4054,6 +4104,8 @@ class SolutionNMRWeightBuilder:
 
 
 class SolutionNMRMonomerExperimentsBuilder:
+    """Build reported-experiment records for solution-NMR monomers."""
+
     def __init__(self, client: RCSBClient, config: DatasetBuildConfig) -> None:
         """Initialize the SOLUTION NMR monomer experiment builder."""
         self.client = client
@@ -4078,6 +4130,8 @@ class SolutionNMRMonomerExperimentsBuilder:
 
 
 class SolutionNMRMonomerStrideModeledFirstModelBuilder:
+    """Build STRIDE records for first modeled solution-NMR monomer chains."""
+
     def __init__(
         self,
         client: RCSBClient,
@@ -4138,6 +4192,8 @@ class SolutionNMRMonomerStrideModeledFirstModelBuilder:
 
 
 class SolutionNMRMonomerPrecisionBuilder:
+    """Compute ensemble precision for solution-NMR monomer cores."""
+
     def __init__(
         self,
         client: RCSBClient,
@@ -4260,6 +4316,8 @@ class SolutionNMRMonomerPrecisionBuilder:
 class SolutionNMRMonomerPrecisionStrideModeledFirstModelBuilder(
     SolutionNMRMonomerPrecisionBuilder
 ):
+    """Build precision records using STRIDE-defined modeled core ranges."""
+
     def __init__(
         self,
         client: RCSBClient,
@@ -4396,6 +4454,8 @@ class SolutionNMRMonomerPrecisionStrideModeledFirstModelBuilder(
 
 
 class SolutionNMRMonomerQualityBuilder:
+    """Build validation-quality records for solution-NMR monomers."""
+
     def __init__(self, client: RCSBClient, config: DatasetBuildConfig) -> None:
         """Initialize the SOLUTION NMR monomer quality builder."""
         self.client = client
@@ -4421,6 +4481,8 @@ class SolutionNMRMonomerQualityBuilder:
 
 
 class SolutionNMRMonomerXrayHomologBuilder:
+    """Find sequence-identical X-ray homologs for solution-NMR monomers."""
+
     def __init__(
         self,
         client: RCSBClient,
@@ -4794,12 +4856,15 @@ class SolutionNMRMonomerXrayHomologBuilder:
             )
 
         def key_fn(record):
+            """Return the stable chronological sort key for a homolog record."""
             return record.year, record.entry_id
 
         return sorted(records_95, key=key_fn), sorted(records_100, key=key_fn)
 
 
 class SolutionNMRMonomerXrayRmsdBuilder:
+    """Compute alpha-carbon RMSDs between NMR entries and X-ray homologs."""
+
     def __init__(
         self,
         client: RCSBClient,

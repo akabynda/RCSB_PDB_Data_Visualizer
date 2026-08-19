@@ -1,3 +1,5 @@
+"""Render publication-ready plots from the generated RCSB PDB CSV datasets."""
+
 from __future__ import annotations
 
 import argparse
@@ -22,6 +24,8 @@ TITLE_FONTSIZE: float = 12.0
 
 
 class PlotKind(str, Enum):
+    """Identify each plot family supported by the command-line interface."""
+
     METHOD_COUNTS = "method_counts"
     MEMBRANE_PROTEIN_COUNTS = "membrane_protein_counts"
     SOLUTION_NMR_PROGRAM_COUNTS = "solution_nmr_program_counts"
@@ -61,6 +65,8 @@ class PlotKind(str, Enum):
 
 @dataclass(frozen=True)
 class PlotConfig:
+    """Configure plot dimensions, labels, colors, and output variants."""
+
     height_inches: float = DEFAULT_FIGURE_HEIGHT_INCHES
     aspect_ratio: float = (
         JMR_TWO_COLUMN_WIDTH_INCHES / DEFAULT_FIGURE_HEIGHT_INCHES
@@ -99,7 +105,7 @@ class PlotConfig:
     nmr_monomer_program_cluster_share_title: str = (
         "Share of NMR structures by structure-determination software"
     )
-    nmr_monomer_program_cluster_share_y_label: str = "Allocated structure share (%)"
+    nmr_monomer_program_cluster_share_y_label: str = "Share of structures (%)"
     cumulative_title: str = (
         "Cumulative number of PDB structures by deposition year and experimental method"
     )
@@ -210,9 +216,9 @@ class PlotConfig:
     )
     nmr_monomer_xray_min_rmsd_y_label: str = "Mean minimum RMSD(CA) (Å)"
     nmr_monomer_xray_min_median_rmsd_title: str = (
-        "Median RMSD(CA) of NMR structures to minimum-RMSD X-ray analog by deposition year"
+        "Median RMSD between NMR and analog X-ray structures by deposition year"
     )
-    nmr_monomer_xray_min_median_rmsd_y_label: str = "Median minimum RMSD(CA) (Å)"
+    nmr_monomer_xray_min_median_rmsd_y_label: str = "Median RMSD(CA) (Å)"
     nmr_monomer_xray_rmsd_extremes_mean_title: str = (
         "Mean RMSD(CA) to X-ray analogs by deposition year"
     )
@@ -246,13 +252,19 @@ class PlotConfig:
     )
 
     def figure_size(self, height_scale: float = 1.0) -> tuple[float, float]:
+        """Return figure width and scaled height in inches."""
         width = self.height_inches * self.aspect_ratio
         height = self.height_inches * height_scale
         return (width, height)
 
 
-NMR_WEIGHT_BINS: tuple[float, ...] = (0.0, 10.0, 20.0, float("inf"))
-NMR_WEIGHT_LABELS: tuple[str, ...] = ("<10 kDa", "10-20 kDa", "≥20 kDa")
+NMR_WEIGHT_BINS: tuple[float, ...] = (
+    0.0,
+    10.0,
+    np.nextafter(20.0, float("inf")),
+    float("inf"),
+)
+NMR_WEIGHT_LABELS: tuple[str, ...] = ("<10 kDa", "10-20 kDa", ">20 kDa")
 XRAY_HOMOLOG_TIMING_LABELS: tuple[str, str, str] = (
     "X-ray analog released prior to deposition",
     "X-ray analog released at a later date",
@@ -299,6 +311,7 @@ YEAR_MINOR_TICK_STEP: int = 1
 
 @lru_cache(maxsize=1)
 def _has_arial_font() -> bool:
+    """Return whether Matplotlib can resolve the preferred Arial font."""
     target = "arial"
     for font in font_manager.fontManager.ttflist:
         if font.name.strip().casefold() == target:
@@ -307,6 +320,7 @@ def _has_arial_font() -> bool:
 
 
 def parse_plot_kinds(raw_value: str) -> list[PlotKind]:
+    """Parse a comma-separated plot selection into plot-kind values."""
     if raw_value.strip().lower() == "all":
         return [
             PlotKind.METHOD_COUNTS,
@@ -345,6 +359,7 @@ def parse_plot_kinds(raw_value: str) -> list[PlotKind]:
 
 
 def parse_positive_float(raw_value: str) -> float:
+    """Parse a positive floating-point command-line value."""
     try:
         value = float(raw_value)
     except ValueError as exc:
@@ -359,12 +374,16 @@ def parse_positive_float(raw_value: str) -> float:
 
 
 class PDBScientificPlotter:
+    """Prepare tabular PDB data and render consistent scientific figures."""
+
     def __init__(self, config: PlotConfig, generate_svg: bool = False) -> None:
+        """Initialize the plotter with output styling and SVG preferences."""
         self.config = config
         self.generate_svg = generate_svg
         self._csv_cache: dict[Path, pd.DataFrame] = {}
 
     def _read_csv(self, data_path: Path) -> pd.DataFrame:
+        """Read and cache the CSV table at ``data_path``."""
         resolved = data_path.resolve()
         if resolved not in self._csv_cache:
             self._csv_cache[resolved] = pd.read_csv(resolved)
@@ -372,6 +391,7 @@ class PDBScientificPlotter:
 
     @staticmethod
     def _scientific_style() -> None:
+        """Apply the shared publication-oriented Matplotlib style."""
         if not _has_arial_font():
             warnings.warn(
                 "Arial is not available in matplotlib font registry. "
@@ -397,6 +417,7 @@ class PDBScientificPlotter:
 
     @staticmethod
     def _configure_year_axis_ticks(ax: plt.Axes) -> None:
+        """Configure major and minor year ticks on ``ax``."""
         ax.xaxis.set_major_locator(MultipleLocator(YEAR_MAJOR_TICK_STEP))
         ax.xaxis.set_major_formatter(
             FuncFormatter(
@@ -414,6 +435,7 @@ class PDBScientificPlotter:
 
     @staticmethod
     def _visible_major_step(axis: plt.Axis) -> float | None:
+        """Return the uniform spacing between visible major ticks, if any."""
         tick_locs = axis.get_majorticklocs()
         if len(tick_locs) < 2:
             return None
@@ -441,6 +463,7 @@ class PDBScientificPlotter:
 
     @staticmethod
     def _integer_minor_subdivisions(step: float) -> int | None:
+        """Choose readable minor-tick subdivisions for an integer major step."""
         rounded_step = round(step)
         if abs(step - rounded_step) > 1e-6:
             return None
@@ -453,6 +476,7 @@ class PDBScientificPlotter:
 
     @staticmethod
     def _has_categorical_x_ticks(ax: plt.Axes) -> bool:
+        """Return whether visible x tick labels represent categories."""
         labels = [label.get_text().strip() for label in ax.get_xticklabels()]
         nonempty = [label for label in labels if label]
         if not nonempty:
@@ -466,6 +490,7 @@ class PDBScientificPlotter:
 
     @classmethod
     def _configure_minor_ticks(cls, ax: plt.Axes, use_year_x_ticks: bool) -> None:
+        """Add minor ticks where major tick spacing supports subdivisions."""
         y_step = cls._visible_major_step(ax.yaxis)
         if y_step is not None:
             y_subdivisions = cls._integer_minor_subdivisions(y_step)
@@ -485,6 +510,7 @@ class PDBScientificPlotter:
 
     @staticmethod
     def _remove_zero_y_tick(ax: plt.Axes) -> None:
+        """Remove the zero label from the y axis while retaining other ticks."""
         y_bottom, y_top = ax.get_ylim()
         if y_bottom >= 0.0:
             filtered_ticks = [
@@ -508,6 +534,7 @@ class PDBScientificPlotter:
         *,
         y_tick_labels_on_both_sides: bool = False,
     ) -> None:
+        """Show a full axes box and optionally label both y-axis sides."""
         for spine in ax.spines.values():
             spine.set_visible(True)
 
@@ -538,6 +565,7 @@ class PDBScientificPlotter:
 
     @staticmethod
     def _configure_open_axes(ax: plt.Axes) -> None:
+        """Hide the top and right spines for the open-axes output variant."""
         ax.spines["left"].set_visible(True)
         ax.spines["bottom"].set_visible(True)
         ax.spines["right"].set_visible(False)
@@ -550,6 +578,7 @@ class PDBScientificPlotter:
         ax: plt.Axes,
         title: str,
     ) -> None:
+        """Set the configured scientific figure title on ``ax``."""
         ax.set_title(
             title,
             pad=10,
@@ -559,6 +588,7 @@ class PDBScientificPlotter:
 
     @staticmethod
     def _add_legend(ax: plt.Axes, **kwargs: Any) -> None:
+        """Add a consistently framed legend using supplied options."""
         legend = ax.legend(
             frameon=True,
             fancybox=False,
@@ -571,16 +601,19 @@ class PDBScientificPlotter:
             legend.get_frame().set_linewidth(0.8)
 
     def _titleless_output_path(self, path: Path) -> Path:
+        """Return the output path for a figure variant without a title."""
         return path.with_name(
             f"{path.stem}{self.config.titleless_suffix}{path.suffix}"
         )
 
     def _open_axes_output_path(self, path: Path) -> Path:
+        """Return the output path for the open-axes figure variant."""
         return path.with_name(
             f"{path.stem}{self.config.open_axes_suffix}{path.suffix}"
         )
 
     def _grouped_figure_output_path(self, path: Path) -> Path:
+        """Place related figure variants in a directory named for the base plot."""
         stem = path.stem
         for suffix in (
             f"{self.config.titleless_suffix}{self.config.open_axes_suffix}",
@@ -599,6 +632,7 @@ class PDBScientificPlotter:
         fig: plt.Figure,
         tight_layout_rect: tuple[float, float, float, float] | None,
     ) -> None:
+        """Apply tight layout with an optional normalized bounding rectangle."""
         if tight_layout_rect is None:
             fig.tight_layout()
         else:
@@ -613,6 +647,7 @@ class PDBScientificPlotter:
         savefig_bbox_inches: str | None = None,
         savefig_pad_inches: float = 0.1,
     ) -> None:
+        """Save a PNG and, when enabled, an SVG using configured paths."""
         output_png = self._grouped_figure_output_path(output_png)
         output_png.parent.mkdir(parents=True, exist_ok=True)
         fig.savefig(
@@ -644,6 +679,8 @@ class PDBScientificPlotter:
         savefig_pad_inches: float = 0.1,
         height_scale: float = 1.0,
     ) -> None:
+        """Draw and save titled, titleless, boxed, and open-axes variants."""
+
         def render_variant(
             variant_output_png: Path,
             variant_output_svg: Path,
@@ -651,6 +688,7 @@ class PDBScientificPlotter:
             with_title: bool,
             open_axes: bool = False,
         ) -> None:
+            """Render one requested title and axes-style combination."""
             fig, ax = plt.subplots(figsize=self.config.figure_size(height_scale))
             draw_fn(ax)
             if use_year_x_ticks:
@@ -696,8 +734,10 @@ class PDBScientificPlotter:
             with_title=False,
             open_axes=True,
         )
+
     @staticmethod
     def _limit_year_column(table: pd.DataFrame) -> pd.DataFrame:
+        """Return rows through the configured maximum plotting year."""
         if "year" not in table.columns:
             return table
         return table.loc[table["year"] <= MAX_PLOT_YEAR].copy()
@@ -706,6 +746,7 @@ class PDBScientificPlotter:
     def _validate_required_columns(
         df: pd.DataFrame, required_columns: set[str], dataset_name: str
     ) -> None:
+        """Raise an error when ``df`` lacks required dataset columns."""
         missing = required_columns - set(df.columns)
         if missing:
             raise ValueError(
@@ -720,6 +761,7 @@ class PDBScientificPlotter:
         column_types: dict[str, type[Any]],
         dataset_name: str,
     ) -> pd.DataFrame:
+        """Validate, copy, and cast a dataset table to requested column types."""
         cls._validate_required_columns(df, required_columns, dataset_name)
         prepared = df.copy()
         for column, dtype in column_types.items():
@@ -730,6 +772,7 @@ class PDBScientificPlotter:
     def _step_edges(
         x_values: pd.Index[Any] | pd.Series[Any] | np.ndarray,
     ) -> np.ndarray:
+        """Convert step centers into bin-edge coordinates."""
         x_array = np.asarray(x_values, dtype=float)
         if x_array.size == 0:
             return np.array([], dtype=float)
@@ -743,6 +786,7 @@ class PDBScientificPlotter:
 
     @staticmethod
     def _step_values(y_values: pd.Series[Any] | np.ndarray) -> np.ndarray:
+        """Extend y values by one point for explicit post-step drawing."""
         y_array = np.asarray(y_values, dtype=float)
         if y_array.size == 0:
             return np.array([], dtype=float)
@@ -758,6 +802,7 @@ class PDBScientificPlotter:
         label: str | None = None,
         zorder: int | None = None,
     ) -> None:
+        """Draw one unfilled stair-step series on an axes object."""
         ax.stairs(
             values=np.asarray(y_values, dtype=float),
             edges=self._step_edges(x_values),
@@ -783,7 +828,10 @@ class PDBScientificPlotter:
         y_limits: tuple[float, float] | None = None,
         x_left: float | None = None,
     ) -> None:
+        """Render one line series to the requested PNG and SVG outputs."""
+
         def draw(ax: plt.Axes) -> None:
+            """Draw the configured line and optional limits and legend."""
             ax.plot(
                 x_values,
                 y_values,
@@ -820,7 +868,10 @@ class PDBScientificPlotter:
         use_step: bool = False,
         draw_order: Sequence[str] | None = None,
     ) -> None:
+        """Render multiple aligned line or step series from ``table``."""
+
         def draw(ax: plt.Axes) -> None:
+            """Draw each selected table column with consistent ordering."""
             columns = [
                 column
                 for column in (draw_order or list(table.columns))
@@ -872,7 +923,10 @@ class PDBScientificPlotter:
         y_bottom: float | None = None,
         x_left: float | None = None,
     ) -> None:
+        """Render a compatibility bar-series request as a step series."""
+
         def draw(ax: plt.Axes) -> None:
+            """Draw the step representation and apply requested limits."""
             # Keep `width` in the signature for compatibility with existing calls.
             _ = width
             self._plot_step_series(
@@ -899,6 +953,7 @@ class PDBScientificPlotter:
 
     @staticmethod
     def _build_weight_category_yearly_counts(table: pd.DataFrame) -> pd.DataFrame:
+        """Return yearly structure counts split into molecular-weight categories."""
         categorized = table.copy()
         categorized["weight_category"] = pd.cut(
             categorized["molecular_weight_kda"],
@@ -928,7 +983,10 @@ class PDBScientificPlotter:
         expand_step_xlim: bool = True,
         legend_loc: str = "upper left",
     ) -> None:
+        """Render yearly molecular-weight categories as a stacked area plot."""
+
         def draw(ax: plt.Axes) -> None:
+            """Draw continuous or step-aligned stacked category areas."""
             x_step_edges: np.ndarray | None = None
             if use_step_segments:
                 base = pd.Series(0.0, index=table.index, dtype=float)
@@ -985,7 +1043,10 @@ class PDBScientificPlotter:
         output_svg: Path,
         title: str,
     ) -> None:
+        """Render homolog availability timing shares as a stacked plot."""
+
         def draw(ax: plt.Axes) -> None:
+            """Draw cumulative layers for the three homolog timing states."""
             base = pd.Series(0.0, index=table.index, dtype=float)
             x_step_edges = self._step_edges(table.index)
             for idx, label in enumerate(XRAY_HOMOLOG_TIMING_LABELS):
@@ -1017,6 +1078,7 @@ class PDBScientificPlotter:
 
     @staticmethod
     def _homolog_share_series(table: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
+        """Return annual and cumulative shares of entries with X-ray homologs."""
         yearly_share = (
             table.groupby("year", as_index=True)["has_xray_homolog"]
             .mean()
@@ -1032,6 +1094,7 @@ class PDBScientificPlotter:
 
     @staticmethod
     def _prepare_method_count_table(df: pd.DataFrame) -> pd.DataFrame:
+        """Validate and pivot raw experimental-method counts by year."""
         PDBScientificPlotter._validate_required_columns(
             df=df,
             required_columns={"year", "method", "count"},
@@ -1047,6 +1110,7 @@ class PDBScientificPlotter:
 
     @staticmethod
     def _prepare_nmr_program_count_table(df: pd.DataFrame) -> pd.DataFrame:
+        """Validate and pivot solution-NMR refinement-program counts by year."""
         prepared = PDBScientificPlotter._prepare_typed_table(
             df=df,
             required_columns={"year", "program", "count"},
@@ -1063,6 +1127,7 @@ class PDBScientificPlotter:
 
     @staticmethod
     def _prepare_nmr_monomer_program_cluster_table(df: pd.DataFrame) -> pd.DataFrame:
+        """Validate and normalize the NMR software-cluster summary table."""
         PDBScientificPlotter._validate_required_columns(
             df=df,
             required_columns={
@@ -1092,6 +1157,7 @@ class PDBScientificPlotter:
 
     @staticmethod
     def _display_cluster_label(cluster_id: str, cluster_name: str) -> str:
+        """Return the preferred display label for a software cluster."""
         display = NMR_MONOMER_PROGRAM_CLUSTER_LABELS.get(cluster_id)
         if display is not None:
             return display
@@ -1099,6 +1165,7 @@ class PDBScientificPlotter:
 
     @classmethod
     def _cluster_column_labels(cls) -> list[str]:
+        """Return display labels in the canonical software-cluster order."""
         return [
             cls._display_cluster_label(cluster_id=cluster_id, cluster_name=cluster_id)
             for cluster_id in NMR_MONOMER_PROGRAM_CLUSTER_ORDER
@@ -1111,6 +1178,7 @@ class PDBScientificPlotter:
         value_column: str,
         fill_value: float | None,
     ) -> pd.DataFrame:
+        """Pivot one cluster metric into a year-by-cluster table."""
         pivoted = (
             table.pivot(index="year", columns="cluster_id", values=value_column)
             .reindex(columns=list(NMR_MONOMER_PROGRAM_CLUSTER_ORDER))
@@ -1135,9 +1203,11 @@ class PDBScientificPlotter:
         legend_outside: bool = False,
         height_scale: float = 1.0,
     ) -> None:
+        """Render yearly software-cluster values as a stacked area plot."""
         cluster_labels = list(table.columns)
 
         def draw(ax: plt.Axes) -> None:
+            """Draw continuous or step-aligned software-cluster layers."""
             x_step_edges: np.ndarray | None = None
             if use_step_segments:
                 base = pd.Series(0.0, index=table.index, dtype=float)
@@ -1220,6 +1290,8 @@ class PDBScientificPlotter:
         draw_fn: Callable[[plt.Axes], None],
         height_scale: float = 1.0,
     ) -> None:
+        """Render stackplot variants with a shared legend below the axes."""
+
         def render_variant(
             variant_output_png: Path,
             variant_output_svg: Path,
@@ -1227,6 +1299,7 @@ class PDBScientificPlotter:
             with_title: bool,
             open_axes: bool = False,
         ) -> None:
+            """Render one title and axes-style variant with a bottom legend."""
             fig = plt.figure(figsize=self.config.figure_size(height_scale))
             ax = fig.add_axes((0.11, 0.285, 0.84, 0.585 if with_title else 0.665))
             draw_fn(ax)
@@ -1294,6 +1367,7 @@ class PDBScientificPlotter:
         table: pd.DataFrame,
         value_column: str,
     ) -> tuple[np.ndarray, list[str], list[int]]:
+        """Return a cluster-by-year metric matrix with axis labels."""
         cluster_rows = (
             table[["cluster_id", "cluster_name"]]
             .drop_duplicates()
@@ -1318,6 +1392,7 @@ class PDBScientificPlotter:
         output_png: Path,
         output_svg: Path,
     ) -> None:
+        """Render count and quality heatmaps for software clusters."""
         metrics = (
             ("structure_count", "Weighted structure score", "Blues"),
             (
@@ -1442,6 +1517,7 @@ class PDBScientificPlotter:
 
     @staticmethod
     def _prepare_membrane_count_table(df: pd.DataFrame) -> pd.DataFrame:
+        """Validate and normalize yearly membrane-protein counts."""
         prepared = PDBScientificPlotter._prepare_typed_table(
             df=df,
             required_columns={"year", "count"},
@@ -1452,6 +1528,7 @@ class PDBScientificPlotter:
 
     @staticmethod
     def _prepare_nmr_weight_table(df: pd.DataFrame) -> pd.DataFrame:
+        """Validate and normalize solution-NMR molecular-weight records."""
         prepared = PDBScientificPlotter._prepare_typed_table(
             df=df,
             required_columns={"entry_id", "year", "molecular_weight_kda"},
@@ -1462,6 +1539,7 @@ class PDBScientificPlotter:
 
     @staticmethod
     def _period_series(table: pd.DataFrame) -> dict[str, pd.Series]:
+        """Split molecular weights into the three historical periods."""
         return {
             "Before 1996": table.loc[table["year"] < 1996, "molecular_weight_kda"],
             "1996-2006": table.loc[
@@ -1479,11 +1557,13 @@ class PDBScientificPlotter:
         cumulative_output_png: Path,
         cumulative_output_svg: Path,
     ) -> None:
+        """Render annual and cumulative experimental-method counts from CSV."""
         table = self._prepare_method_count_table(self._read_csv(data_path))
         cumulative_table = table.cumsum()
         self._scientific_style()
 
         def draw(ax: plt.Axes, source: pd.DataFrame, use_step: bool) -> None:
+            """Draw the available method columns from a yearly table."""
             for col, color in [
                 ("X-ray", self.config.xray_color),
                 ("NMR", self.config.nmr_color),
@@ -1536,10 +1616,12 @@ class PDBScientificPlotter:
         cumulative_title: str,
         cumulative_y_label: str,
     ) -> None:
+        """Render annual and cumulative plots from a prepared method table."""
         cumulative_table = table.cumsum()
         self._scientific_style()
 
         def draw(ax: plt.Axes, source: pd.DataFrame, use_step: bool) -> None:
+            """Draw the prepared method series as steps or lines."""
             for col, color in [
                 ("X-ray", self.config.xray_color),
                 ("NMR", self.config.nmr_color),
@@ -1587,6 +1669,7 @@ class PDBScientificPlotter:
         annual_output_svg: Path,
         top_n: int = NMR_PROGRAM_TOP_N,
     ) -> None:
+        """Render annual counts for the most-used NMR refinement programs."""
         table = self._prepare_nmr_program_count_table(self._read_csv(data_path))
         if table.empty:
             raise ValueError("Solution NMR program count CSV is empty.")
@@ -1600,6 +1683,7 @@ class PDBScientificPlotter:
         self._scientific_style()
 
         def draw(ax: plt.Axes) -> None:
+            """Draw one step series for each selected refinement program."""
             colors = plt.cm.tab10.colors
             for idx, program in enumerate(filtered_table.columns):
                 self._plot_step_series(
@@ -1635,6 +1719,7 @@ class PDBScientificPlotter:
         metrics_output_png: Path,
         metrics_output_svg: Path,
     ) -> None:
+        """Render software-cluster shares and quality-metric heatmaps."""
         table = self._prepare_nmr_monomer_program_cluster_table(
             self._read_csv(data_path)
         )
@@ -1706,6 +1791,7 @@ class PDBScientificPlotter:
         max_output_png: Path,
         max_output_svg: Path,
     ) -> None:
+        """Render annual mean, median, and maximum NMR molecular weights."""
         table = self._prepare_nmr_weight_table(self._read_csv(data_path))
         stats = (
             table.groupby("year", as_index=True)["molecular_weight_kda"]
@@ -1758,6 +1844,7 @@ class PDBScientificPlotter:
         method_cumulative_output_png: Path,
         method_cumulative_output_svg: Path,
     ) -> None:
+        """Render overall and method-specific membrane-protein counts."""
         table = self._prepare_membrane_count_table(self._read_csv(data_path))
         cumulative = table.copy()
         cumulative["count"] = cumulative["count"].cumsum()
@@ -1799,6 +1886,7 @@ class PDBScientificPlotter:
     def plot_solution_nmr_period_boxplot(
         self, data_path: Path, output_png: Path, output_svg: Path
     ) -> None:
+        """Render molecular-weight distributions for three historical periods."""
         table = self._prepare_nmr_weight_table(self._read_csv(data_path))
         periods = self._period_series(table)
         labels = list(periods.keys())
@@ -1806,6 +1894,7 @@ class PDBScientificPlotter:
         self._scientific_style()
 
         def draw(ax: plt.Axes) -> None:
+            """Draw and color the period-specific box plots."""
             bp = ax.boxplot(
                 values, tick_labels=labels, patch_artist=True, showfliers=False
             )
@@ -1833,6 +1922,7 @@ class PDBScientificPlotter:
     def plot_solution_nmr_period_area(
         self, data_path: Path, output_png: Path, output_svg: Path
     ) -> None:
+        """Render cumulative NMR counts by molecular-weight category."""
         table = self._prepare_nmr_weight_table(self._read_csv(data_path))
         self._scientific_style()
         yearly = self._build_weight_category_yearly_counts(table)
@@ -1848,6 +1938,7 @@ class PDBScientificPlotter:
     def plot_solution_nmr_period_area_share(
         self, data_path: Path, output_png: Path, output_svg: Path
     ) -> None:
+        """Render annual shares of NMR structures by weight category."""
         table = self._prepare_nmr_weight_table(self._read_csv(data_path))
         self._scientific_style()
         yearly_counts = self._build_weight_category_yearly_counts(table)
@@ -1870,6 +1961,7 @@ class PDBScientificPlotter:
     def plot_solution_nmr_period_area_cumulative_share(
         self, data_path: Path, output_png: Path, output_svg: Path
     ) -> None:
+        """Render cumulative shares of NMR structures by weight category."""
         table = self._prepare_nmr_weight_table(self._read_csv(data_path))
         self._scientific_style()
         yearly_counts = self._build_weight_category_yearly_counts(table)
@@ -1893,6 +1985,7 @@ class PDBScientificPlotter:
     def _prepare_monomer_stride_modeled_first_model_table(
         df: pd.DataFrame,
     ) -> pd.DataFrame:
+        """Validate and normalize first-model STRIDE composition records."""
         prepared = PDBScientificPlotter._prepare_typed_table(
             df=df,
             required_columns={
@@ -1919,6 +2012,7 @@ class PDBScientificPlotter:
     def plot_solution_nmr_monomer_stride_modeled_first_model(
         self, data_path: Path, output_png: Path, output_svg: Path
     ) -> None:
+        """Render individual and annual mean structured-residue percentages."""
         table = self._prepare_monomer_stride_modeled_first_model_table(
             self._read_csv(data_path)
         )
@@ -1942,6 +2036,7 @@ class PDBScientificPlotter:
         )
 
         def draw(ax: plt.Axes) -> None:
+            """Draw entry-level observations and the yearly mean series."""
             ax.scatter(
                 filtered["year"],
                 filtered["stride_hgieb_percent"],
@@ -1971,6 +2066,7 @@ class PDBScientificPlotter:
 
     @staticmethod
     def _prepare_monomer_precision_table(df: pd.DataFrame) -> pd.DataFrame:
+        """Validate and normalize NMR ensemble-precision records."""
         prepared = PDBScientificPlotter._prepare_typed_table(
             df=df,
             required_columns={"entry_id", "year", "mean_rmsd_angstrom"},
@@ -1988,6 +2084,7 @@ class PDBScientificPlotter:
         title: str,
         y_label: str,
     ) -> None:
+        """Aggregate and render one annual ensemble-precision statistic."""
         table = self._prepare_monomer_precision_table(self._read_csv(data_path))
         self._scientific_style()
         yearly_rmsd = (
@@ -2010,6 +2107,7 @@ class PDBScientificPlotter:
     def plot_solution_nmr_monomer_precision_stride_modeled_first_model_mean(
         self, data_path: Path, output_png: Path, output_svg: Path
     ) -> None:
+        """Render annual mean precision for STRIDE-defined modeled cores."""
         self._plot_solution_nmr_monomer_precision_stat(
             data_path=data_path,
             output_png=output_png,
@@ -2022,6 +2120,7 @@ class PDBScientificPlotter:
     def plot_solution_nmr_monomer_precision_stride_modeled_first_model_median(
         self, data_path: Path, output_png: Path, output_svg: Path
     ) -> None:
+        """Render annual median precision for STRIDE-defined modeled cores."""
         self._plot_solution_nmr_monomer_precision_stat(
             data_path=data_path,
             output_png=output_png,
@@ -2033,6 +2132,7 @@ class PDBScientificPlotter:
 
     @staticmethod
     def _prepare_monomer_quality_table(df: pd.DataFrame) -> pd.DataFrame:
+        """Validate and normalize solution-NMR validation metrics."""
         prepared = PDBScientificPlotter._prepare_typed_table(
             df=df,
             required_columns={
@@ -2062,6 +2162,7 @@ class PDBScientificPlotter:
         side_output_png: Path,
         side_output_svg: Path,
     ) -> None:
+        """Render annual clash, Ramachandran, and side-chain quality means."""
         table = self._prepare_monomer_quality_table(self._read_csv(data_path))
         self._scientific_style()
         yearly = (
@@ -2101,6 +2202,7 @@ class PDBScientificPlotter:
 
     @staticmethod
     def _prepare_monomer_xray_homolog_table(df: pd.DataFrame) -> pd.DataFrame:
+        """Validate homolog-search records and exclude short query sequences."""
         prepared = PDBScientificPlotter._prepare_typed_table(
             df=df,
             required_columns={
@@ -2134,6 +2236,7 @@ class PDBScientificPlotter:
         cumulative_output_100_png: Path,
         cumulative_output_100_svg: Path,
     ) -> None:
+        """Render annual and cumulative shares for current homolog searches."""
         table_95 = self._prepare_monomer_xray_homolog_table(
             self._read_csv(data_95_path)
         )
@@ -2199,6 +2302,7 @@ class PDBScientificPlotter:
         cumulative_output_100_png: Path,
         cumulative_output_100_svg: Path,
     ) -> None:
+        """Render shares for X-ray homologs available by NMR deposition time."""
         table_95 = self._prepare_monomer_xray_homolog_table(
             self._read_csv(data_95_path)
         )
@@ -2264,6 +2368,7 @@ class PDBScientificPlotter:
         output_100_png: Path,
         output_100_svg: Path,
     ) -> None:
+        """Write timing counts and render homolog-availability share plots."""
         self._scientific_style()
 
         counts_95 = self._build_xray_homolog_timing_count_table(
@@ -2309,6 +2414,7 @@ class PDBScientificPlotter:
         regular_table: pd.DataFrame,
         historical_table: pd.DataFrame,
     ) -> pd.DataFrame:
+        """Combine current and historical searches into yearly timing counts."""
         regular = regular_table[["entry_id", "year", "has_xray_homolog"]].rename(
             columns={"has_xray_homolog": "has_any_xray_homolog"}
         )
@@ -2329,17 +2435,17 @@ class PDBScientificPlotter:
             "status",
         ] = XRAY_HOMOLOG_TIMING_LABELS[0]
 
-        counts = (
+        return (
             merged.groupby(["year", "status"], observed=False)
             .size()
             .unstack(fill_value=0)
             .reindex(columns=XRAY_HOMOLOG_TIMING_LABELS, fill_value=0)
             .sort_index()
         )
-        return counts
 
     @staticmethod
     def _xray_homolog_timing_share_from_counts(counts: pd.DataFrame) -> pd.DataFrame:
+        """Convert yearly homolog timing counts into percentage shares."""
         return counts.div(counts.sum(axis=1), axis=0).fillna(0.0) * 100.0
 
     @staticmethod
@@ -2347,6 +2453,7 @@ class PDBScientificPlotter:
         counts: pd.DataFrame,
         output_path: Path,
     ) -> None:
+        """Write yearly homolog timing counts to ``output_path``."""
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output = (
             counts.rename(
@@ -2367,6 +2474,7 @@ class PDBScientificPlotter:
 
     @staticmethod
     def _prepare_monomer_xray_rmsd_table(df: pd.DataFrame) -> pd.DataFrame:
+        """Validate and normalize NMR-to-X-ray RMSD records."""
         prepared = PDBScientificPlotter._prepare_typed_table(
             df=df,
             required_columns={"entry_id", "year", "rmsd_ca_angstrom"},
@@ -2379,6 +2487,7 @@ class PDBScientificPlotter:
     def _prepare_monomer_xray_rmsd_extremes_table(
         df: pd.DataFrame,
     ) -> pd.DataFrame:
+        """Validate and normalize best- and worst-match RMSD records."""
         prepared = PDBScientificPlotter._prepare_typed_table(
             df=df,
             required_columns={
@@ -2402,6 +2511,7 @@ class PDBScientificPlotter:
         extremes_table: pd.DataFrame,
         statistic: str,
     ) -> pd.DataFrame:
+        """Aggregate three X-ray RMSD selection strategies by year."""
         regular = (
             rmsd_table.groupby("year", as_index=True)["rmsd_ca_angstrom"]
             .agg(statistic)
@@ -2437,6 +2547,7 @@ class PDBScientificPlotter:
         extremes_median_output_svg: Path,
         title_suffix: str = "",
     ) -> None:
+        """Render yearly NMR-to-X-ray RMSD summaries and comparisons."""
         table = self._prepare_monomer_xray_rmsd_table(self._read_csv(data_path))
         extremes_table = self._prepare_monomer_xray_rmsd_extremes_table(
             self._read_csv(extremes_data_path)
@@ -2546,6 +2657,7 @@ class PDBScientificPlotter:
         precision_df: pd.DataFrame,
         extremes_df: pd.DataFrame,
     ) -> pd.DataFrame:
+        """Merge precision and minimum X-ray RMSD values by entry identifier."""
         precision = PDBScientificPlotter._prepare_monomer_precision_table(precision_df)[
             ["entry_id", "year", "mean_rmsd_angstrom"]
         ].copy()
@@ -2578,6 +2690,7 @@ class PDBScientificPlotter:
         cumulative_correlation_output_svg: Path,
         yearly_min_count: int = 3,
     ) -> None:
+        """Render scatter, yearly, and cumulative RMSD correlations."""
         table = self._prepare_xray_rmsd_precision_correlation_table(
             precision_df=self._read_csv(precision_data_path),
             extremes_df=self._read_csv(extremes_data_path),
@@ -2595,22 +2708,29 @@ class PDBScientificPlotter:
         x = table["precision_rmsd"].to_numpy(dtype=float)
         y = table["min_xray_rmsd"].to_numpy(dtype=float)
         origin_slope = float(np.dot(x, y) / np.dot(x, x))
-        max_y = float(table["min_xray_rmsd"].max())
-        y_top = 35.0 if max_y <= 35.0 else 36.0 if max_y <= 36.0 else None
+        axis_limit = max(float(np.max(x)), float(np.max(y)))
 
         def draw_scatter(ax: plt.Axes) -> None:
+            """Draw entry-level RMSDs, origin regression, and correlations."""
             ax.scatter(
                 table["precision_rmsd"],
                 table["min_xray_rmsd"],
                 s=12,
-                alpha=0.28,
-                color="#4c78a8",
-                edgecolors="none",
+                alpha=0.4,
+                facecolors="none",
+                edgecolors="#4c78a8",
+                linewidths=0.7,
             )
             if len(table) >= 2:
+                # Keep the regression line inside the shared square axis range.
+                line_x_end = (
+                    axis_limit
+                    if origin_slope <= 0.0
+                    else min(axis_limit, axis_limit / origin_slope)
+                )
                 x_values = np.linspace(
                     0.0,
-                    float(table["precision_rmsd"].max()),
+                    line_x_end,
                     100,
                 )
                 ax.plot(
@@ -2619,13 +2739,11 @@ class PDBScientificPlotter:
                     color="#d62728",
                     linewidth=2.0,
                 )
-            ax.set_xlim(left=0.0)
-            if y_top is not None:
-                ax.set_ylim(0.0, y_top)
-                ax.yaxis.set_major_locator(MultipleLocator(5.0))
-            else:
-                ax.set_ylim(bottom=0.0)
-            ax.xaxis.set_major_locator(MultipleLocator(1.0))
+            ax.set_xlim(0.0, axis_limit)
+            ax.set_ylim(0.0, axis_limit)
+            ax.set_aspect("equal", adjustable="box")
+            ax.xaxis.set_major_locator(MultipleLocator(5.0))
+            ax.yaxis.set_major_locator(MultipleLocator(5.0))
             ax.text(
                 0.96,
                 0.94,
@@ -2647,7 +2765,7 @@ class PDBScientificPlotter:
             output_png=scatter_output_png,
             output_svg=scatter_output_svg,
             title=self.config.nmr_monomer_xray_rmsd_precision_scatter_title,
-            y_label=r"RMSD$_{\mathrm{NMR,X-ray}}$ (Å)",
+            y_label=r"RMSD$_{\mathrm{NMR,X\!-\!ray}}$ (Å)",
             x_label=r"RMSD$_{\mathrm{NMR}}$ (Å)",
             draw_fn=draw_scatter,
             use_year_x_ticks=False,
@@ -2669,6 +2787,7 @@ class PDBScientificPlotter:
         yearly_corr = pd.Series(yearly_correlations, dtype=float).sort_index()
 
         def draw_yearly_corr(ax: plt.Axes) -> None:
+            """Draw within-year Pearson correlations above the sample cutoff."""
             ax.axhline(0.0, color="black", linewidth=0.8, alpha=0.5)
             self._plot_step_series(
                 ax=ax,
@@ -2705,6 +2824,7 @@ class PDBScientificPlotter:
         cumulative_corr = pd.Series(cumulative_correlations, dtype=float).sort_index()
 
         def draw_cumulative_corr(ax: plt.Axes) -> None:
+            """Draw correlations accumulated through each deposition year."""
             ax.axhline(0.0, color="black", linewidth=0.8, alpha=0.5)
             self._plot_step_series(
                 ax=ax,
@@ -2727,6 +2847,7 @@ class PDBScientificPlotter:
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse plot selections, dataset paths, and figure output options."""
     parser = argparse.ArgumentParser(
         description="Plot publication-ready figures from PDB CSV datasets."
     )
@@ -3596,6 +3717,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    """Generate every plot selected through command-line arguments."""
     args = parse_args()
     plotter = PDBScientificPlotter(
         config=PlotConfig(aspect_ratio=args.aspect_ratio),

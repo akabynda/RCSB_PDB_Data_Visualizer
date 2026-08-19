@@ -1,3 +1,5 @@
+"""Tests for first-model NMR-to-X-ray RMSD preparation."""
+
 import tempfile
 import unittest
 from pathlib import Path
@@ -6,6 +8,7 @@ from src.pdb_dataset_builder import SolutionNMRMonomerXrayRmsdBuilder
 
 
 def _ca_line(serial: int, resid: int, x: float, y: float, z: float) -> str:
+    """Return a formatted ATOM alpha-carbon record for a test coordinate."""
     return (
         f"ATOM  {serial:5d}  CA  ALA A{resid:4d}    "
         f"{x:8.3f}{y:8.3f}{z:8.3f}{1.0:6.2f}{20.0:6.2f}"
@@ -14,6 +17,7 @@ def _ca_line(serial: int, resid: int, x: float, y: float, z: float) -> str:
 
 
 def _hetatm_ca_line(serial: int, resid: int, x: float, y: float, z: float) -> str:
+    """Return a formatted HETATM alpha-carbon test record."""
     return (
         f"HETATM{serial:5d}  CA  MSE A{resid:4d}    "
         f"{x:8.3f}{y:8.3f}{z:8.3f}{1.0:6.2f}{20.0:6.2f}"
@@ -22,11 +26,15 @@ def _hetatm_ca_line(serial: int, resid: int, x: float, y: float, z: float) -> st
 
 
 def _coord_for_residue(resid: int) -> tuple[float, float, float]:
+    """Return a deterministic three-dimensional coordinate for ``resid``."""
     return float(resid), float((resid * resid) % 7), float(resid % 5)
 
 
 class XrayRmsdFirstModelTests(unittest.TestCase):
+    """Verify residue selection for NMR-to-X-ray RMSD calculations."""
+
     def test_rejects_nmr_core_with_hetatm_ca_residue(self) -> None:
+        """Reject an NMR structural core containing a HETATM alpha carbon."""
         with tempfile.TemporaryDirectory() as tmpdir:
             nmr_path = Path(tmpdir) / "nmr_hetatm.pdb"
             xray_path = Path(tmpdir) / "xray.pdb"
@@ -57,6 +65,7 @@ class XrayRmsdFirstModelTests(unittest.TestCase):
             self.assertIsNone(result)
 
     def test_ignores_missing_ca_atoms_in_later_nmr_models(self) -> None:
+        """Base shared-residue selection on the complete first NMR model."""
         with tempfile.TemporaryDirectory() as tmpdir:
             nmr_path = Path(tmpdir) / "nmr.pdb"
             xray_path = Path(tmpdir) / "xray.pdb"
@@ -98,6 +107,7 @@ class XrayRmsdFirstModelTests(unittest.TestCase):
             self.assertAlmostEqual(result[1], 0.0, places=5)
 
     def test_ignores_numbering_gaps_in_first_nmr_model(self) -> None:
+        """Retain modeled residues across numbering gaps in the first model."""
         with tempfile.TemporaryDirectory() as tmpdir:
             nmr_path = Path(tmpdir) / "nmr_gap.pdb"
             xray_path = Path(tmpdir) / "xray_gap.pdb"

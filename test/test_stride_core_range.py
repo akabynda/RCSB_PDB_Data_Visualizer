@@ -1,10 +1,15 @@
+"""Tests for deriving structured core ranges from STRIDE states."""
+
 import unittest
 
 from src.pdb_dataset_builder import _extract_stride_core_range_for_modeled_auth_seq_ids
 
 
 class ExtractStrideCoreRangeForModeledAuthSeqIdsTests(unittest.TestCase):
+    """Verify structured-core selection within modeled residue identifiers."""
+
     def test_uses_only_hgieb_states_inside_modeled_residues(self) -> None:
+        """Use only structured HGIEB states attached to modeled residues."""
         result = _extract_stride_core_range_for_modeled_auth_seq_ids(
             chain_states={
                 10: "C",
@@ -23,6 +28,7 @@ class ExtractStrideCoreRangeForModeledAuthSeqIdsTests(unittest.TestCase):
         self.assertEqual(result, (11, 16))
 
     def test_returns_none_when_modeled_residues_have_no_structured_states(self) -> None:
+        """Return no range when modeled residues contain no structured state."""
         result = _extract_stride_core_range_for_modeled_auth_seq_ids(
             chain_states={5: "T", 6: "C", 7: "H"},
             modeled_auth_seq_ids={5, 6},
@@ -31,6 +37,7 @@ class ExtractStrideCoreRangeForModeledAuthSeqIdsTests(unittest.TestCase):
         self.assertIsNone(result)
 
     def test_keeps_outer_structured_core_range_across_numbering_gap(self) -> None:
+        """Keep the outer structured bounds across an authorization-number gap."""
         result = _extract_stride_core_range_for_modeled_auth_seq_ids(
             chain_states={10: "H", 11: "E", 12: "G", 13: "I"},
             modeled_auth_seq_ids={10, 11, 13},

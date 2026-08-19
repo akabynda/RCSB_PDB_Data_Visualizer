@@ -1,3 +1,5 @@
+"""Tests for routing dataset-build warnings to per-output log files."""
+
 import logging
 import tempfile
 import unittest
@@ -11,7 +13,10 @@ from src.pdb_dataset_builder import (
 
 
 class DatasetWarningLogTests(unittest.TestCase):
+    """Verify warning-log selection and file lifecycle behavior."""
+
     def test_routes_only_warnings_and_errors_to_active_csv_log(self) -> None:
+        """Route only warning-level records to the currently active dataset."""
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             first_csv = root / "first.csv"
@@ -45,6 +50,7 @@ class DatasetWarningLogTests(unittest.TestCase):
             self.assertNotIn("first warning", second_log)
 
     def test_recreates_existing_log_file(self) -> None:
+        """Replace stale log contents when handlers are configured again."""
         with tempfile.TemporaryDirectory() as tmpdir:
             output_csv = Path(tmpdir) / "dataset.csv"
             output_log = output_csv.with_suffix(".log")

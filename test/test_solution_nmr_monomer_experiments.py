@@ -1,3 +1,5 @@
+"""Tests for building solution-NMR monomer experiment datasets."""
+
 import csv
 import tempfile
 import unittest
@@ -13,10 +15,14 @@ from src.pdb_dataset_builder import (
 
 
 class _ExperimentsClient(RCSBClient):
+    """Provide deterministic experiment-query responses for builder tests."""
+
     def __init__(self) -> None:
+        """Initialize the fake client with the default build configuration."""
         super().__init__(DatasetBuildConfig())
 
     def _post_json(self, url: str, payload: dict) -> dict:
+        """Return fixture data selected from identifiers in ``payload``."""
         return {
             "data": {
                 "entries": [
@@ -59,7 +65,10 @@ class _ExperimentsClient(RCSBClient):
 
 
 class SolutionNMRMonomerExperimentsTests(unittest.TestCase):
+    """Verify experiment eligibility, normalization, and CSV serialization."""
+
     def test_fetches_experiments_only_for_eligible_monomers(self) -> None:
+        """Fetch experiment metadata only for eligible monomer entries."""
         records = _ExperimentsClient().fetch_solution_nmr_monomer_experiment_records_for_ids(
             ["1ABC", "2DEF"]
         )
@@ -79,12 +88,14 @@ class SolutionNMRMonomerExperimentsTests(unittest.TestCase):
         )
 
     def test_noesy_is_counted_once_per_structure(self) -> None:
+        """Count repeated NOESY records only once for an entry."""
         self.assertTrue(contains_noesy_experiment(("NOESY", "3D NOESY")))
         self.assertTrue(contains_noesy_experiment(("3d noesy-hsqc",)))
         self.assertTrue(contains_noesy_experiment(("3D_13C-SEPARATED_NOESY",)))
         self.assertFalse(contains_noesy_experiment(("HSQC", "TOCSY")))
 
     def test_writes_all_experiments_in_one_csv_cell(self) -> None:
+        """Serialize all normalized experiments into one CSV field."""
         with tempfile.TemporaryDirectory() as tmpdir:
             output_path = Path(tmpdir) / "experiments.csv"
             write_solution_nmr_monomer_experiments_csv(
