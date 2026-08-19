@@ -1,8 +1,48 @@
 # RCSB PDB Data Visualizer
 
-## Setup for First-Time Users
+RCSB PDB Data Visualizer downloads the structural data needed for the
+accompanying article, builds its CSV datasets, and renders the article figures.
+This README contains the steps required to reproduce those results.
 
-Create a Python virtual environment and install the required Python packages:
+## Table of Contents
+
+- [Requirements](#requirements)
+- [Setup](#setup)
+- [Reproduce All Article Figures](#reproduce-all-article-figures)
+- [Reproduce Individual Article Figures](#reproduce-individual-article-figures)
+  - [Figure 1](#figure-1)
+  - [Figure 2](#figure-2)
+  - [Figure 3](#figure-3)
+  - [Figure 4](#figure-4)
+  - [Figure 5](#figure-5)
+  - [Figure 6](#figure-6)
+  - [Figure 7](#figure-7)
+  - [Figure 8](#figure-8)
+- [Long-Running Builds](#long-running-builds)
+- [Technical Reference](#technical-reference)
+- [License](#license)
+
+## Requirements
+
+- Python 3.10 or newer.
+- Network access and at least 80 GiB of free disk space for a full build. The
+  current coordinate cache occupies approximately 64 GiB; 100 GiB is recommended
+  for temporary files and future updates.
+- [STRIDE][stride-repository], GNU Make, and a C compiler for Figures 3–7.
+
+Run every command below from the repository root.
+
+## Setup
+
+Clone the [source repository][repository] if it is not already available:
+
+```bash
+git clone https://github.com/akabynda/RCSB_PDB_Data_Visualizer.git
+cd RCSB_PDB_Data_Visualizer
+```
+
+Create and activate a virtual environment, then install the pinned Python
+dependencies:
 
 ```bash
 python3 -m venv .venv
@@ -10,330 +50,201 @@ source .venv/bin/activate
 python -m pip install -r requirements.txt
 ```
 
-Figures 3-7 also require STRIDE. The dataset builder automatically checks `/tmp/stride_src/src/stride`, so the simplest setup is to clone and build STRIDE there:
+Figures 3–7 also require STRIDE. On macOS or Linux, it can be built at the
+location detected automatically by the dataset builder:
 
 ```bash
 git clone https://github.com/MDAnalysis/stride.git /tmp/stride_src
 make -C /tmp/stride_src/src
 ```
 
-After that, the commands below can be run exactly as written. If STRIDE is installed somewhere else, pass its path with `--solution-nmr-monomer-stride-executable /path/to/stride`.
+If STRIDE is installed elsewhere, add the following option to dataset commands
+that require it:
 
-## Generating Datasets
+```text
+--solution-nmr-monomer-stride-executable /path/to/stride
+```
 
-Run dataset commands from the repository root. By default,
-`src/pdb_dataset_builder.py` writes CSV files to `data/`, downloads reusable PDB
-and mmCIF files to `data/pdb_cache/`, and stores STRIDE results in
-`data/stride_cache/`.
+## Reproduce All Article Figures
 
-Build all available datasets in dependency order:
+Build every dataset in dependency order:
 
 ```bash
 python src/pdb_dataset_builder.py --datasets all
 ```
 
-This is a long-running workflow: it uses the RCSB APIs, downloads coordinate
-files, runs STRIDE, searches for X-ray homologs, and computes RMSD values. To
-build only selected datasets, pass one name or a comma-separated list:
+This is a long-running operation. It downloads coordinate files, queries RCSB
+PDB, runs STRIDE, searches for X-ray homologs, and calculates RMSD values.
 
-```bash
-python src/pdb_dataset_builder.py \
-  --datasets method_counts,solution_nmr_weights,solution_nmr_monomer_quality
-```
-
-Existing coordinate and STRIDE caches are reused. Some precision and X-ray RMSD
-CSVs also support resuming an interrupted calculation. Use
-`python src/pdb_dataset_builder.py --help` for dataset names, output-path
-options, worker limits, and overwrite flags. The dependency-aware commands for
-the article datasets are also given below in Figure 1–8 order.
-
-The coordinate cache is revision-aware and crash-safe: downloads are installed
-with an atomic replace, and `.cache.json` sidecars record the archive `ETag`,
-`Last-Modified`, SHA-256, size, and validation time. Cached files are checked
-remotely every 24 hours by default. Pass `--pdb-cache-validation-hours 0` for a
-conditional check on every access. STRIDE and chain-subset caches are bound to
-the source coordinate content, so an updated coordinate file invalidates them.
-Both PDB and mmCIF downloads fall back through RCSB, wwPDB, PDBe, and the EBI
-archive mirror when a source is unavailable.
-
-Some large structures cannot be represented as a single legacy PDB file because
-the format limits atom serial numbers to 99,999. When a homolog candidate has
-this problem, the builder automatically downloads its mmCIF representation and
-writes a PDB-compatible cache containing only the chain needed for each
-comparison. Polymer entities represented by many chains are evaluated one
-chain at a time, so they do not exceed the legacy PDB chain-ID limit. This
-fallback also applies to single-character chain IDs. Temporary subset and
-chain-map files use collision-safe atomic writes, allowing different workers
-to request the same candidate concurrently.
-
-X-ray resolution is metadata for downstream reporting, not a prerequisite for
-modeled-core homolog validation. A candidate with usable coordinates is
-therefore retained in the homolog CSV even when RCSB does not provide
-`resolution_combined`; RMSD datasets that require resolution metadata skip
-such a candidate.
-
-If an X-ray homolog search finished with transient request failures, rerun the
-same command with `--xray-homolog-resume`. Matching completed rows in the 95%
-and 100% CSV files and intentional exclusions are retained; missing or failed
-entries are searched again. Progress is stored next to the 95% CSV in a
-`.resume.tsv` checkpoint file.
-
-Every generated CSV has a sibling `.log` file with the same stem. The log is
-recreated on each run and contains warnings and errors for that specific
-dataset; an empty log means the build produced no warnings or errors.
-
-For coordinate-level monomer datasets, positive-occupancy CA atoms from both
-`ATOM` and `HETATM` records are included in the modeled part and STRIDE core.
-However, an NMR structure whose STRIDE core contains any `HETATM` CA residue is
-excluded from homology search and the downstream X-ray RMSD datasets.
-Structures for which no valid homology query was built are omitted from the
-homolog CSV files and from homolog-share denominators; `has_xray_homolog = 0`
-is written only after a valid search was actually performed.
-
-## Generating Figures
-
-After the required CSV files exist in `data/`, render every plot group with:
+After the datasets have been created in `data/`, render all figures:
 
 ```bash
 python src/pdb_plot.py --plots all
 ```
 
-Each logical figure is written to its own directory. By default, that directory
-contains four PNG variants:
+Each figure is written to its own directory under `figures/`. The main article
+image has the same name as its directory. Three additional PNG variants without
+a title and/or with open top and right axes are generated alongside it.
 
-```text
-figures/<figure_name>/
-  <figure_name>.png
-  <figure_name>_no_title.png
-  <figure_name>_open_axes.png
-  <figure_name>_no_title_open_axes.png
-```
+## Reproduce Individual Article Figures
 
-Render selected plot groups with a comma-separated list, for example:
-
-```bash
-python src/pdb_plot.py --plots method_counts,solution_nmr_weight_stats
-```
-
-PNG is the default and the article workflow does not require SVG. Run
-`python src/pdb_plot.py --help` for all plot groups and input/output path
-options.
-
-## RMSD Definitions
-
-The pipeline uses the following RMSD measures.
-
-### NMR ensemble precision
-
-For `solution_nmr_monomer_precision_stride_modeled_first_model`, let `N` be the
-number of NMR models, `n` the number of common CA residues in the first-model
-STRIDE core, and `r_ij(aligned)` the coordinate of residue `j` in model `i`
-after aligning every model to the first NMR model. The per-residue mean is
-
-```text
-r_mean,j = (1/N) * sum_i r_ij(aligned),
-```
-
-and the reported ensemble precision is
-
-```text
-P = sqrt[(1 / (N*n)) * sum_i sum_j ||r_ij(aligned) - r_mean,j||^2].
-```
-
-If `RMSD_i` denotes the RMSD of aligned model `i` from the mean coordinates,
-then
-
-```text
-P = sqrt[mean_i(RMSD_i^2)]
-```
-
-### NMR-to-X-ray RMSD
-
-For NMR entry `e` and X-ray homolog candidate `h`, the current X-ray comparison
-uses matched standard-`ATOM` CA coordinates from the first NMR model and the
-first X-ray model:
-
-```text
-d_eh = RMSD_superposed(NMR_e,model1, Xray_h,model1)
-```
-
-`solution_nmr_monomer_xray_rmsd_extremes` stores
-`d_e,min = min_h(d_eh)` and `d_e,max = max_h(d_eh)`. Figure 6,
-`solution_nmr_monomer_xray_min_median_rmsd_by_year`, reports
-
-```text
-Y_y = median_{e: year(e)=y}(d_e,min)
-```
-
-Figure 7 correlates `d_e,min` with the separately calculated NMR ensemble
-precision `P`.
-
-## Reproducing the Article Figures
-
-Run the commands below from the repository root. For each figure, the dataset-builder command creates the required CSV inputs, and the plotting command renders the article figure. Some plot groups also write companion plots that are not used in the article. Figures 3-7 require a STRIDE executable. Figures 6 and 7 use the 100% sequence-identity X-ray RMSD datasets.
+Run only the commands for the required figure to avoid building unrelated
+datasets. Figures 3–7 require STRIDE. Figures 6 and 7 use X-ray homologs at 100%
+sequence identity.
 
 ### Figure 1
 
-Build the dataset:
-
 ```bash
 python src/pdb_dataset_builder.py --datasets method_counts
-```
-
-Render the figure:
-
-```bash
 python src/pdb_plot.py --plots method_counts
 ```
 
-Article output:
+Output:
 
 - `figures/pdb_method_trends/pdb_method_trends.png`
 
 ### Figure 2
 
-Build the shared dataset for both panels:
-
 ```bash
 python src/pdb_dataset_builder.py --datasets solution_nmr_weights
+python src/pdb_plot.py \
+  --plots solution_nmr_weight_stats,solution_nmr_period_area_share
 ```
 
-Render both article panels:
+Outputs:
 
-```bash
-python src/pdb_plot.py --plots solution_nmr_weight_stats,solution_nmr_period_area_share
-```
-
-Article outputs:
-
-- Figure 2A: `figures/solution_nmr_mean_weight_by_year/solution_nmr_mean_weight_by_year.png`
-- Figure 2B: `figures/solution_nmr_area_share_by_weight_category/solution_nmr_area_share_by_weight_category.png`
+- Figure 2A:
+  `figures/solution_nmr_mean_weight_by_year/solution_nmr_mean_weight_by_year.png`
+- Figure 2B:
+  `figures/solution_nmr_area_share_by_weight_category/solution_nmr_area_share_by_weight_category.png`
 
 ### Figure 3
 
-Build the dataset:
-
 ```bash
-python src/pdb_dataset_builder.py --datasets solution_nmr_monomer_stride_modeled_first_model
+python src/pdb_dataset_builder.py \
+  --datasets solution_nmr_monomer_stride_modeled_first_model
+python src/pdb_plot.py \
+  --plots solution_nmr_monomer_stride_modeled_first_model
 ```
 
-Render the figure:
-
-```bash
-python src/pdb_plot.py --plots solution_nmr_monomer_stride_modeled_first_model
-```
-
-Article output:
+Output:
 
 - `figures/solution_nmr_monomer_stride_modeled_first_model_by_year/solution_nmr_monomer_stride_modeled_first_model_by_year.png`
 
 ### Figure 4
 
-Build the dataset:
-
 ```bash
-python src/pdb_dataset_builder.py --datasets solution_nmr_monomer_precision_stride_modeled_first_model
+python src/pdb_dataset_builder.py \
+  --datasets solution_nmr_monomer_precision_stride_modeled_first_model
+python src/pdb_plot.py \
+  --plots solution_nmr_monomer_precision_stride_modeled_first_model_median
 ```
 
-Render the figure:
-
-```bash
-python src/pdb_plot.py --plots solution_nmr_monomer_precision_stride_modeled_first_model_median
-```
-
-Article output:
+Output:
 
 - `figures/solution_nmr_monomer_precision_stride_modeled_first_model_median_rmsd_by_year/solution_nmr_monomer_precision_stride_modeled_first_model_median_rmsd_by_year.png`
 
 ### Figure 5
 
-Build the required current and historical homolog datasets:
-
 ```bash
-python src/pdb_dataset_builder.py --datasets solution_nmr_monomer_xray_homologs,solution_nmr_monomer_xray_homologs_historical
-```
-
-Render the figure:
-
-```bash
+python src/pdb_dataset_builder.py \
+  --datasets solution_nmr_monomer_xray_homologs
+python src/pdb_dataset_builder.py \
+  --datasets solution_nmr_monomer_xray_homologs_historical
 python src/pdb_plot.py --plots solution_nmr_monomer_xray_homolog_timing_share
 ```
 
-Article output:
+Output:
 
 - `figures/solution_nmr_monomer_xray_homologs_95_timing_share_by_year/solution_nmr_monomer_xray_homologs_95_timing_share_by_year.png`
 
 ### Figure 6
 
-Build the 100% sequence-identity homolog input and the RMSD datasets used by the X-ray RMSD plot group:
-
 ```bash
-python src/pdb_dataset_builder.py --datasets solution_nmr_monomer_xray_homologs
+python src/pdb_dataset_builder.py \
+  --datasets solution_nmr_monomer_xray_homologs
 
 python src/pdb_dataset_builder.py \
-  --datasets solution_nmr_monomer_xray_rmsd,solution_nmr_monomer_xray_rmsd_extremes \
+  --datasets solution_nmr_monomer_xray_rmsd \
   --xray-rmsd-sequence-identity 100
-```
+python src/pdb_dataset_builder.py \
+  --datasets solution_nmr_monomer_xray_rmsd_extremes \
+  --xray-rmsd-sequence-identity 100
 
-Render the figure:
-
-```bash
 python src/pdb_plot.py --plots solution_nmr_monomer_xray_rmsd
 ```
 
-Article output:
+Output:
 
 - `figures/solution_nmr_monomer_xray_min_median_rmsd_by_year/solution_nmr_monomer_xray_min_median_rmsd_by_year.png`
 
 ### Figure 7
 
-Build the precision dataset, the 100% sequence-identity homolog input, and the minimum-X-ray-RMSD dataset:
-
 ```bash
-python src/pdb_dataset_builder.py --datasets solution_nmr_monomer_precision_stride_modeled_first_model
+python src/pdb_dataset_builder.py \
+  --datasets solution_nmr_monomer_precision_stride_modeled_first_model
 
-python src/pdb_dataset_builder.py --datasets solution_nmr_monomer_xray_homologs
+python src/pdb_dataset_builder.py \
+  --datasets solution_nmr_monomer_xray_homologs
 
 python src/pdb_dataset_builder.py \
   --datasets solution_nmr_monomer_xray_rmsd_extremes \
   --xray-rmsd-sequence-identity 100
+
+python src/pdb_plot.py \
+  --plots solution_nmr_monomer_xray_rmsd_precision_correlation
 ```
 
-Render the figure:
-
-```bash
-python src/pdb_plot.py --plots solution_nmr_monomer_xray_rmsd_precision_correlation
-```
-
-Article output:
+Output:
 
 - `figures/solution_nmr_monomer_xray_min_rmsd_precision_correlation/solution_nmr_monomer_xray_min_rmsd_precision_correlation.png`
 
 ### Figure 8
 
-Build the quality dataset for panels A-C, populate the PDB cache with refinement-program remarks, and then build the program-cluster dataset for panel D:
-
 ```bash
-python src/pdb_dataset_builder.py --datasets solution_nmr_program_counts,solution_nmr_monomer_quality
+python src/pdb_dataset_builder.py \
+  --datasets solution_nmr_program_counts,solution_nmr_monomer_quality
 
-python src/pdb_dataset_builder.py --datasets solution_nmr_monomer_program_clusters
+python src/pdb_dataset_builder.py \
+  --datasets solution_nmr_monomer_program_clusters
+
+python src/pdb_plot.py \
+  --plots solution_nmr_monomer_quality,solution_nmr_monomer_program_clusters
 ```
 
-Programs are collected from both `REMARK 3 PROGRAM` and `REMARK 210 SOFTWARE USED`, including wrapped `REMARK 210` lines. The clusters are `AMBER`, `ARIA`, `CNS`, `CYANA`, `DISCOVER`, `DIANA_DYANA` (`DIANA` or `DYANA`), `XPLOR` (without `NIH`), `XPLOR_NIH`, and `OTHER`. A structure with `n` distinct known clusters contributes `1/n` to each; if none are found, it contributes `1` to `OTHER`. Matching includes audited spelling/separator aliases and avoids the false positives `VARIAN` → `ARIA` and `DISCOVERY STUDIO` → `DISCOVER`.
+Outputs:
 
-Render all article panels:
+- Figure 8A:
+  `figures/solution_nmr_monomer_quality_clashscore_by_year/solution_nmr_monomer_quality_clashscore_by_year.png`
+- Figure 8B:
+  `figures/solution_nmr_monomer_quality_ramachandran_outliers_by_year/solution_nmr_monomer_quality_ramachandran_outliers_by_year.png`
+- Figure 8C:
+  `figures/solution_nmr_monomer_quality_sidechain_outliers_by_year/solution_nmr_monomer_quality_sidechain_outliers_by_year.png`
+- Figure 8D:
+  `figures/solution_nmr_monomer_program_cluster_share_by_year/solution_nmr_monomer_program_cluster_share_by_year.png`
 
-```bash
-python src/pdb_plot.py --plots solution_nmr_monomer_quality,solution_nmr_monomer_program_clusters
-```
+## Long-Running Builds
 
-Article outputs:
+- Downloaded coordinates and STRIDE results are cached in `data/`. Rerunning a
+  command reuses available cache files.
+- To continue an interrupted X-ray homolog search, rerun its dataset command
+  with `--xray-homolog-resume`.
+- Every generated CSV has a sibling `.log` file. An empty log means no warnings
+  or errors were recorded for that dataset.
+- Use `python src/pdb_dataset_builder.py --help` and
+  `python src/pdb_plot.py --help` for optional path, worker, overwrite, and SVG
+  settings.
 
-- Figure 8A: `figures/solution_nmr_monomer_quality_clashscore_by_year/solution_nmr_monomer_quality_clashscore_by_year.png`
-- Figure 8B: `figures/solution_nmr_monomer_quality_ramachandran_outliers_by_year/solution_nmr_monomer_quality_ramachandran_outliers_by_year.png`
-- Figure 8C: `figures/solution_nmr_monomer_quality_sidechain_outliers_by_year/solution_nmr_monomer_quality_sidechain_outliers_by_year.png`
-- Figure 8D: `figures/solution_nmr_monomer_program_cluster_share_by_year/solution_nmr_monomer_program_cluster_share_by_year.png`
+## Technical Reference
 
-## Technical Pipeline Reference
+Implementation details, filtering rules, dataset definitions, cache behavior,
+and RMSD formulas are documented in [`src/README.md`](src/README.md).
 
-Detailed documentation for the dataset builder, filtering rules, dataset definitions, and general plot generation lives in [`src/README.md`](src/README.md).
+## License
+
+No open-source license is granted for this repository. See [`LICENSE`](LICENSE)
+for the applicable terms. STRIDE and all Python dependencies remain subject to
+their own licenses.
+
+[stride-repository]: https://github.com/MDAnalysis/stride
+[repository]: https://github.com/akabynda/RCSB_PDB_Data_Visualizer

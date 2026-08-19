@@ -1,8 +1,18 @@
 # Source Pipeline Reference
 
+This document is the technical reference for the two executable modules in
+`src/`. For installation and the article reproduction workflow, see the
+[project README](../README.md). Unless noted otherwise, run every command below
+from the repository root.
+
 ## Dataset Builder
 
-`src/pdb_dataset_builder.py` builds the CSV datasets used by the plots. It writes tabular outputs to `data/`, stores downloaded PDB coordinate files in `data/pdb_cache/`, and reuses first-model STRIDE assignments from `data/stride_cache/` when needed. Large datasets require network access and enough disk space for the coordinate cache.
+`src/pdb_dataset_builder.py` builds the CSV datasets used by the plots. It
+writes tabular outputs to `data/`, stores downloaded PDB and mmCIF coordinate
+files in `data/pdb_cache/`, and reuses first-model STRIDE assignments from
+`data/stride_cache/` when needed. Large datasets require network access and
+enough disk space for the coordinate cache. Metadata is obtained from the [RCSB
+PDB Data and Search APIs][rcsb-apis].
 
 Show all available options:
 
@@ -16,26 +26,26 @@ Build every available dataset:
 python src/pdb_dataset_builder.py --datasets all
 ```
 
-`all` can take a long time. Some datasets download PDB files, run STRIDE, and compute RMSD values.
+`all` can take a long time. Some datasets download PDB files, run STRIDE, and
+compute RMSD values.
 
 Legacy PDB coordinate files are downloaded through a fallback chain: the RCSB
 download service, the wwPDB archive, PDBe, and the EBI archive mirror. A failed
 route immediately advances to the next one before another retry round begins.
-mmCIF downloads use the same four-source fallback strategy.
-Files are installed atomically. Every cached `.pdb`/`.cif` has a `.cache.json`
-sidecar containing its actual source URL, `ETag`, `Last-Modified`, SHA-256,
-size, mtime, and last remote validation time. The default validation window is
-24 hours; use
+mmCIF downloads use the same four-source fallback strategy. Files are installed
+atomically. Every cached `.pdb`/`.cif` has a `.cache.json` sidecar containing
+its actual source URL, `ETag`, `Last-Modified`, SHA-256, size, mtime, and last
+remote validation time. The default validation window is 24 hours; use
 `--pdb-cache-validation-hours 0` to issue a conditional request on every cache
 access. If a complete structure cannot be written in legacy PDB format, for
 example because its atom serial numbers exceed the 99,999 limit, the builder
 creates PDB-compatible subsets containing one requested mmCIF chain at a time.
 This also handles polymer entities with more chains than the legacy PDB chain-ID
-space permits and is used for both single- and multi-character chain IDs.
-Subset PDB and chain-map files are installed with unique temporary paths and
-atomic replacement, so concurrent workers can safely request the same cache
-entry. Derived chain subsets are tied to the source mmCIF SHA-256, while STRIDE
-entries are tied to the complete first-model SHA-1.
+space permits and is used for both single- and multi-character chain IDs. Subset
+PDB and chain-map files are installed with unique temporary paths and atomic
+replacement, so concurrent workers can safely request the same cache entry.
+Derived chain subsets are tied to the source mmCIF SHA-256, while STRIDE entries
+are tied to the complete first-model SHA-1.
 
 Each output CSV receives a sibling `.log` file with the same stem. It is
 truncated at the beginning of every run and records only warnings and errors
@@ -80,28 +90,45 @@ Available dataset kinds:
 
 ## Important Filtering Rules
 
-All `solution_nmr_*` datasets start from entries whose experimental method is exactly `SOLUTION NMR`. Entries with multiple experimental methods are excluded. For example, an entry that lists both `SOLUTION NMR` and another method is not used by these datasets.
+All `solution_nmr_*` datasets start from entries whose experimental method is
+exactly `SOLUTION NMR`. Entries with multiple experimental methods are excluded.
+For example, an entry that lists both `SOLUTION NMR` and another method is not
+used by these datasets.
 
-The monomer datasets (`monomer_*`) do not use all proteins. They keep only protein monomers that pass several structural filters:
+The `solution_nmr_monomer_*` datasets do not use all proteins. They keep only
+protein monomers that pass several structural filters:
 
 - the entry has more than one deposited model;
 - the entry has exactly one polymer entity;
-- that polymer entity is a protein, with entity type `polypeptide(L)` or `polypeptide(D)`;
-- the polymer entity has exactly one chain ID in `pdbx_strand_id`;
+- that polymer entity is a protein, with entity type `polypeptide(L)` or
+  `polypeptide(D)`;
+- the polymer entity has exactly one chain ID in `pdbx_strand_id`.
 
-`method_counts` and `membrane_protein_counts` are broader summary datasets. They intentionally count method trends across X-ray, cryo-EM, and NMR categories.
+`method_counts` and `membrane_protein_counts` are broader summary datasets. They
+intentionally count method trends across X-ray, cryo-EM, and NMR categories.
 
 ## Modeled Part
 
-For the coordinate-level monomer datasets, the modeled part is defined directly from the first deposited coordinate model in the PDB file. A residue is counted as modeled when that first model contains an `ATOM` or `HETATM` CA record for it with positive occupancy. Residues without a first-model CA atom, and residues whose first-model CA occupancy is zero, are excluded.
+For the coordinate-level monomer datasets, the modeled part is defined directly
+from the first deposited coordinate model in the PDB file. A residue is counted
+as modeled when that first model contains an `ATOM` or `HETATM` CA record for it
+with positive occupancy. Residues without a first-model CA atom, and residues
+whose first-model CA occupancy is zero, are excluded.
 
-All downstream residue-level calculations use exactly this first-model modeled residue set and keep the author residue IDs from the PDB file instead of mapping label IDs from RCSB metadata. For STRIDE-based analyses, STRIDE is run on the first model and its assignments are then restricted to these modeled residues before secondary-structure fractions or core ranges are computed.
+All downstream residue-level calculations use exactly this first-model modeled
+residue set and keep the author residue IDs from the PDB file instead of mapping
+label IDs from RCSB metadata. For STRIDE-based analyses, STRIDE is run on the
+first model and its assignments are then restricted to these modeled residues
+before secondary-structure fractions or core ranges are computed.
 
 ## Core Region
 
-The core region is the residue span used for the most structure-sensitive comparisons. In the active STRIDE-based datasets, it is derived from the first model only.
+The core region is the residue span used for the most structure-sensitive
+comparisons. In the active STRIDE-based datasets, it is derived from the first
+model only.
 
-The builder runs STRIDE on the first model, keeps only modeled residues, and identifies residues assigned to core secondary-structure states:
+The builder runs STRIDE on the first model, keeps only modeled residues, and
+identifies residues assigned to core secondary-structure states:
 
 - `H`: alpha helix
 - `G`: 3-10 helix
@@ -109,7 +136,20 @@ The builder runs STRIDE on the first model, keeps only modeled residues, and ide
 - `E`: beta strand
 - `B`: isolated beta bridge
 
-The STRIDE core region is the author-residue span from the first to the last modeled residue with one of those STRIDE core states. Both `ATOM` and `HETATM` CA residues can define the endpoints. Author residue numbering does not have to be contiguous: downstream sequence and coordinate operations use the actually present CA residues inside that span. Entries are skipped when no usable core can be found. Homolog search also requires a usable core sequence, and the current implementation skips very short cores. In addition, an NMR structure is excluded entirely from homology search when any CA residue inside its STRIDE core comes from a `HETATM` record; it is consequently absent from the current and historical homolog CSV files and their downstream X-ray RMSD datasets. More generally, every entry for which a valid query cannot be built is omitted from the homolog CSV files and share denominators. A zero value of `has_xray_homolog` therefore means that a valid search was performed but yielded no usable homolog, rather than that the entry was never searched.
+The STRIDE core region is the author-residue span from the first to the last
+modeled residue with one of those STRIDE core states. Both `ATOM` and `HETATM`
+CA residues can define the endpoints. Author residue numbering does not have to
+be contiguous: downstream sequence and coordinate operations use the actually
+present CA residues inside that span. Entries are skipped when no usable core
+can be found. Homolog search also requires a usable core sequence, and the
+current implementation skips very short cores. In addition, an NMR structure is
+excluded entirely from homology search when any CA residue inside its STRIDE
+core comes from a `HETATM` record; it is consequently absent from the current
+and historical homolog CSV files and their downstream X-ray RMSD datasets. More
+generally, every entry for which a valid query cannot be built is omitted from
+the homolog CSV files and share denominators. A zero value of `has_xray_homolog`
+therefore means that a valid search was performed but yielded no usable homolog,
+rather than that the entry was never searched.
 
 ## STRIDE
 
@@ -119,7 +159,10 @@ The following datasets require a STRIDE executable:
 - `solution_nmr_monomer_precision_stride_modeled_first_model`
 - `solution_nmr_monomer_xray_homologs`
 
-If `stride` is available in `PATH`, the builder finds it automatically. It also checks `/tmp/stride_src/src/stride`. To pass an explicit path:
+If `stride` is available in `PATH`, the builder finds it automatically. It also
+checks `/tmp/stride_src/src/stride`. The upstream source and build instructions
+are available in the [STRIDE repository][stride-repository]. To pass an explicit
+executable path:
 
 ```bash
 python src/pdb_dataset_builder.py \
@@ -127,12 +170,14 @@ python src/pdb_dataset_builder.py \
   --solution-nmr-monomer-stride-executable /path/to/stride
 ```
 
-First-model STRIDE state maps are cached by structure in `data/stride_cache/` by default and reused across STRIDE-based datasets. Use `--stride-cache-dir` to change that location.
+First-model STRIDE state maps are cached by structure in `data/stride_cache/` by
+default and reused across STRIDE-based datasets. Use `--stride-cache-dir` to
+change that location.
 
 Changing whether modeled residues include `HETATM` does not require clearing
 this cache: cached STRIDE assignments are generated from and validated against
-the complete first-model coordinate text, which already contains both `ATOM`
-and `HETATM` records.
+the complete first-model coordinate text, which already contains both `ATOM` and
+`HETATM` records.
 
 ## Useful Options
 
@@ -147,15 +192,18 @@ and `HETATM` records.
 Long-running calculations:
 
 - `--xray-homolog-resume`: keep completed paired rows from the 95% and 100%
-  homolog CSVs, skip checkpointed intentional exclusions, and retry entries
-  that are missing or previously failed (including transient network errors).
-- `--precision-max-entries`: limit the number of entries processed for precision calculations.
+  homolog CSVs, skip checkpointed intentional exclusions, and retry entries that
+  are missing or previously failed (including transient network errors).
+- `--precision-max-entries`: limit the number of entries processed for precision
+  calculations.
 - `--precision-workers`: worker count for precision RMSD calculations.
 - `--precision-overwrite`: recompute the precision CSV from scratch.
-- `--xray-rmsd-max-entries`: limit the number of entries processed for X-ray RMSD calculations.
+- `--xray-rmsd-max-entries`: limit the number of entries processed for X-ray
+  RMSD calculations.
 - `--xray-rmsd-workers`: worker count for X-ray RMSD calculations.
 - `--xray-rmsd-overwrite`: recompute the X-ray RMSD CSV from scratch.
-- `--xray-rmsd-sequence-identity {95,100}`: choose which homolog CSV is used by the X-ray RMSD datasets.
+- `--xray-rmsd-sequence-identity {95,100}`: choose which homolog CSV is used by
+  the X-ray RMSD datasets.
 
 The homolog completion checkpoint is written beside the 95% output as
 `<95%-output-stem>.resume.tsv`. Run without `--xray-homolog-resume` to rebuild
@@ -163,7 +211,8 @@ the homolog CSV pair and checkpoint from scratch.
 
 ## Recommended Run Order
 
-Some datasets read CSV files produced by earlier datasets. A practical run order is:
+Some datasets read CSV files produced by earlier datasets. A practical run order
+is:
 
 ```bash
 python src/pdb_dataset_builder.py \
@@ -181,24 +230,32 @@ python src/pdb_dataset_builder.py \
 python src/pdb_dataset_builder.py \
   --datasets solution_nmr_monomer_xray_homologs,solution_nmr_monomer_xray_homologs_historical
 
+rmsd_datasets=solution_nmr_monomer_xray_rmsd,\
+solution_nmr_monomer_xray_rmsd_extremes
 python src/pdb_dataset_builder.py \
-  --datasets solution_nmr_monomer_xray_rmsd,solution_nmr_monomer_xray_rmsd_extremes \
+  --datasets "$rmsd_datasets" \
   --xray-rmsd-sequence-identity 100
 
+historical_rmsd_datasets=solution_nmr_monomer_xray_rmsd_historical,\
+solution_nmr_monomer_xray_rmsd_extremes_historical
 python src/pdb_dataset_builder.py \
-  --datasets solution_nmr_monomer_xray_rmsd_historical,solution_nmr_monomer_xray_rmsd_extremes_historical \
+  --datasets "$historical_rmsd_datasets" \
   --xray-rmsd-sequence-identity 100
 ```
 
-To produce 95% sequence-identity RMSD datasets, repeat the RMSD commands with `--xray-rmsd-sequence-identity 95`. Use custom output paths if you need to keep both 95% and 100% RMSD CSV files at the same time.
+To produce 95% sequence-identity RMSD datasets, repeat the RMSD commands with
+`--xray-rmsd-sequence-identity 95`. Use custom output paths if you need to keep
+both 95% and 100% RMSD CSV files at the same time.
 
 ## Dataset Reference
 
 ### `method_counts`
 
-Counts PDB entries by deposition year and broad experimental-method category: X-ray, cryo-EM, and NMR.
+Counts PDB entries by deposition year and broad experimental-method category:
+X-ray, cryo-EM, and NMR.
 
-The NMR category combines exact single-method `SOLUTION NMR` and exact single-method `SOLID-STATE NMR` entries under the `NMR` label.
+The NMR category combines exact single-method `SOLUTION NMR` and exact
+single-method `SOLID-STATE NMR` entries under the `NMR` label.
 
 Output:
 
@@ -206,9 +263,11 @@ Output:
 
 ### `membrane_protein_counts`
 
-Counts entries with membrane-protein annotations by deposition year. It also writes a method split for membrane entries.
+Counts entries with membrane-protein annotations by deposition year. It also
+writes a method split for membrane entries.
 
-Membrane annotations come from RCSB annotation types such as OPM, PDBTM, MemProtMD, and mpstruc.
+Membrane annotations come from RCSB annotation types such as OPM, PDBTM,
+MemProtMD, and mpstruc.
 
 Outputs:
 
@@ -217,7 +276,9 @@ Outputs:
 
 ### `solution_nmr_program_counts`
 
-Collects exact single-method `SOLUTION NMR` entries, downloads PDB files into the cache, and extracts refinement program names from PDB remarks. The output shows refinement-program usage by year.
+Collects exact single-method `SOLUTION NMR` entries, downloads PDB files into
+the cache, and extracts refinement program names from PDB remarks. The output
+shows refinement-program usage by year.
 
 Output:
 
@@ -230,9 +291,21 @@ Useful options:
 
 ### `solution_nmr_monomer_program_clusters`
 
-Assigns SOLUTION NMR protein monomers to all unique refinement-program clusters mentioned in PDB `REMARK 3 PROGRAM` and `REMARK 210 SOFTWARE USED` records. Wrapped `REMARK 210` software lists are joined before classification. If a structure mentions `n` distinct known clusters, each cluster receives a score of `1/n`; consequently, every structure contributes exactly `1` in total. `OTHER` receives `1` only when no known cluster is found. In per-cluster CSVs, `structure_count` is this weighted score, while yearly totals remain unique integer structure counts. Assignment rows expose the same value as `cluster_score`.
+Assigns SOLUTION NMR protein monomers to all unique refinement-program clusters
+mentioned in PDB `REMARK 3 PROGRAM` and `REMARK 210 SOFTWARE USED` records.
+Wrapped `REMARK 210` software lists are joined before classification. If a
+structure mentions `n` distinct known clusters, each cluster receives a score of
+`1/n`; consequently, every structure contributes exactly `1` in total. `OTHER`
+receives `1` only when no known cluster is found. In per-cluster CSVs,
+`structure_count` is this weighted score, while yearly totals remain unique
+integer structure counts. Assignment rows expose the same value as
+`cluster_score`.
 
-Cluster assignment is case-insensitive and recognizes versions, separators, compound program strings, and the audited aliases listed below. Matches use program-aware boundaries so unrelated names such as `VARIAN` and `DISCOVERY STUDIO` are not mistaken for `ARIA` and `DISCOVER`. The cluster definitions are:
+Cluster assignment is case-insensitive and recognizes versions, separators,
+compound program strings, and the audited aliases listed below. Matches use
+program-aware boundaries so unrelated names such as `VARIAN` and
+`DISCOVERY STUDIO` are not mistaken for `ARIA` and `DISCOVER`. The cluster
+definitions are:
 
 - `CLUSTER1` — `AMBER`
 - `CLUSTER2` — `ARIA`
@@ -240,13 +313,18 @@ Cluster assignment is case-insensitive and recognizes versions, separators, comp
 - `CLUSTER4` — `CYANA`
 - `CLUSTER5` — `DISCOVER` (standalone `INSIGHT II` rows are included)
 - `CLUSTER6` — `DIANA` or `DYANA`
-- `CLUSTER7` — `XPLOR` (also `X-PLOR`), only when the name does not contain `NIH`
-- `CLUSTER8` — `XPLOR_NIH` (also underscore, reversed `NIH-XPLOR`, compact `NIHXPLOR`, parenthesized NIH, and the observed `NHI` typo)
+- `CLUSTER7` — `XPLOR` (also `X-PLOR`), only when the name does not contain
+  `NIH`
+- `CLUSTER8` — `XPLOR_NIH` (also underscore, reversed `NIH-XPLOR`, compact
+  `NIHXPLOR`, parenthesized NIH, and the observed `NHI` typo)
 - `CLUSTER9` — `OTHER`, used only when no known cluster matches
 
-For example, `AMBER 3.0` matches `CLUSTER1`, `X-PLOR NIH 2.9` matches `CLUSTER8` rather than `CLUSTER7`, and `CNS ARIA` contributes `0.5` to both `CLUSTER3` and `CLUSTER2`.
+For example, `AMBER 3.0` matches `CLUSTER1`, `X-PLOR NIH 2.9` matches `CLUSTER8`
+rather than `CLUSTER7`, and `CNS ARIA` contributes `0.5` to both `CLUSTER3` and
+`CLUSTER2`.
 
-This dataset requires an existing quality CSV and cached PDB files with refinement program remarks.
+This dataset requires an existing quality CSV and cached PDB files with
+refinement program remarks.
 
 Requires:
 
@@ -262,7 +340,8 @@ Outputs:
 
 ### `solution_nmr_weights`
 
-Collects exact single-method `SOLUTION NMR` entries and reads one total molecular-weight value per entry from RCSB entry metadata.
+Collects exact single-method `SOLUTION NMR` entries and reads one total
+molecular-weight value per entry from RCSB entry metadata.
 
 Output:
 
@@ -270,9 +349,13 @@ Output:
 
 ### `solution_nmr_monomer_stride_modeled_first_model`
 
-Runs STRIDE on the first model of each eligible SOLUTION NMR protein monomer, restricts the STRIDE assignments to the modeled `ATOM` and `HETATM` CA residues from that same first model, and summarizes the resulting state fractions over the modeled part only.
+Runs STRIDE on the first model of each eligible SOLUTION NMR protein monomer,
+restricts the STRIDE assignments to the modeled `ATOM` and `HETATM` CA residues
+from that same first model, and summarizes the resulting state fractions over
+the modeled part only.
 
-The output stores the modeled residue span and STRIDE fractions for `H`, `G`, `I`, `E`, `B`, `T`, and `C`.
+The output stores the modeled residue span and STRIDE fractions for `H`, `G`,
+`I`, `E`, `B`, `T`, and `C`.
 
 Requires:
 
@@ -323,7 +406,9 @@ Output:
 
 ### `solution_nmr_monomer_quality`
 
-Collects validation metrics for eligible SOLUTION NMR protein monomers: clashscore, Ramachandran outlier percentage, and sidechain rotamer outlier percentage.
+Collects validation metrics for eligible SOLUTION NMR protein monomers:
+clashscore, Ramachandran outlier percentage, and sidechain rotamer outlier
+percentage.
 
 Output:
 
@@ -331,11 +416,11 @@ Output:
 
 ### `solution_nmr_monomer_experiments`
 
-Collects the `_pdbx_nmr_exptl.type` values (the PDB field `NMR EXPERIMENTS
-CONDUCTED`) for every eligible SOLUTION NMR protein monomer. The CSV contains
-one row per PDB entry; multiple experiment descriptions are joined in one cell
-with `; `. Entries with no reported experiments are retained with an empty
-field.
+Collects the `_pdbx_nmr_exptl.type` values (the PDB field
+`NMR EXPERIMENTS CONDUCTED`) for every eligible SOLUTION NMR protein monomer.
+The CSV contains one row per PDB entry; multiple experiment descriptions are
+joined in one cell with a semicolon followed by a space. Entries with no
+reported experiments are retained with an empty field.
 
 Output:
 
@@ -343,9 +428,20 @@ Output:
 
 ### `solution_nmr_monomer_xray_homologs`
 
-Builds a STRIDE-core query sequence for each eligible SOLUTION NMR protein monomer and searches RCSB for X-ray polymer-entity homologs. It writes separate CSV files for 95% and 100% sequence identity.
+Builds a STRIDE-core query sequence for each eligible SOLUTION NMR protein
+monomer and searches RCSB for X-ray polymer-entity homologs. It writes separate
+CSV files for 95% and 100% sequence identity.
 
-Candidates are checked against the modeled NMR core sequence so that downstream RMSD calculations compare a residue range that is actually modeled. Every chain belonging to a candidate polymer entity is checked separately, which avoids legacy PDB atom-serial and chain-ID limits for large structures. An NMR structure is excluded from this dataset if its STRIDE core contains any `HETATM` CA residue. For retained NMR structures, X-ray CA residues from both `ATOM` and `HETATM` records may be used for sequence matching. Missing `resolution_combined` metadata does not exclude a candidate from homolog validation when its entity, chains, and coordinates are available; downstream RMSD collection continues to require resolution metadata.
+Candidates are checked against the modeled NMR core sequence so that downstream
+RMSD calculations compare a residue range that is actually modeled. Every chain
+belonging to a candidate polymer entity is checked separately, which avoids
+legacy PDB atom-serial and chain-ID limits for large structures. An NMR
+structure is excluded from this dataset if its STRIDE core contains any `HETATM`
+CA residue. For retained NMR structures, X-ray CA residues from both `ATOM` and
+`HETATM` records may be used for sequence matching. Missing
+`resolution_combined` metadata does not exclude a candidate from homolog
+validation when its entity, chains, and coordinates are available; downstream
+RMSD collection continues to require resolution metadata.
 
 Requires:
 
@@ -359,9 +455,11 @@ Outputs:
 
 ### `solution_nmr_monomer_xray_homologs_historical`
 
-Filters the X-ray homolog CSV files to keep only X-ray structures released no later than the deposit date of the corresponding NMR entry.
+Filters the X-ray homolog CSV files to keep only X-ray structures released no
+later than the deposit date of the corresponding NMR entry.
 
-This supports historical analysis: it answers which X-ray homologs were already available when the NMR structure was deposited.
+This supports historical analysis: it answers which X-ray homologs were already
+available when the NMR structure was deposited.
 
 Requires:
 
@@ -375,13 +473,12 @@ Outputs:
 
 ### `solution_nmr_monomer_xray_rmsd`
 
-Computes CA RMSD between the NMR STRIDE core region and a matching X-ray
-homolog candidate. The homolog input is selected with
-`--xray-rmsd-sequence-identity`; the final modeled-core matching performed by
-the current RMSD calculator requires 100% residue identity. NMR structures with
-any `HETATM` CA residue in the STRIDE core are rejected. For retained NMR
-structures, X-ray `ATOM` and `HETATM` CA residues may be used in matching and
-coordinate calculations.
+Computes CA RMSD between the NMR STRIDE core region and a matching X-ray homolog
+candidate. The homolog input is selected with `--xray-rmsd-sequence-identity`;
+the final modeled-core matching performed by the current RMSD calculator
+requires 100% residue identity. NMR structures with any `HETATM` CA residue in
+the STRIDE core are rejected. For retained NMR structures, X-ray `ATOM` and
+`HETATM` CA residues may be used in matching and coordinate calculations.
 
 For NMR entry `e` and X-ray homolog candidate `h`, the current calculation uses
 only the first NMR coordinate model and the first X-ray coordinate model:
@@ -390,8 +487,7 @@ only the first NMR coordinate model and the first X-ray coordinate model:
 d_eh = RMSD_superposed(NMR_e,model1, Xray_h,model1),
 ```
 
-where `RMSD_superposed` includes centering and optimal rigid-body
-superposition.
+where `RMSD_superposed` includes centering and optimal rigid-body superposition.
 
 Requires one of:
 
@@ -404,7 +500,8 @@ Output:
 
 ### `solution_nmr_monomer_xray_rmsd_historical`
 
-Same calculation as `solution_nmr_monomer_xray_rmsd`, but using only historical homologs released no later than the NMR deposit date.
+Same calculation as `solution_nmr_monomer_xray_rmsd`, but using only historical
+homologs released no later than the NMR deposit date.
 
 Requires one of:
 
@@ -426,9 +523,8 @@ d_e,min = min_h(d_eh)
 d_e,max = max_h(d_eh).
 ```
 
-The plot
-`solution_nmr_monomer_xray_min_median_rmsd_by_year` uses the minimum column and
-reports, for each deposition year `y`,
+The plot `solution_nmr_monomer_xray_min_median_rmsd_by_year` uses the minimum
+column and reports, for each deposition year `y`,
 
 ```text
 Y_y = median_{e: year(e)=y}(d_e,min).
@@ -448,7 +544,9 @@ Output:
 
 ### `solution_nmr_monomer_xray_rmsd_extremes_historical`
 
-Historical version of `solution_nmr_monomer_xray_rmsd_extremes`. It computes minimum and maximum CA RMSD using only X-ray homologs that were already released when the corresponding NMR entry was deposited.
+Historical version of `solution_nmr_monomer_xray_rmsd_extremes`. It computes
+minimum and maximum CA RMSD using only X-ray homologs that were already released
+when the corresponding NMR entry was deposited.
 
 Requires one of:
 
@@ -489,7 +587,8 @@ Use `--svg` to additionally generate SVG files:
 python src/pdb_plot.py --svg
 ```
 
-Input and output paths can be overridden with the corresponding flags, for example:
+Input and output paths can be overridden with the corresponding flags, for
+example:
 
 ```bash
 python src/pdb_plot.py \
@@ -501,3 +600,12 @@ The output is still grouped automatically, so this example writes
 `figures/pdb_method_trends/pdb_method_trends.png` and its three PNG variants.
 
 Run `python src/pdb_plot.py --help` to see all plot groups and path options.
+
+## License
+
+No open-source license is granted for this repository. See
+[`../LICENSE`](../LICENSE) for the applicable terms. STRIDE and all Python
+dependencies remain subject to their own licenses.
+
+[rcsb-apis]: https://www.rcsb.org/docs/programmatic-access/web-apis-overview
+[stride-repository]: https://github.com/MDAnalysis/stride
