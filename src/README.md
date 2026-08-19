@@ -5,6 +5,35 @@ This document is the technical reference for the two executable modules in
 [project README](../README.md). Unless noted otherwise, run every command below
 from the repository root.
 
+## Table of Contents
+
+- [Dataset Builder](#dataset-builder)
+- [Dataset Selection](#dataset-selection)
+- [Important Filtering Rules](#important-filtering-rules)
+- [Modeled Part](#modeled-part)
+- [Core Region](#core-region)
+- [STRIDE](#stride)
+- [Useful Options](#useful-options)
+- [Recommended Run Order](#recommended-run-order)
+- [Dataset Reference](#dataset-reference)
+  - [`method_counts`](#method_counts)
+  - [`membrane_protein_counts`](#membrane_protein_counts)
+  - [`solution_nmr_program_counts`](#solution_nmr_program_counts)
+  - [`solution_nmr_monomer_program_clusters`](#solution_nmr_monomer_program_clusters)
+  - [`solution_nmr_weights`](#solution_nmr_weights)
+  - [`solution_nmr_monomer_stride_modeled_first_model`](#solution_nmr_monomer_stride_modeled_first_model)
+  - [`solution_nmr_monomer_precision_stride_modeled_first_model`](#solution_nmr_monomer_precision_stride_modeled_first_model)
+  - [`solution_nmr_monomer_quality`](#solution_nmr_monomer_quality)
+  - [`solution_nmr_monomer_experiments`](#solution_nmr_monomer_experiments)
+  - [`solution_nmr_monomer_xray_homologs`](#solution_nmr_monomer_xray_homologs)
+  - [`solution_nmr_monomer_xray_homologs_historical`](#solution_nmr_monomer_xray_homologs_historical)
+  - [`solution_nmr_monomer_xray_rmsd`](#solution_nmr_monomer_xray_rmsd)
+  - [`solution_nmr_monomer_xray_rmsd_historical`](#solution_nmr_monomer_xray_rmsd_historical)
+  - [`solution_nmr_monomer_xray_rmsd_extremes`](#solution_nmr_monomer_xray_rmsd_extremes)
+  - [`solution_nmr_monomer_xray_rmsd_extremes_historical`](#solution_nmr_monomer_xray_rmsd_extremes_historical)
+- [Plot Generation](#plot-generation)
+- [License](#license)
+
 ## Dataset Builder
 
 `src/pdb_dataset_builder.py` builds the CSV datasets used by the plots. It
