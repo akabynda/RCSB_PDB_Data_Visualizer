@@ -4237,6 +4237,13 @@ class SolutionNMRMonomerPrecisionBuilder:
                 f"fewer than 2 coordinate models in core range (found {len(model_maps)})",
             )
 
+        model_lengths = [len(model_map) for model_map in model_maps]
+        if len(set(model_lengths)) != 1:
+            return (
+                None,
+                f"coordinate models have different lengths in core range ({model_lengths})",
+            )
+
         common_resids = set(model_maps[0].keys())
         for model_map in model_maps[1:]:
             common_resids &= set(model_map.keys())

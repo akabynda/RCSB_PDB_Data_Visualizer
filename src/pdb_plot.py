@@ -2707,41 +2707,49 @@ class PDBScientificPlotter:
         )
         x = table["precision_rmsd"].to_numpy(dtype=float)
         y = table["min_xray_rmsd"].to_numpy(dtype=float)
-        origin_slope = float(np.dot(x, y) / np.dot(x, x))
+        slope, intercept = np.polyfit(x, y, 1) if len(table) >= 2 else (np.nan, np.nan)
         axis_limit = max(float(np.max(x)), float(np.max(y)))
+        marker_area_points = 12.0
 
         def draw_scatter(ax: plt.Axes) -> None:
-            """Draw entry-level RMSDs, origin regression, and correlations."""
+            """Draw entry-level RMSDs, linear regression, and correlations."""
             ax.scatter(
                 table["precision_rmsd"],
                 table["min_xray_rmsd"],
-                s=12,
-                alpha=0.4,
+                s=marker_area_points,
+                alpha=1.0,
                 facecolors="none",
                 edgecolors="#4c78a8",
-                linewidths=0.7,
+                linewidths=1.0,
             )
             if len(table) >= 2:
-                # Keep the regression line inside the shared square axis range.
-                line_x_end = (
-                    axis_limit
-                    if origin_slope <= 0.0
-                    else min(axis_limit, axis_limit / origin_slope)
-                )
-                x_values = np.linspace(
-                    0.0,
-                    line_x_end,
-                    100,
-                )
+                x_values = np.linspace(0.0, axis_limit, 100)
                 ax.plot(
                     x_values,
-                    origin_slope * x_values,
+                    slope * x_values + intercept,
                     color="#d62728",
                     linewidth=2.0,
                 )
+            # Convert the circular marker radius from points to data units.  Add
+            # it to the shared upper limit so structures on either maximum are
+            # not clipped by the axes border.
             ax.set_xlim(0.0, axis_limit)
             ax.set_ylim(0.0, axis_limit)
             ax.set_aspect("equal", adjustable="box")
+            ax.figure.canvas.draw()
+            marker_radius_pixels = (
+                np.sqrt(marker_area_points) * ax.figure.dpi / (2.0 * 72.0)
+            )
+            axes_extent = ax.get_window_extent()
+            axes_size_pixels = min(axes_extent.width, axes_extent.height)
+            marker_radius_data = (
+                axis_limit
+                * marker_radius_pixels
+                / (axes_size_pixels - marker_radius_pixels)
+            )
+            padded_axis_limit = axis_limit + marker_radius_data
+            ax.set_xlim(0.0, padded_axis_limit)
+            ax.set_ylim(0.0, padded_axis_limit)
             ax.xaxis.set_major_locator(MultipleLocator(5.0))
             ax.yaxis.set_major_locator(MultipleLocator(5.0))
             ax.text(
