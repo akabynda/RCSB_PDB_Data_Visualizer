@@ -3144,9 +3144,8 @@ class RCSBClient:
     def fetch_xray_polymer_entity_candidates_for_ids(
         self,
         entity_ids: list[str],
-        include_without_resolution: bool = False,
     ) -> list[XrayPolymerEntityCandidateRecord]:
-        """Fetch candidate X-ray polymer entities and coordinate metadata."""
+        """Fetch candidate X-ray polymer entities and optional resolution metadata."""
         if not entity_ids:
             return []
         query = """
@@ -3194,8 +3193,6 @@ class RCSBClient:
         records: list[XrayPolymerEntityCandidateRecord] = []
         for polymer_entity_id, entry_id, chain_ids in entity_rows:
             resolution = resolution_by_entry_id.get(entry_id)
-            if resolution is None and not include_without_resolution:
-                continue
             records.append(
                 XrayPolymerEntityCandidateRecord(
                     polymer_entity_id=polymer_entity_id,
@@ -4752,7 +4749,6 @@ class SolutionNMRMonomerXrayHomologBuilder:
             candidates.extend(
                 self.client.fetch_xray_polymer_entity_candidates_for_ids(
                     entity_id_batch,
-                    include_without_resolution=True,
                 )
             )
         candidate_by_entity_id = {
@@ -5290,6 +5286,7 @@ class SolutionNMRMonomerXrayRmsdBuilder:
                 key=lambda record: (
                     record.rmsd_ca_angstrom,
                     -record.n_common_ca,
+                    np.isnan(record.xray_resolution_angstrom),
                     record.xray_resolution_angstrom,
                     record.xray_entry_id,
                     record.xray_homolog_entity_id,
@@ -5300,7 +5297,12 @@ class SolutionNMRMonomerXrayRmsdBuilder:
                 key=lambda record: (
                     record.rmsd_ca_angstrom,
                     record.n_common_ca,
-                    -record.xray_resolution_angstrom,
+                    not np.isnan(record.xray_resolution_angstrom),
+                    (
+                        -record.xray_resolution_angstrom
+                        if not np.isnan(record.xray_resolution_angstrom)
+                        else 0.0
+                    ),
                     record.xray_entry_id,
                     record.xray_homolog_entity_id,
                 ),
@@ -5416,6 +5418,7 @@ class SolutionNMRMonomerXrayRmsdBuilder:
                         if entity_id in candidate_by_entity_id
                     ),
                     key=lambda c: (
+                        np.isnan(c.resolution_angstrom),
                         c.resolution_angstrom,
                         c.entry_id,
                         c.polymer_entity_id,

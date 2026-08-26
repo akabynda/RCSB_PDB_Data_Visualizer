@@ -149,8 +149,8 @@ class SequenceSearchTests(unittest.TestCase):
 
         self.assertEqual(result, [])
 
-    def test_homolog_candidates_can_include_entries_without_resolution(self) -> None:
-        """Retain homolog candidates even when resolution is unavailable."""
+    def test_candidates_include_entries_without_resolution(self) -> None:
+        """Retain X-ray candidates even when resolution is unavailable."""
         client = RCSBClient(DatasetBuildConfig())
         entity_response = {
             "data": {
@@ -170,21 +170,13 @@ class SequenceSearchTests(unittest.TestCase):
             side_effect=[entity_response, empty_resolution_response]
         )
 
-        default_result = client.fetch_xray_polymer_entity_candidates_for_ids(
+        result = client.fetch_xray_polymer_entity_candidates_for_ids(
             ["1MCD_1"]
         )
 
-        client._post_json = Mock(
-            side_effect=[entity_response, empty_resolution_response]
-        )
-        homolog_result = client.fetch_xray_polymer_entity_candidates_for_ids(
-            ["1MCD_1"], include_without_resolution=True
-        )
-
-        self.assertEqual(default_result, [])
-        self.assertEqual(len(homolog_result), 1)
-        self.assertEqual(homolog_result[0].polymer_entity_id, "1MCD_1")
-        self.assertTrue(math.isnan(homolog_result[0].resolution_angstrom))
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0].polymer_entity_id, "1MCD_1")
+        self.assertTrue(math.isnan(result[0].resolution_angstrom))
 
     def test_excludes_nmr_entry_when_stride_core_contains_hetatm(self) -> None:
         """Exclude an NMR query whose STRIDE core includes a HETATM residue."""
@@ -309,10 +301,8 @@ class SequenceSearchTests(unittest.TestCase):
 
             def candidates_for_ids(
                 entity_ids: list[str],
-                include_without_resolution: bool = False,
             ) -> list[XrayPolymerEntityCandidateRecord]:
                 """Return one deterministic candidate for each requested ID."""
-                self.assertTrue(include_without_resolution)
                 return [
                     XrayPolymerEntityCandidateRecord(
                         polymer_entity_id=entity_id,

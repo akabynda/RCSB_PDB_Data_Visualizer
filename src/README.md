@@ -493,8 +493,8 @@ structure is excluded from this dataset if its STRIDE core contains any `HETATM`
 CA residue. For retained NMR structures, X-ray CA residues from both `ATOM` and
 `HETATM` records may be used for sequence matching. Missing
 `resolution_combined` metadata does not exclude a candidate from homolog
-validation when its entity, chains, and coordinates are available; downstream
-RMSD collection continues to require resolution metadata.
+validation or downstream RMSD collection when its entity, chains, and
+coordinates are available. Missing resolution values are written as `nan`.
 
 Requires:
 
