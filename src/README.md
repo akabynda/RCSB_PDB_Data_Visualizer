@@ -485,6 +485,13 @@ Builds a STRIDE-core query sequence for each eligible SOLUTION NMR protein
 monomer and searches RCSB for X-ray polymer-entity homologs. It writes separate
 CSV files for 95% and 100% sequence identity.
 
+If an entry-level homolog search still fails with an HTTP 5xx server error, the
+entry is moved to the end of the active search queue instead of being excluded
+immediately. Each entry receives at most three queue attempts. A result from the
+second or third attempt is retained normally; an entry that still returns HTTP
+5xx on the third attempt is omitted from both homolog CSV files. Eligibility
+failures and non-5xx errors are not requeued by this mechanism.
+
 Candidates are checked against the modeled NMR core sequence so that downstream
 RMSD calculations compare a residue range that is actually modeled. Every chain
 belonging to a candidate polymer entity is checked separately, which avoids

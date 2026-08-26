@@ -6,6 +6,8 @@ import math
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+import requests
+
 from src.pdb_dataset_builder import (
     DatasetBuildConfig,
     NMRCoreContainsHetatmError,
@@ -128,6 +130,113 @@ class SequenceSearchTests(unittest.TestCase):
             self.assertEqual([record.entry_id for record in records_95], ["2BBB"])
             self.assertEqual([record.entry_id for record in records_100], ["2BBB"])
             self.assertEqual(completed, [("2BBB", "success")])
+
+    def test_homolog_build_requeues_http_500_failures_up_to_three_attempts(
+        self,
+    ) -> None:
+        """Put 5xx failures at the queue end and accept a later success."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config = DatasetBuildConfig(graphql_batch_size=10, max_workers=1)
+            client = RCSBClient(config)
+            seeds = [
+                SolutionNMRMonomerXrayHomologSeedRecord("1AAA", 2000, "A"),
+                SolutionNMRMonomerXrayHomologSeedRecord("2BBB", 2001, "A"),
+            ]
+            client.fetch_solution_nmr_monomer_xray_homolog_seed_records_for_ids = (
+                Mock(return_value=seeds)
+            )
+            builder = SolutionNMRMonomerXrayHomologBuilder(
+                client=client,
+                config=config,
+                stride_executable="stride",
+                cache_dir=root,
+                stride_cache_dir=root / "stride_cache",
+            )
+            calls: list[str] = []
+            attempts: dict[str, int] = {"1AAA": 0, "2BBB": 0}
+
+            def record_pair(seed):
+                """Fail 1AAA twice with HTTP 500, then build both records."""
+                calls.append(seed.entry_id)
+                attempts[seed.entry_id] += 1
+                if seed.entry_id == "1AAA" and attempts[seed.entry_id] < 3:
+                    response = requests.Response()
+                    response.status_code = 500
+                    raise requests.HTTPError("500 Server Error", response=response)
+
+                def record(identity: int) -> SolutionNMRMonomerXrayHomologRecord:
+                    return SolutionNMRMonomerXrayHomologRecord(
+                        entry_id=seed.entry_id,
+                        year=seed.year,
+                        sequence_identity_percent=identity,
+                        nmr_core_start_seq_id=1,
+                        nmr_core_end_seq_id=20,
+                        nmr_query_sequence_length=20,
+                        xray_homolog_entry_ids=(),
+                        xray_homolog_entity_ids=(),
+                        has_xray_homolog=False,
+                    )
+
+                return record(95), record(100)
+
+            with (
+                patch(
+                    "src.pdb_dataset_builder.fetch_solution_nmr_entry_ids",
+                    return_value=["1AAA", "2BBB"],
+                ),
+                patch.object(builder, "_build_record_pair", side_effect=record_pair),
+            ):
+                records_95, records_100 = builder.build()
+
+            self.assertEqual(calls, ["1AAA", "2BBB", "1AAA", "1AAA"])
+            self.assertEqual(
+                [record.entry_id for record in records_95], ["1AAA", "2BBB"]
+            )
+            self.assertEqual(
+                [record.entry_id for record in records_100], ["1AAA", "2BBB"]
+            )
+
+    def test_homolog_build_excludes_http_500_failure_after_three_attempts(
+        self,
+    ) -> None:
+        """Exclude a seed whose sequence search returns 5xx three times."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config = DatasetBuildConfig(graphql_batch_size=10, max_workers=1)
+            client = RCSBClient(config)
+            seed = SolutionNMRMonomerXrayHomologSeedRecord("1AAA", 2000, "A")
+            client.fetch_solution_nmr_monomer_xray_homolog_seed_records_for_ids = (
+                Mock(return_value=[seed])
+            )
+            builder = SolutionNMRMonomerXrayHomologBuilder(
+                client=client,
+                config=config,
+                stride_executable="stride",
+                cache_dir=root,
+                stride_cache_dir=root / "stride_cache",
+            )
+            server_error = requests.HTTPError(
+                "500 Server Error",
+                response=Mock(status_code=500),
+            )
+
+            with (
+                patch(
+                    "src.pdb_dataset_builder.fetch_solution_nmr_entry_ids",
+                    return_value=["1AAA"],
+                ),
+                patch.object(
+                    builder,
+                    "_build_record_pair",
+                    side_effect=[server_error, server_error, server_error],
+                ) as build_record_pair,
+            ):
+                records_95, records_100 = builder.build()
+
+            self.assertEqual(build_record_pair.call_count, 3)
+            self.assertEqual(records_95, [])
+            self.assertEqual(records_100, [])
 
     def test_treats_null_result_set_as_empty_search_result(self) -> None:
         """Treat a null REST result set as an empty sequence-search result."""

@@ -37,6 +37,7 @@ T = TypeVar("T")
 _MISSING = object()
 PDB_CHAIN_ID_POOL = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
 _ACTIVE_DATASET_WARNING_LOG_PATHS: frozenset[Path] = frozenset()
+XRAY_HOMOLOG_SEARCH_MAX_ATTEMPTS = 3
 
 
 class ActiveDatasetWarningLogFilter(logging.Filter):
@@ -100,6 +101,21 @@ class NMRCoreContainsHetatmError(NMRHomologyQueryIneligibleError):
 
 class XrayHomologEvaluationError(Exception):
     """Signal that X-ray candidates could not be evaluated conclusively."""
+
+
+def _is_http_server_error(error: BaseException) -> bool:
+    """Return whether an exception chain contains an HTTP 5xx response."""
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, requests.HTTPError):
+            response = current.response
+            status_code = getattr(response, "status_code", None)
+            if isinstance(status_code, int) and 500 <= status_code < 600:
+                return True
+        current = current.__cause__ or current.__context__
+    return False
 
 
 class ChainSubsetSelect(Select):
@@ -4877,6 +4893,7 @@ class SolutionNMRMonomerXrayHomologBuilder:
             future_map = {
                 executor.submit(self._build_record_pair, seed): seed for seed in seeds
             }
+            attempt_by_entry_id = {seed.entry_id: 1 for seed in seeds}
             pending = set(future_map)
             total = len(pending)
             completed_count = 0
@@ -4903,11 +4920,11 @@ class SolutionNMRMonomerXrayHomologBuilder:
                     continue
 
                 for future in done:
-                    completed_count += 1
                     seed = future_map[future]
                     try:
                         record_95, record_100 = future.result()
                     except NMRHomologyQueryIneligibleError as exc:
+                        completed_count += 1
                         exclusion_reason_counts[exc.reason] += 1
                         LOGGER.info(
                             "Excluding NMR entry %s from X-ray homology: %s",
@@ -4918,14 +4935,46 @@ class SolutionNMRMonomerXrayHomologBuilder:
                             on_entry_complete(seed.entry_id, "ineligible")
                         continue
                     except Exception as exc:
+                        attempt = attempt_by_entry_id[seed.entry_id]
+                        is_server_error = _is_http_server_error(exc)
+                        if is_server_error and attempt < XRAY_HOMOLOG_SEARCH_MAX_ATTEMPTS:
+                            next_attempt = attempt + 1
+                            attempt_by_entry_id[seed.entry_id] = next_attempt
+                            retry_future = executor.submit(
+                                self._build_record_pair, seed
+                            )
+                            future_map[retry_future] = seed
+                            pending.add(retry_future)
+                            LOGGER.warning(
+                                "SOLUTION NMR monomer X-ray homolog sequence search "
+                                "returned an HTTP 5xx error for %s; moved to the end "
+                                "of the queue (next attempt %d/%d): %s",
+                                seed.entry_id,
+                                next_attempt,
+                                XRAY_HOMOLOG_SEARCH_MAX_ATTEMPTS,
+                                exc,
+                            )
+                            continue
+                        completed_count += 1
                         error_count += 1
-                        LOGGER.warning(
-                            "SOLUTION NMR monomer X-ray homolog sequence search failed for %s: %s",
-                            seed.entry_id,
-                            exc,
-                        )
+                        if is_server_error:
+                            LOGGER.warning(
+                                "SOLUTION NMR monomer X-ray homolog sequence search "
+                                "failed for %s after %d attempts: %s",
+                                seed.entry_id,
+                                attempt,
+                                exc,
+                            )
+                        else:
+                            LOGGER.warning(
+                                "SOLUTION NMR monomer X-ray homolog sequence search "
+                                "failed for %s: %s",
+                                seed.entry_id,
+                                exc,
+                            )
                         continue
 
+                    completed_count += 1
                     records_95.append(record_95)
                     records_100.append(record_100)
                     if on_record_pair is not None:
