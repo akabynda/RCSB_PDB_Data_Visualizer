@@ -410,9 +410,11 @@ Output:
 Computes NMR ensemble precision for eligible SOLUTION NMR protein monomers. The
 residue range is the STRIDE core region from the first model. CA coordinates
 from both `ATOM` and `HETATM` records are eligible; only residues present in
-every coordinate model inside that core are used. Entries whose coordinate
-models have different lengths within the core range are excluded from the
-precision calculation.
+every coordinate model inside that core are used. Before the core precision is
+calculated, the number of eligible CA residues is compared across models over
+the entire selected chain. Entries whose models have different full-chain
+lengths are excluded, including when the length difference occurs outside the
+STRIDE core range.
 
 Every NMR model is first rigidly aligned to the first NMR model. Let `N` be the
 number of models, `n` the number of common CA residues, `r_ij(aligned)` the

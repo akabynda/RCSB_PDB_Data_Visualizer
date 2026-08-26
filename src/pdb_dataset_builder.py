@@ -4231,24 +4231,44 @@ class SolutionNMRMonomerPrecisionBuilder:
         end_seq_id: int,
     ) -> tuple[tuple[int, int, int, float] | None, str | None]:
         """Compute ensemble CA RMSD to per-residue mean coordinates."""
-        model_maps, raw_ca_counts_per_model = parse_models_ca_coords_with_stats(
-            pdb_path=pdb_path,
-            chain_id=chain_id,
-            start_seq_id=start_seq_id,
-            end_seq_id=end_seq_id,
+        full_model_maps, full_raw_ca_counts_per_model = (
+            parse_models_ca_coords_with_stats(
+                pdb_path=pdb_path,
+                chain_id=chain_id,
+            )
         )
-        if len(model_maps) < 2:
+        if len(full_model_maps) < 2:
             return (
                 None,
-                f"fewer than 2 coordinate models in core range (found {len(model_maps)})",
+                f"fewer than 2 coordinate models in core range (found {len(full_model_maps)})",
             )
 
-        model_lengths = [len(model_map) for model_map in model_maps]
+        model_lengths = [len(model_map) for model_map in full_model_maps]
         if len(set(model_lengths)) != 1:
             return (
                 None,
-                f"coordinate models have different lengths in core range ({model_lengths})",
+                (
+                    "coordinate models have different lengths in the selected "
+                    f"chain ({model_lengths})"
+                ),
             )
+
+        model_maps = [
+            {
+                resid: coords
+                for resid, coords in model_map.items()
+                if start_seq_id <= resid <= end_seq_id
+            }
+            for model_map in full_model_maps
+        ]
+        raw_ca_counts_per_model = [
+            {
+                resid: count
+                for resid, count in raw_counts.items()
+                if start_seq_id <= resid <= end_seq_id
+            }
+            for raw_counts in full_raw_ca_counts_per_model
+        ]
 
         common_resids = set(model_maps[0].keys())
         for model_map in model_maps[1:]:

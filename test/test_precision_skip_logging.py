@@ -111,6 +111,54 @@ class PrecisionSkipLoggingTests(unittest.TestCase):
                 )
             )
 
+    def test_skips_length_difference_outside_core(self) -> None:
+        """Exclude an entry when model lengths differ only outside the core."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pdb_path = Path(tmpdir) / "different_lengths_outside_core.pdb"
+            pdb_path.write_text(
+                "".join(
+                    [
+                        "MODEL        1\n",
+                        _ca_line(1, 1),
+                        _ca_line(2, 2),
+                        _ca_line(3, 3),
+                        _ca_line(4, 4),
+                        "ENDMDL\n",
+                        "MODEL        2\n",
+                        _ca_line(5, 1),
+                        _ca_line(6, 2),
+                        _ca_line(7, 3),
+                        "ENDMDL\n",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            builder = SolutionNMRMonomerPrecisionBuilder(
+                client=RCSBClient(DatasetBuildConfig()),
+                config=DatasetBuildConfig(),
+                cache_dir=Path(tmpdir),
+                precision_workers=1,
+            )
+
+            with self.assertLogs("src.pdb_dataset_builder", level="INFO") as logs:
+                record = builder._build_record_from_core_range(
+                    pdb_path=pdb_path,
+                    entry_id="OUTSIDE",
+                    year=2000,
+                    chain_id="A",
+                    core_start_seq_id=1,
+                    core_end_seq_id=3,
+                )
+
+            self.assertIsNone(record)
+            self.assertTrue(
+                any(
+                    "Skipping precision entry OUTSIDE chain A: coordinate models "
+                    "have different lengths in the selected chain" in message
+                    for message in logs.output
+                )
+            )
+
     def test_computes_precision_for_models_with_equal_lengths(self) -> None:
         """Keep an entry when all coordinate models have the same length."""
         with tempfile.TemporaryDirectory() as tmpdir:
