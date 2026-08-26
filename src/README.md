@@ -124,6 +124,10 @@ exactly `SOLUTION NMR`. Entries with multiple experimental methods are excluded.
 For example, an entry that lists both `SOLUTION NMR` and another method is not
 used by these datasets.
 
+The `solution_nmr_weights` dataset additionally requires at least one protein
+polymer entity in each entry. This is the same protein-presence filter used by
+`method_counts`.
+
 The `solution_nmr_monomer_*` datasets do not use all proteins. They keep only
 protein monomers that pass several structural filters:
 
@@ -281,7 +285,8 @@ both 95% and 100% RMSD CSV files at the same time.
 ### `method_counts`
 
 Counts PDB entries by deposition year and broad experimental-method category:
-X-ray, cryo-EM, and NMR.
+X-ray, cryo-EM, and NMR. Every counted entry must contain at least one protein
+polymer entity.
 
 The NMR category combines exact single-method `SOLUTION NMR` and exact
 single-method `SOLID-STATE NMR` entries under the `NMR` label.
@@ -352,13 +357,16 @@ For example, `AMBER 3.0` matches `CLUSTER1`, `X-PLOR NIH 2.9` matches `CLUSTER8`
 rather than `CLUSTER7`, and `CNS ARIA` contributes `0.5` to both `CLUSTER3` and
 `CLUSTER2`.
 
-This dataset requires an existing quality CSV and cached PDB files with
-refinement program remarks.
+This dataset requires an existing quality CSV. It reuses PDB files from the
+configured cache and downloads missing files itself before extracting refinement
+program remarks. The `solution_nmr_program_counts` dataset is independent and is
+not a prerequisite for program-cluster generation.
 
 Requires:
 
 - `data/solution_nmr_monomer_quality_metrics.csv`
-- PDB files in `data/pdb_cache/`
+
+By default, downloaded PDB files are cached in `data/pdb_cache/`.
 
 Outputs:
 
@@ -369,8 +377,9 @@ Outputs:
 
 ### `solution_nmr_weights`
 
-Collects exact single-method `SOLUTION NMR` entries and reads one total
-molecular-weight value per entry from RCSB entry metadata.
+Collects exact single-method `SOLUTION NMR` entries that contain at least one
+protein polymer entity and reads one total molecular-weight value per entry from
+RCSB entry metadata.
 
 Output:
 

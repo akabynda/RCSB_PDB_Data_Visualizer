@@ -94,6 +94,8 @@ sequence identity.
 
 ### Figure 1
 
+Includes only entries that contain at least one protein polymer entity.
+
 ```bash
 python src/pdb_dataset_builder.py --datasets method_counts
 python src/pdb_plot.py --plots method_counts
@@ -104,6 +106,9 @@ Output:
 - `figures/pdb_method_trends/pdb_method_trends.png`
 
 ### Figure 2
+
+Includes exact single-method `SOLUTION NMR` entries that contain at least one
+protein polymer entity.
 
 ```bash
 python src/pdb_dataset_builder.py --datasets solution_nmr_weights
@@ -203,7 +208,7 @@ Output:
 
 ```bash
 python src/pdb_dataset_builder.py \
-  --datasets solution_nmr_program_counts,solution_nmr_monomer_quality
+  --datasets solution_nmr_monomer_quality
 
 python src/pdb_dataset_builder.py \
   --datasets solution_nmr_monomer_program_clusters

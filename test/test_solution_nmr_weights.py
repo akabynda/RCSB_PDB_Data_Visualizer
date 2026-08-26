@@ -3,10 +3,12 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import Mock
 
 from src.pdb_dataset_builder import (
     DatasetBuildConfig,
     RCSBClient,
+    SolutionNMRWeightBuilder,
     SolutionNMRWeightRecord,
     write_solution_nmr_weights_csv,
 )
@@ -43,6 +45,23 @@ class _WeightClient(RCSBClient):
 
 class SolutionNMRWeightTests(unittest.TestCase):
     """Verify molecular-weight retrieval and CSV serialization."""
+
+    def test_builder_requires_at_least_one_protein_entity(self) -> None:
+        """Filter Figure 2 entries to structures containing a protein entity."""
+        client = Mock(spec=RCSBClient)
+        client.fetch_entry_ids_for_method.return_value = []
+
+        records = SolutionNMRWeightBuilder(
+            client=client,
+            config=DatasetBuildConfig(),
+        ).build()
+
+        self.assertEqual(records, [])
+        client.fetch_entry_ids_for_method.assert_called_once_with(
+            method_label="SOLUTION NMR",
+            query_value="SOLUTION NMR",
+            require_protein_entities=True,
+        )
 
     def test_fetches_only_entry_total_weight(self) -> None:
         """Use only the total deposited entry molecular weight."""

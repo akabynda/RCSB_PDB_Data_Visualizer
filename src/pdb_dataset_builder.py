@@ -498,13 +498,18 @@ def collect_batch_results(
     return results
 
 
-def fetch_solution_nmr_entry_ids(client: RCSBClient, log_label: str) -> list[str]:
+def fetch_solution_nmr_entry_ids(
+    client: RCSBClient,
+    log_label: str,
+    require_protein_entities: bool = False,
+) -> list[str]:
     """Fetch all entry IDs assigned to the SOLUTION NMR method."""
     entry_ids = sorted(
         set(
             client.fetch_entry_ids_for_method(
                 method_label=SOLUTION_NMR_METHOD,
                 query_value=SOLUTION_NMR_METHOD,
+                require_protein_entities=require_protein_entities,
             )
         )
     )
@@ -4089,6 +4094,7 @@ class SolutionNMRWeightBuilder:
         entry_ids = fetch_solution_nmr_entry_ids(
             client=self.client,
             log_label="SOLUTION NMR",
+            require_protein_entities=True,
         )
         batches = list(chunked(entry_ids, self.config.graphql_batch_size))
 
