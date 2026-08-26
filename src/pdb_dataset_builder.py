@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
+from threading import Lock
 from typing import Any, TypeVar
 from MDAnalysis.analysis.align import rotation_matrix as mda_rotation_matrix
 from MDAnalysis.analysis.rms import rmsd as mda_rmsd
@@ -37,6 +38,9 @@ T = TypeVar("T")
 _MISSING = object()
 PDB_CHAIN_ID_POOL = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
 _ACTIVE_DATASET_WARNING_LOG_PATHS: frozenset[Path] = frozenset()
+_ACTIVE_DATASET_FILTERED_CSV_PATHS: frozenset[Path] = frozenset()
+_FILTERED_STRUCTURE_KEYS_BY_OUTPUT: dict[Path, set[tuple[str, str]]] = {}
+_FILTERED_STRUCTURE_CSV_LOCK = Lock()
 XRAY_HOMOLOG_SEARCH_MAX_ATTEMPTS = 3
 
 
@@ -54,9 +58,84 @@ class ActiveDatasetWarningLogFilter(logging.Filter):
 
 
 def _set_active_dataset_warning_logs(output_paths: Iterable[Path]) -> None:
-    """Select which per-CSV warning logs receive subsequent records."""
-    global _ACTIVE_DATASET_WARNING_LOG_PATHS
-    _ACTIVE_DATASET_WARNING_LOG_PATHS = frozenset(Path(path) for path in output_paths)
+    """Select which per-CSV warning logs and filter reports are active."""
+    global _ACTIVE_DATASET_WARNING_LOG_PATHS, _ACTIVE_DATASET_FILTERED_CSV_PATHS
+    paths = frozenset(Path(path) for path in output_paths)
+    _ACTIVE_DATASET_WARNING_LOG_PATHS = paths
+    _ACTIVE_DATASET_FILTERED_CSV_PATHS = paths
+
+
+def _set_active_dataset_filtered_csvs(output_paths: Iterable[Path]) -> None:
+    """Override the active filtered-structure reports within a dataset build."""
+    global _ACTIVE_DATASET_FILTERED_CSV_PATHS
+    _ACTIVE_DATASET_FILTERED_CSV_PATHS = frozenset(Path(path) for path in output_paths)
+
+
+def filtered_structures_csv_path(output_path: Path) -> Path:
+    """Return the sibling CSV used to explain filtered-out structures."""
+    output_path = Path(output_path)
+    return output_path.with_name(f"{output_path.stem}_filtered.csv")
+
+
+def _configure_dataset_filtered_csvs(
+    output_paths_by_dataset: dict[DatasetKind, tuple[Path, ...]],
+    preserve_existing_output_paths: Iterable[Path] = (),
+) -> None:
+    """Create fresh per-output CSV reports for structures rejected by filters."""
+    global _FILTERED_STRUCTURE_KEYS_BY_OUTPUT
+    output_paths = {
+        Path(path) for paths in output_paths_by_dataset.values() for path in paths
+    }
+    preserved_paths = {Path(path) for path in preserve_existing_output_paths}
+    with _FILTERED_STRUCTURE_CSV_LOCK:
+        keys_by_output: dict[Path, set[tuple[str, str]]] = {}
+        for output_path in sorted(output_paths, key=str):
+            filtered_path = filtered_structures_csv_path(output_path)
+            existing_keys: set[tuple[str, str]] = set()
+            if output_path in preserved_paths and filtered_path.exists():
+                with filtered_path.open(newline="", encoding="utf-8") as csvfile:
+                    for row in csv.DictReader(csvfile):
+                        entry_id = str(row.get("entry_id") or "").strip()
+                        reason = " ".join(str(row.get("reason") or "").split())
+                        if entry_id and reason:
+                            existing_keys.add((entry_id, reason))
+            keys_by_output[output_path] = existing_keys
+            write_csv_rows(
+                output_path=filtered_path,
+                header=("entry_id", "reason"),
+                rows=sorted(existing_keys),
+            )
+        _FILTERED_STRUCTURE_KEYS_BY_OUTPUT = keys_by_output
+
+
+def _record_filtered_structure(entry_id: Any, reason: str) -> None:
+    """Append one deduplicated filter decision to every active dataset report."""
+    normalized_entry_id = str(entry_id or "").strip()
+    normalized_reason = " ".join(str(reason).split())
+    if not normalized_entry_id or not normalized_reason:
+        return
+    with _FILTERED_STRUCTURE_CSV_LOCK:
+        for output_path in _ACTIVE_DATASET_FILTERED_CSV_PATHS:
+            seen = _FILTERED_STRUCTURE_KEYS_BY_OUTPUT.get(output_path)
+            if seen is None:
+                continue
+            key = (normalized_entry_id, normalized_reason)
+            if key in seen:
+                continue
+            filtered_path = filtered_structures_csv_path(output_path)
+            with filtered_path.open("a", newline="", encoding="utf-8") as csvfile:
+                csv.writer(csvfile).writerow(key)
+            seen.add(key)
+
+
+def _import_filtered_structures(input_dataset_path: Path) -> None:
+    """Copy upstream filter decisions into the currently active reports."""
+    input_filtered_path = filtered_structures_csv_path(input_dataset_path)
+    if not input_filtered_path.exists():
+        return
+    with input_filtered_path.open(newline="", encoding="utf-8") as csvfile:
+        for row in csv.DictReader(csvfile):
+            _record_filtered_structure(row.get("entry_id"), row.get("reason") or "")
 
 
 def _configure_dataset_warning_logs(
@@ -520,6 +599,23 @@ def collect_batch_results(
                 "%s: processed batch %d/%d", progress_label, batch_idx, len(batches)
             )
     return results
+
+
+def _record_entries_missing_from_response(
+    requested_entry_ids: Iterable[str],
+    entries: Iterable[dict[str, Any] | None],
+) -> None:
+    """Record requested PDB entries omitted from a GraphQL batch response."""
+    returned_entry_ids = {
+        str(entry.get("rcsb_id"))
+        for entry in entries
+        if entry and entry.get("rcsb_id")
+    }
+    for entry_id in sorted(set(requested_entry_ids) - returned_entry_ids):
+        _record_filtered_structure(
+            entry_id,
+            "entry metadata missing from RCSB GraphQL response",
+        )
 
 
 def fetch_solution_nmr_entry_ids(
@@ -2584,43 +2680,65 @@ class RCSBClient:
         entry_id = entry.get("rcsb_id")
         if not entry_id:
             return None
+        entry_id = str(entry_id)
 
         model_count_raw = entry.get("rcsb_entry_info", {}).get("deposited_model_count")
         if model_count_raw is None:
+            _record_filtered_structure(entry_id, "deposited model count is missing")
             return None
         try:
             model_count = int(model_count_raw)
         except (TypeError, ValueError):
+            _record_filtered_structure(entry_id, "deposited model count is invalid")
             return None
         if model_count <= 1:
+            _record_filtered_structure(entry_id, "fewer than 2 deposited models")
             return None
 
         year = extract_year(entry.get("rcsb_accession_info", {}).get("deposit_date"))
         if year is None:
+            _record_filtered_structure(entry_id, "deposit year is missing or invalid")
             return None
 
         polymer_entities = entry.get("polymer_entities") or []
         if len(polymer_entities) != 1:
+            _record_filtered_structure(
+                entry_id,
+                f"expected exactly 1 polymer entity (found {len(polymer_entities)})",
+            )
             return None
         polymer_entity = polymer_entities[0] or {}
         entity_poly = polymer_entity.get("entity_poly") or {}
 
         if entity_poly.get("type") not in PROTEIN_MONOMER_ENTITY_TYPES:
+            _record_filtered_structure(
+                entry_id,
+                "polymer entity type is not polypeptide(L) or polypeptide(D)",
+            )
             return None
         if entity_poly.get("rcsb_entity_polymer_type") != PROTEIN_POLYMER_TYPE:
+            _record_filtered_structure(entry_id, "polymer entity is not a protein")
             return None
 
         chain_id = str(entity_poly.get("pdbx_strand_id") or "").strip()
         if not chain_id or "," in chain_id:
+            _record_filtered_structure(
+                entry_id,
+                "polymer entity does not have exactly 1 chain ID",
+            )
             return None
 
         if not self._solution_nmr_monomer_models_have_equal_lengths(
-            entry_id=str(entry_id),
+            entry_id=entry_id,
             chain_id=chain_id,
         ):
+            _record_filtered_structure(
+                entry_id,
+                "coordinate models do not have equal full-chain lengths",
+            )
             return None
 
-        return str(entry_id), year, model_count, polymer_entity, chain_id
+        return entry_id, year, model_count, polymer_entity, chain_id
 
     def _download_solution_nmr_monomer_pdb_if_needed(self, entry_id: str) -> Path:
         """Download or reuse coordinates needed by the base monomer filter."""
@@ -2814,6 +2932,7 @@ class RCSBClient:
                 self._filter_entry_ids_by_exact_methods(
                     entry_ids=batch,
                     method_values=method_values,
+                    record_exclusions=(method_label == SOLUTION_NMR_METHOD),
                 )
             )
 
@@ -2833,7 +2952,10 @@ class RCSBClient:
         return self._filter_entry_ids_by_exact_methods(entry_ids, (method_value,))
 
     def _filter_entry_ids_by_exact_methods(
-        self, entry_ids: list[str], method_values: tuple[str, ...]
+        self,
+        entry_ids: list[str],
+        method_values: tuple[str, ...],
+        record_exclusions: bool = False,
     ) -> list[str]:
         """Keep entries whose experimental methods exactly match the requested set."""
         if not entry_ids:
@@ -2854,12 +2976,15 @@ class RCSBClient:
         entries = data.get("data", {}).get("entries") or []
 
         filtered: list[str] = []
+        returned_entry_ids: set[str] = set()
         for entry in entries:
             if not entry:
                 continue
             entry_id = entry.get("rcsb_id")
             if not entry_id:
                 continue
+            normalized_entry_id = str(entry_id)
+            returned_entry_ids.add(normalized_entry_id)
 
             methods = []
             for exptl in entry.get("exptl") or []:
@@ -2871,7 +2996,22 @@ class RCSBClient:
 
             unique_methods = set(methods)
             if unique_methods == set(method_values):
-                filtered.append(str(entry_id))
+                filtered.append(normalized_entry_id)
+            elif record_exclusions:
+                actual_methods = ", ".join(sorted(unique_methods)) or "none"
+                expected_methods = ", ".join(method_values)
+                _record_filtered_structure(
+                    normalized_entry_id,
+                    "experimental method set does not exactly match "
+                    f"[{expected_methods}] (found [{actual_methods}])",
+                )
+
+        if record_exclusions:
+            for missing_entry_id in sorted(set(entry_ids) - returned_entry_ids):
+                _record_filtered_structure(
+                    missing_entry_id,
+                    "entry metadata missing from RCSB GraphQL response",
+                )
 
         return filtered
 
@@ -2899,6 +3039,7 @@ class RCSBClient:
         query = """
         query($ids:[String!]!) {
           entries(entry_ids:$ids) {
+            rcsb_id
             rcsb_accession_info {
               deposit_date
             }
@@ -2908,6 +3049,16 @@ class RCSBClient:
         payload = {"query": query, "variables": {"ids": entry_ids}}
         data = self._post_json(self.config.graphql_url, payload)
         entries = data.get("data", {}).get("entries") or []
+        _record_entries_missing_from_response(entry_ids, entries)
+        for entry in entries:
+            if not entry or not entry.get("rcsb_id"):
+                continue
+            if extract_year(
+                (entry.get("rcsb_accession_info") or {}).get("deposit_date")
+            ) is None:
+                _record_filtered_structure(
+                    entry["rcsb_id"], "deposit year is missing or invalid"
+                )
         return [
             entry.get("rcsb_accession_info", {}).get("deposit_date")
             for entry in entries
@@ -3384,6 +3535,7 @@ class RCSBClient:
         payload = {"query": query, "variables": {"ids": entry_ids}}
         data = self._post_json(self.config.graphql_url, payload)
         entries = data.get("data", {}).get("entries") or []
+        _record_entries_missing_from_response(entry_ids, entries)
 
         records: list[SolutionNMRWeightRecord] = []
         for entry in entries:
@@ -3393,12 +3545,20 @@ class RCSBClient:
             year = extract_year(
                 entry.get("rcsb_accession_info", {}).get("deposit_date")
             )
-            if not entry_id or year is None:
+            if not entry_id:
+                continue
+            if year is None:
+                _record_filtered_structure(
+                    entry_id, "deposit year is missing or invalid"
+                )
                 continue
             entry_mw_raw = (entry.get("rcsb_entry_info") or {}).get("molecular_weight")
             try:
                 molecular_weight_kda = float(entry_mw_raw)
             except (TypeError, ValueError):
+                _record_filtered_structure(
+                    entry_id, "entry molecular weight is missing or invalid"
+                )
                 continue
 
             records.append(
@@ -3440,6 +3600,7 @@ class RCSBClient:
         payload = {"query": query, "variables": {"ids": entry_ids}}
         data = self._post_json(self.config.graphql_url, payload)
         entries = data.get("data", {}).get("entries") or []
+        _record_entries_missing_from_response(entry_ids, entries)
 
         records: list[SolutionNMRMonomerExperimentsRecord] = []
         for entry in entries:
@@ -3497,6 +3658,7 @@ class RCSBClient:
         payload = {"query": query, "variables": {"ids": entry_ids}}
         data = self._post_json(self.config.graphql_url, payload)
         entries = data.get("data", {}).get("entries") or []
+        _record_entries_missing_from_response(entry_ids, entries)
 
         with ThreadPoolExecutor(max_workers=self.config.max_workers) as executor:
             future_map = {
@@ -3532,6 +3694,10 @@ class RCSBClient:
 
         instances = polymer_entity.get("polymer_entity_instances") or []
         if len(instances) != 1:
+            _record_filtered_structure(
+                entry_id,
+                f"expected exactly 1 polymer entity instance (found {len(instances)})",
+            )
             return None
         try:
             pdb_path = download_pdb_if_needed(
@@ -3552,27 +3718,40 @@ class RCSBClient:
                 entry_id,
                 exc,
             )
+            _record_filtered_structure(
+                entry_id, f"coordinate preparation failed: {exc}"
+            )
             return None
 
         modeled_sequence_length = len(modeled_auth_seq_ids)
         if modeled_sequence_length <= 0:
+            _record_filtered_structure(
+                entry_id, "no usable first-model modeled CA residues"
+            )
             return None
         modeled_start_seq_id = min(modeled_auth_seq_ids)
         modeled_end_seq_id = max(modeled_auth_seq_ids)
 
-        stride_coverages, _, _ = (
-            compute_stride_state_coverages_for_chain_modeled_first_model(
-                session=self.session,
-                config=self.config,
-                cache_dir=pdb_cache_dir,
-                stride_cache_dir=stride_cache_dir,
-                entry_id=entry_id,
-                chain_id=chain_id,
-                modeled_sequence_length=modeled_sequence_length,
-                modeled_auth_seq_ids=modeled_auth_seq_ids,
-                stride_executable=stride_executable,
+        try:
+            stride_coverages, _, _ = (
+                compute_stride_state_coverages_for_chain_modeled_first_model(
+                    session=self.session,
+                    config=self.config,
+                    cache_dir=pdb_cache_dir,
+                    stride_cache_dir=stride_cache_dir,
+                    entry_id=entry_id,
+                    chain_id=chain_id,
+                    modeled_sequence_length=modeled_sequence_length,
+                    modeled_auth_seq_ids=modeled_auth_seq_ids,
+                    stride_executable=stride_executable,
+                )
             )
-        )
+        except Exception as exc:
+            LOGGER.warning(
+                "Skipping STRIDE modeled-first-model entry %s: %s", entry_id, exc
+            )
+            _record_filtered_structure(entry_id, f"STRIDE calculation failed: {exc}")
+            return None
         stride_coil_fraction = stride_coverages["C"]
         stride_secondary_percent = (1.0 - stride_coil_fraction) * 100.0
 
@@ -3642,6 +3821,7 @@ class RCSBClient:
         payload = {"query": query, "variables": {"ids": entry_ids}}
         data = self._post_json(self.config.graphql_url, payload)
         entries = data.get("data", {}).get("entries") or []
+        _record_entries_missing_from_response(entry_ids, entries)
         records: list[SolutionNMRMonomerQualityRecord] = []
 
         for entry in entries:
@@ -3653,21 +3833,36 @@ class RCSBClient:
             entry_id, year, _, _, _ = context
             quality_items = entry.get("pdbx_vrpt_summary_geometry") or []
             if not quality_items:
+                _record_filtered_structure(
+                    entry_id, "validation quality metrics are missing"
+                )
                 continue
             quality = quality_items[0] or {}
             clashscore = quality.get("clashscore")
             rama = quality.get("percent_ramachandran_outliers")
             rotamer = quality.get("percent_rotamer_outliers")
             if clashscore is None or rama is None or rotamer is None:
+                _record_filtered_structure(
+                    entry_id, "one or more validation quality metrics are missing"
+                )
+                continue
+            try:
+                clashscore_value = float(clashscore)
+                rama_value = float(rama)
+                rotamer_value = float(rotamer)
+            except (TypeError, ValueError):
+                _record_filtered_structure(
+                    entry_id, "one or more validation quality metrics are invalid"
+                )
                 continue
 
             records.append(
                 SolutionNMRMonomerQualityRecord(
                     entry_id=entry_id,
                     year=year,
-                    clashscore=float(clashscore),
-                    ramachandran_outliers_percent=float(rama),
-                    sidechain_outliers_percent=float(rotamer),
+                    clashscore=clashscore_value,
+                    ramachandran_outliers_percent=rama_value,
+                    sidechain_outliers_percent=rotamer_value,
                 )
             )
         return records
@@ -3699,6 +3894,7 @@ class RCSBClient:
         payload = {"query": query, "variables": {"ids": entry_ids}}
         data = self._post_json(self.config.graphql_url, payload)
         entries = data.get("data", {}).get("entries") or []
+        _record_entries_missing_from_response(entry_ids, entries)
         records: list[SolutionNMRMonomerModeledFirstModelSeedRecord] = []
 
         for entry in entries:
@@ -3745,6 +3941,7 @@ class RCSBClient:
         payload = {"query": query, "variables": {"ids": entry_ids}}
         data = self._post_json(self.config.graphql_url, payload)
         entries = data.get("data", {}).get("entries") or []
+        _record_entries_missing_from_response(entry_ids, entries)
         records: list[SolutionNMRMonomerXrayHomologSeedRecord] = []
 
         for entry in entries:
@@ -3882,6 +4079,11 @@ class SolutionNMRProgramYearlyBuilder:
         entry_year_pairs = [
             (entry_id, entry_year_by_id.get(entry_id)) for entry_id in entry_ids
         ]
+        for entry_id, year in entry_year_pairs:
+            if year is None:
+                _record_filtered_structure(
+                    entry_id, "deposit year is missing or invalid"
+                )
 
         with ThreadPoolExecutor(max_workers=self.config.max_workers) as executor:
             future_map = {
@@ -3905,10 +4107,19 @@ class SolutionNMRProgramYearlyBuilder:
                         or cached_pdb_path.stat().st_size <= 0
                     ):
                         skipped_uncached_count += 1
+                        _record_filtered_structure(
+                            entry_id, "PDB file is absent from cache in cache-only mode"
+                        )
                     else:
                         missing_program_count += 1
+                        _record_filtered_structure(
+                            entry_id, "PDB file could not be loaded"
+                        )
                 elif not programs:
                     missing_program_count += 1
+                    _record_filtered_structure(
+                        entry_id, "refinement program is missing"
+                    )
                 else:
                     for program in programs:
                         yearly_program_counter[(year, program)] += 1
@@ -4186,6 +4397,11 @@ class MembraneProteinYearlyBuilder:
                 for entry_id in method_entry_ids
                 if entry_id in membrane_entry_ids
             ]
+            for entry_id in sorted(set(method_entry_ids) - membrane_entry_ids):
+                _record_filtered_structure(
+                    entry_id,
+                    f"entry has no supported membrane-protein annotation for {method.label}",
+                )
             LOGGER.info(
                 "Membrane proteins %s: kept %d/%d method entries",
                 method.label,
@@ -4427,6 +4643,10 @@ class SolutionNMRMonomerPrecisionBuilder:
                 chain_id,
                 skip_reason,
             )
+            _record_filtered_structure(
+                entry_id,
+                f"precision calculation rejected the structural core: {skip_reason}",
+            )
             return None
         n_models, n_ca_core_used, n_ca_core_raw, mean_rmsd = result
         return SolutionNMRMonomerPrecisionRecord(
@@ -4486,6 +4706,9 @@ class SolutionNMRMonomerPrecisionStrideModeledFirstModelBuilder(
                     seed.entry_id,
                     seed.chain_id,
                 )
+                _record_filtered_structure(
+                    seed.entry_id, "no usable first-model modeled CA residues"
+                )
                 return None
             core_range = (
                 compute_stride_core_range_for_modeled_auth_seq_ids_in_first_model(
@@ -4503,6 +4726,9 @@ class SolutionNMRMonomerPrecisionStrideModeledFirstModelBuilder(
                     seed.entry_id,
                     seed.chain_id,
                 )
+                _record_filtered_structure(
+                    seed.entry_id, "STRIDE found no modeled core residues"
+                )
                 return None
             core_start, core_end = core_range
             return self._build_record_from_core_range(
@@ -4519,6 +4745,9 @@ class SolutionNMRMonomerPrecisionStrideModeledFirstModelBuilder(
                 "STRIDE modeled-first-model precision calculation failed for %s: %s",
                 seed.entry_id,
                 exc,
+            )
+            _record_filtered_structure(
+                seed.entry_id, f"precision calculation failed: {exc}"
             )
             return None
 
@@ -4926,6 +5155,7 @@ class SolutionNMRMonomerXrayHomologBuilder:
                     except NMRHomologyQueryIneligibleError as exc:
                         completed_count += 1
                         exclusion_reason_counts[exc.reason] += 1
+                        _record_filtered_structure(seed.entry_id, exc.reason)
                         LOGGER.info(
                             "Excluding NMR entry %s from X-ray homology: %s",
                             seed.entry_id,
@@ -4957,6 +5187,9 @@ class SolutionNMRMonomerXrayHomologBuilder:
                             continue
                         completed_count += 1
                         error_count += 1
+                        _record_filtered_structure(
+                            seed.entry_id, f"X-ray homology search failed: {exc}"
+                        )
                         if is_server_error:
                             LOGGER.warning(
                                 "SOLUTION NMR monomer X-ray homolog sequence search "
@@ -5271,8 +5504,13 @@ class SolutionNMRMonomerXrayRmsdBuilder:
         if (
             homolog.nmr_core_start_seq_id is None
             or homolog.nmr_core_end_seq_id is None
-            or not candidates
         ):
+            _record_filtered_structure(homolog.entry_id, "NMR core range is missing")
+            return None
+        if not candidates:
+            _record_filtered_structure(
+                homolog.entry_id, "no usable X-ray homolog candidates"
+            )
             return None
 
         try:
@@ -5290,10 +5528,17 @@ class SolutionNMRMonomerXrayRmsdBuilder:
                 )
                 if record is not None:
                     return record
+            _record_filtered_structure(
+                homolog.entry_id,
+                "no X-ray homolog candidate produced a usable CA RMSD",
+            )
             return None
         except Exception as exc:
             LOGGER.warning(
                 "X-ray RMSD calculation failed for %s: %s", homolog.entry_id, exc
+            )
+            _record_filtered_structure(
+                homolog.entry_id, f"X-ray RMSD calculation failed: {exc}"
             )
             return None
 
@@ -5307,8 +5552,13 @@ class SolutionNMRMonomerXrayRmsdBuilder:
         if (
             homolog.nmr_core_start_seq_id is None
             or homolog.nmr_core_end_seq_id is None
-            or not candidates
         ):
+            _record_filtered_structure(homolog.entry_id, "NMR core range is missing")
+            return None
+        if not candidates:
+            _record_filtered_structure(
+                homolog.entry_id, "no usable X-ray homolog candidates"
+            )
             return None
 
         try:
@@ -5328,6 +5578,10 @@ class SolutionNMRMonomerXrayRmsdBuilder:
                 if record is not None:
                     candidate_records.append(record)
             if not candidate_records:
+                _record_filtered_structure(
+                    homolog.entry_id,
+                    "no X-ray homolog candidate produced a usable CA RMSD",
+                )
                 return None
 
             best = min(
@@ -5390,6 +5644,9 @@ class SolutionNMRMonomerXrayRmsdBuilder:
                 homolog.entry_id,
                 exc,
             )
+            _record_filtered_structure(
+                homolog.entry_id, f"X-ray RMSD extremes calculation failed: {exc}"
+            )
             return None
 
     def _prepare_work_items(
@@ -5405,15 +5662,25 @@ class SolutionNMRMonomerXrayRmsdBuilder:
         ]
     ]:
         """Prepare NMR seeds and candidate lists for RMSD collection."""
-        filtered_homologs = [
-            record
-            for record in self.homolog_records
-            if record.sequence_identity_percent == self.sequence_identity_percent
-            and record.entry_id not in skip_entry_ids
-            and record.nmr_core_start_seq_id is not None
-            and record.nmr_core_end_seq_id is not None
-            and record.xray_homolog_entity_ids
-        ]
+        filtered_homologs: list[SolutionNMRMonomerXrayHomologRecord] = []
+        for record in self.homolog_records:
+            if record.sequence_identity_percent != self.sequence_identity_percent:
+                continue
+            if record.entry_id in skip_entry_ids:
+                continue
+            if (
+                record.nmr_core_start_seq_id is None
+                or record.nmr_core_end_seq_id is None
+            ):
+                _record_filtered_structure(record.entry_id, "NMR core range is missing")
+                continue
+            if not record.xray_homolog_entity_ids:
+                _record_filtered_structure(
+                    record.entry_id,
+                    f"no X-ray homologs at {self.sequence_identity_percent}% sequence identity",
+                )
+                continue
+            filtered_homologs.append(record)
         filtered_homologs = sorted(
             filtered_homologs, key=lambda r: (r.year, r.entry_id)
         )
@@ -5458,6 +5725,9 @@ class SolutionNMRMonomerXrayRmsdBuilder:
         for homolog in filtered_homologs:
             nmr_chain_id = chain_by_entry_id.get(homolog.entry_id)
             if not nmr_chain_id:
+                _record_filtered_structure(
+                    homolog.entry_id, "NMR chain metadata is missing"
+                )
                 continue
             candidates = tuple(
                 sorted(
@@ -5475,6 +5745,9 @@ class SolutionNMRMonomerXrayRmsdBuilder:
                 )
             )
             if not candidates:
+                _record_filtered_structure(
+                    homolog.entry_id, "X-ray homolog candidate metadata is missing"
+                )
                 continue
             work_items.append((homolog, nmr_chain_id, candidates))
 
@@ -6272,13 +6545,22 @@ def filter_xray_homolog_records_by_deposit_date(
     config: DatasetBuildConfig,
 ) -> list[SolutionNMRMonomerXrayHomologRecord]:
     """Keep homolog records whose X-ray release timing matches the mode."""
-    records = [
-        record
-        for record in records
-        if record.nmr_query_sequence_length > 10
-        and record.nmr_core_start_seq_id is not None
-        and record.nmr_core_end_seq_id is not None
-    ]
+    eligible_records: list[SolutionNMRMonomerXrayHomologRecord] = []
+    for record in records:
+        if record.nmr_query_sequence_length <= 10:
+            _record_filtered_structure(
+                record.entry_id,
+                f"NMR query sequence is too short ({record.nmr_query_sequence_length} residues)",
+            )
+            continue
+        if (
+            record.nmr_core_start_seq_id is None
+            or record.nmr_core_end_seq_id is None
+        ):
+            _record_filtered_structure(record.entry_id, "NMR core range is missing")
+            continue
+        eligible_records.append(record)
+    records = eligible_records
     xray_entity_ids = sorted(
         {
             entity_id
@@ -6344,6 +6626,7 @@ def filter_xray_homolog_records_by_deposit_date(
                 "Excluding NMR entry %s from historical homology: missing NMR deposit date",
                 record.entry_id,
             )
+            _record_filtered_structure(record.entry_id, "NMR deposit date is missing")
             continue
         kept_entity_ids_list: list[str] = []
         dates_complete = True
@@ -6365,6 +6648,9 @@ def filter_xray_homolog_records_by_deposit_date(
             LOGGER.warning(
                 "Excluding NMR entry %s from historical homology: incomplete X-ray release dates",
                 record.entry_id,
+            )
+            _record_filtered_structure(
+                record.entry_id, "one or more X-ray release dates are missing"
             )
             continue
         kept_entity_ids = tuple(kept_entity_ids_list)
@@ -6703,6 +6989,7 @@ def build_solution_nmr_monomer_xray_rmsd_to_csv(
     log_label: str,
 ) -> None:
     """Collect best-match NMR-to-X-ray RMSD records and stream them to CSV."""
+    _import_filtered_structures(homolog_input_path)
     existing_records: list[SolutionNMRMonomerXrayRmsdRecord] = []
     valid_existing_records: list[SolutionNMRMonomerXrayRmsdRecord] = []
     skip_entry_ids: set[str] = set()
@@ -6797,6 +7084,7 @@ def build_solution_nmr_monomer_xray_rmsd_extremes_to_csv(
     log_label: str,
 ) -> None:
     """Collect NMR-to-X-ray RMSD extremes and stream them to CSV."""
+    _import_filtered_structures(homolog_input_path)
     existing_records: list[SolutionNMRMonomerXrayRmsdExtremesRecord] = []
     valid_existing_records: list[SolutionNMRMonomerXrayRmsdExtremesRecord] = []
     skip_entry_ids: set[str] = set()
@@ -7312,6 +7600,18 @@ def main() -> None:
     )
     output_paths_by_dataset = _selected_dataset_output_paths(args)
     _configure_dataset_warning_logs(output_paths_by_dataset)
+    preserved_filter_outputs: tuple[Path, ...] = ()
+    if (
+        args.xray_homolog_resume
+        and DatasetKind.SOLUTION_NMR_MONOMER_XRAY_HOMOLOGS in args.datasets
+    ):
+        preserved_filter_outputs = output_paths_by_dataset[
+            DatasetKind.SOLUTION_NMR_MONOMER_XRAY_HOMOLOGS
+        ]
+    _configure_dataset_filtered_csvs(
+        output_paths_by_dataset,
+        preserve_existing_output_paths=preserved_filter_outputs,
+    )
     config = DatasetBuildConfig(
         page_size=args.page_size,
         graphql_batch_size=args.batch_size,
@@ -7343,9 +7643,13 @@ def main() -> None:
             output_paths_by_dataset[DatasetKind.MEMBRANE_PROTEIN_COUNTS]
         )
         membrane_builder = MembraneProteinYearlyBuilder(client=client, config=config)
+        _set_active_dataset_filtered_csvs((Path(args.membrane_counts_output),))
         membrane_records = membrane_builder.build()
         write_membrane_counts_csv(
             records=membrane_records, output_path=args.membrane_counts_output
+        )
+        _set_active_dataset_filtered_csvs(
+            (Path(args.membrane_method_counts_output),)
         )
         membrane_method_records = membrane_builder.build_by_method(
             [
@@ -7569,6 +7873,7 @@ def main() -> None:
             ]
         )
         quality_input_path = Path(args.solution_nmr_monomer_program_cluster_input)
+        _import_filtered_structures(quality_input_path)
         quality_records = read_solution_nmr_monomer_quality_csv(quality_input_path)
         if not quality_records:
             raise RuntimeError(
@@ -7792,21 +8097,25 @@ def main() -> None:
                 "solution_nmr_monomer_xray_homologs first or provide the expected "
                 f"homolog CSVs at {homolog_95_input_path} and {homolog_100_input_path}."
             )
-        historical_records_95 = filter_xray_homolog_records_by_deposit_date(
-            records=records_95,
-            client=client,
-            config=config,
-        )
-        historical_records_100 = filter_xray_homolog_records_by_deposit_date(
-            records=records_100,
-            client=client,
-            config=config,
-        )
         homolog_95_historical_output_path = Path(
             args.solution_nmr_monomer_xray_homolog_95_historical_output
         )
         homolog_100_historical_output_path = Path(
             args.solution_nmr_monomer_xray_homolog_100_historical_output
+        )
+        _set_active_dataset_filtered_csvs((homolog_95_historical_output_path,))
+        _import_filtered_structures(homolog_95_input_path)
+        historical_records_95 = filter_xray_homolog_records_by_deposit_date(
+            records=records_95,
+            client=client,
+            config=config,
+        )
+        _set_active_dataset_filtered_csvs((homolog_100_historical_output_path,))
+        _import_filtered_structures(homolog_100_input_path)
+        historical_records_100 = filter_xray_homolog_records_by_deposit_date(
+            records=records_100,
+            client=client,
+            config=config,
         )
         write_solution_nmr_monomer_xray_homolog_csv(
             records=historical_records_95,

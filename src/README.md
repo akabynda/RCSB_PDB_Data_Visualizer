@@ -82,6 +82,24 @@ emitted while that dataset is active. Multi-output datasets write the same
 relevant warning or error to each of their output logs. Empty logs indicate a
 clean run.
 
+Each output `name.csv` also receives a paired `name_filtered.csv`. The paired
+file has two columns:
+
+- `entry_id`: the RCSB PDB entry rejected from that output;
+- `reason`: the exact metadata, eligibility, coordinate, STRIDE, homology,
+historical-date, or RMSD condition that caused the rejection.
+
+Rows are written as filtering happens, including from concurrent workers, and
+duplicate `entry_id`/`reason` decisions are suppressed. A structure can have
+more than one row when independent checks expose more than one reason. The file
+is recreated at the start of a normal build and always exists, even when it
+contains only the header. `--xray-homolog-resume` preserves prior filtered rows
+for the resumed 95% and 100% homolog outputs, so checkpointed ineligible entries
+remain documented. Derived datasets import the paired report of their input CSV,
+then append their own exclusions. For multi-output datasets, a shared eligibility
+decision is written to every affected paired file; output-specific decisions are
+routed only to their corresponding file.
+
 Build one dataset:
 
 ```bash
