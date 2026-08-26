@@ -63,6 +63,12 @@ class _ExperimentsClient(RCSBClient):
             }
         }
 
+    def _solution_nmr_monomer_models_have_equal_lengths(
+        self, entry_id: str, chain_id: str
+    ) -> bool:
+        """Treat coordinate model lengths as equal in metadata-focused tests."""
+        return True
+
 
 class SolutionNMRMonomerExperimentsTests(unittest.TestCase):
     """Verify experiment eligibility, normalization, and CSV serialization."""

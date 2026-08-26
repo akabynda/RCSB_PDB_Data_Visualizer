@@ -2510,9 +2510,18 @@ MEMBRANE_ANNOTATION_TYPES: tuple[str, ...] = ("OPM", "PDBTM", "MemProtMD", "mpst
 class RCSBClient:
     """Query RCSB services and retrieve cached coordinate files."""
 
-    def __init__(self, config: DatasetBuildConfig) -> None:
+    def __init__(
+        self,
+        config: DatasetBuildConfig,
+        solution_nmr_monomer_cache_dir: Path | None = None,
+    ) -> None:
         """Initialize the RCSB API client session and configuration."""
         self.config = config
+        self.solution_nmr_monomer_cache_dir = (
+            Path(solution_nmr_monomer_cache_dir)
+            if solution_nmr_monomer_cache_dir is not None
+            else Path("data/pdb_cache")
+        )
         self.session = requests.Session()
         self.session.headers.update({"User-Agent": "pdb-extensible-builder/1.0"})
 
@@ -2551,11 +2560,11 @@ class RCSBClient:
             groups[cutoff] = str(group_id)
         return groups
 
-    @staticmethod
     def _extract_solution_nmr_monomer_context(
+        self,
         entry: dict[str, Any],
     ) -> tuple[str, int, int, dict[str, Any], str] | None:
-        """Extract monomer chain and modeled-sequence context from entry data."""
+        """Extract context for a monomer whose models have equal chain lengths."""
         entry_id = entry.get("rcsb_id")
         if not entry_id:
             return None
@@ -2589,7 +2598,66 @@ class RCSBClient:
         if not chain_id or "," in chain_id:
             return None
 
+        if not self._solution_nmr_monomer_models_have_equal_lengths(
+            entry_id=str(entry_id),
+            chain_id=chain_id,
+        ):
+            return None
+
         return str(entry_id), year, model_count, polymer_entity, chain_id
+
+    def _download_solution_nmr_monomer_pdb_if_needed(self, entry_id: str) -> Path:
+        """Download or reuse coordinates needed by the base monomer filter."""
+        return download_pdb_if_needed(
+            session=self.session,
+            config=self.config,
+            cache_dir=self.solution_nmr_monomer_cache_dir,
+            entry_id=entry_id,
+        )
+
+    def _solution_nmr_monomer_models_have_equal_lengths(
+        self,
+        entry_id: str,
+        chain_id: str,
+    ) -> bool:
+        """Return whether every coordinate model has the same full-chain length."""
+        try:
+            pdb_path = self._download_solution_nmr_monomer_pdb_if_needed(entry_id)
+            chain_map = load_cached_chain_id_map(
+                self.solution_nmr_monomer_cache_dir,
+                entry_id,
+            )
+            parsed_chain_id = chain_map.get(chain_id, chain_id)
+            model_maps, _ = parse_models_ca_coords_with_stats(
+                pdb_path=pdb_path,
+                chain_id=parsed_chain_id,
+            )
+        except Exception as exc:
+            LOGGER.warning(
+                "Skipping SOLUTION NMR monomer %s: model-length check failed: %s",
+                entry_id,
+                exc,
+            )
+            return False
+
+        if len(model_maps) < 2:
+            LOGGER.info(
+                "Skipping SOLUTION NMR monomer %s chain %s: fewer than 2 coordinate models",
+                entry_id,
+                chain_id,
+            )
+            return False
+
+        model_lengths = [len(model_map) for model_map in model_maps]
+        if len(set(model_lengths)) != 1:
+            LOGGER.info(
+                "Skipping SOLUTION NMR monomer %s chain %s: coordinate models have different full-chain lengths (%s)",
+                entry_id,
+                chain_id,
+                model_lengths,
+            )
+            return False
+        return True
 
     def _fetch_paginated_identifiers(
         self,
@@ -4273,44 +4341,17 @@ class SolutionNMRMonomerPrecisionBuilder:
         end_seq_id: int,
     ) -> tuple[tuple[int, int, int, float] | None, str | None]:
         """Compute ensemble CA RMSD to per-residue mean coordinates."""
-        full_model_maps, full_raw_ca_counts_per_model = (
-            parse_models_ca_coords_with_stats(
-                pdb_path=pdb_path,
-                chain_id=chain_id,
-            )
+        model_maps, raw_ca_counts_per_model = parse_models_ca_coords_with_stats(
+            pdb_path=pdb_path,
+            chain_id=chain_id,
+            start_seq_id=start_seq_id,
+            end_seq_id=end_seq_id,
         )
-        if len(full_model_maps) < 2:
+        if len(model_maps) < 2:
             return (
                 None,
-                f"fewer than 2 coordinate models in core range (found {len(full_model_maps)})",
+                f"fewer than 2 coordinate models in core range (found {len(model_maps)})",
             )
-
-        model_lengths = [len(model_map) for model_map in full_model_maps]
-        if len(set(model_lengths)) != 1:
-            return (
-                None,
-                (
-                    "coordinate models have different lengths in the selected "
-                    f"chain ({model_lengths})"
-                ),
-            )
-
-        model_maps = [
-            {
-                resid: coords
-                for resid, coords in model_map.items()
-                if start_seq_id <= resid <= end_seq_id
-            }
-            for model_map in full_model_maps
-        ]
-        raw_ca_counts_per_model = [
-            {
-                resid: count
-                for resid, count in raw_counts.items()
-                if start_seq_id <= resid <= end_seq_id
-            }
-            for raw_counts in full_raw_ca_counts_per_model
-        ]
 
         common_resids = set(model_maps[0].keys())
         for model_map in model_maps[1:]:
@@ -6910,10 +6951,15 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--solution-nmr-monomer-cache-dir",
         "--solution-nmr-monomer-stride-cache-dir",
+        dest="solution_nmr_monomer_cache_dir",
         type=Path,
         default=Path("data/pdb_cache"),
-        help="Directory to cache downloaded PDB files for STRIDE in monomer-stride dataset.",
+        help=(
+            "Directory to cache PDB files used by the base solution_nmr_monomer "
+            "model-length filter and coordinate-level monomer datasets."
+        ),
     )
     parser.add_argument(
         "--stride-cache-dir",
@@ -7220,7 +7266,10 @@ def main() -> None:
         max_workers=args.workers,
         pdb_cache_validation_hours=args.pdb_cache_validation_hours,
     )
-    client = RCSBClient(config=config)
+    client = RCSBClient(
+        config=config,
+        solution_nmr_monomer_cache_dir=Path(args.solution_nmr_monomer_cache_dir),
+    )
 
     if DatasetKind.METHOD_COUNTS in args.datasets:
         _set_active_dataset_warning_logs(
@@ -7353,7 +7402,7 @@ def main() -> None:
             client=client,
             config=config,
             stride_executable=modeled_first_stride_executable,
-            cache_dir=Path(args.solution_nmr_monomer_stride_cache_dir),
+            cache_dir=Path(args.solution_nmr_monomer_cache_dir),
             stride_cache_dir=Path(args.stride_cache_dir),
         )
         modeled_stride_count = (
@@ -7553,7 +7602,7 @@ def main() -> None:
             client=client,
             config=config,
             stride_executable=homolog_stride_executable,
-            cache_dir=Path(args.solution_nmr_monomer_stride_cache_dir),
+            cache_dir=Path(args.solution_nmr_monomer_cache_dir),
             stride_cache_dir=Path(args.stride_cache_dir),
         )
         homolog_95_output_path = Path(args.solution_nmr_monomer_xray_homolog_95_output)

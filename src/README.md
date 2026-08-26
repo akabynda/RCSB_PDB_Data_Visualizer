@@ -135,7 +135,16 @@ protein monomers that pass several structural filters:
 - the entry has exactly one polymer entity;
 - that polymer entity is a protein, with entity type `polypeptide(L)` or
   `polypeptide(D)`;
-- the polymer entity has exactly one chain ID in `pdbx_strand_id`.
+- the polymer entity has exactly one chain ID in `pdbx_strand_id`;
+- every coordinate model has the same full-chain length, measured as the number
+  of unique positive-occupancy `ATOM` or `HETATM` CA residues after alternate
+  locations are collapsed.
+
+The full-chain model-length check is part of the base
+`solution_nmr_monomer_*` eligibility filter. It is applied before experiment,
+quality, STRIDE, precision, and X-ray-homolog seed records are created, so all
+derived monomer datasets inherit the exclusion. A difference outside the
+STRIDE core is sufficient to exclude an entry.
 
 `method_counts` and `membrane_protein_counts` are broader summary datasets. They
 intentionally count method trends across X-ray, cryo-EM, and NMR categories.
@@ -219,6 +228,9 @@ the complete first-model coordinate text, which already contains both `ATOM` and
 - `--batch-size`: GraphQL batch size.
 - `--page-size`: RCSB Search API page size.
 - `--log-level`: logging level, for example `INFO` or `DEBUG`.
+- `--solution-nmr-monomer-cache-dir`: PDB cache used by the base monomer
+  model-length filter and coordinate-level monomer datasets. The legacy option
+  name `--solution-nmr-monomer-stride-cache-dir` remains accepted as an alias.
 - `--pdb-cache-validation-hours`: remote PDB/mmCIF validation interval; `0`
   validates every access.
 
@@ -411,11 +423,9 @@ Output:
 Computes NMR ensemble precision for eligible SOLUTION NMR protein monomers. The
 residue range is the STRIDE core region from the first model. CA coordinates
 from both `ATOM` and `HETATM` records are eligible; only residues present in
-every coordinate model inside that core are used. Before the core precision is
-calculated, the number of eligible CA residues is compared across models over
-the entire selected chain. Entries whose models have different full-chain
-lengths are excluded, including when the length difference occurs outside the
-STRIDE core range.
+every coordinate model inside that core are used. Entries with unequal
+full-chain model lengths have already been removed by the base
+`solution_nmr_monomer_*` eligibility filter described above.
 
 Every NMR model is first rigidly aligned to the first NMR model. Let `N` be the
 number of models, `n` the number of common CA residues, `r_ij(aligned)` the
