@@ -8,6 +8,7 @@ from pathlib import Path
 from src.pdb_dataset_builder import (
     DatasetBuildConfig,
     DatasetKind,
+    ExperimentalMethod,
     RCSBClient,
     _configure_dataset_filtered_csvs,
     _import_filtered_structures,
@@ -160,6 +161,70 @@ class FilteredStructureCsvTests(unittest.TestCase):
                         "reason": "quality metrics are missing",
                     }
                 ],
+            )
+
+    def test_method_category_reports_server_side_filter_reasons(self) -> None:
+        """Report method and protein filters after collecting raw candidates."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir) / "method_counts.csv"
+            _configure_dataset_filtered_csvs(
+                {DatasetKind.METHOD_COUNTS: (output_path,)}
+            )
+            _set_active_dataset_filtered_csvs((output_path,))
+            client = RCSBClient(DatasetBuildConfig(graphql_batch_size=10))
+            client._fetch_paginated_identifiers = lambda **kwargs: [
+                "SINGLE",
+                "PAIR",
+                "EXTRA",
+                "NO_PROTEIN",
+            ]
+            client._post_json = lambda url, payload: {
+                "data": {
+                    "entries": [
+                        {
+                            "rcsb_id": "SINGLE",
+                            "exptl": [{"method": "SOLUTION NMR"}],
+                            "rcsb_entry_info": {"polymer_entity_count_protein": 1},
+                        },
+                        {
+                            "rcsb_id": "PAIR",
+                            "exptl": [
+                                {"method": "SOLUTION NMR"},
+                                {"method": "SOLID-STATE NMR"},
+                            ],
+                            "rcsb_entry_info": {"polymer_entity_count_protein": 1},
+                        },
+                        {
+                            "rcsb_id": "EXTRA",
+                            "exptl": [
+                                {"method": "SOLUTION NMR"},
+                                {"method": "X-RAY DIFFRACTION"},
+                            ],
+                            "rcsb_entry_info": {"polymer_entity_count_protein": 1},
+                        },
+                        {
+                            "rcsb_id": "NO_PROTEIN",
+                            "exptl": [{"method": "SOLUTION NMR"}],
+                            "rcsb_entry_info": {"polymer_entity_count_protein": 0},
+                        },
+                    ]
+                }
+            }
+
+            entry_ids = client.fetch_entry_ids_for_method_category(
+                method=ExperimentalMethod.NMR,
+                require_protein_entities=True,
+            )
+
+            self.assertEqual(entry_ids, ["PAIR", "SINGLE"])
+            rows = self._read_rows(filtered_structures_csv_path(output_path))
+            self.assertEqual({row["entry_id"] for row in rows}, {"EXTRA", "NO_PROTEIN"})
+            self.assertTrue(
+                any("experimental method set" in row["reason"] for row in rows)
+            )
+            self.assertIn(
+                {"entry_id": "NO_PROTEIN", "reason": "entry has no protein polymer entities"},
+                rows,
             )
 
     def test_base_monomer_filter_records_the_first_failed_rule(self) -> None:

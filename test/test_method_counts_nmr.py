@@ -1,7 +1,7 @@
 """Tests for NMR categorization in experimental-method counts."""
 
 import unittest
-from unittest.mock import Mock, call
+from unittest.mock import Mock
 
 from src.pdb_dataset_builder import (
     DatasetBuildConfig,
@@ -29,15 +29,11 @@ class MethodCountsNMRTests(unittest.TestCase):
     def test_all_three_methods_are_counted_under_nmr_label(self) -> None:
         """Aggregate entries from every NMR method under the common NMR label."""
         client = Mock(spec=RCSBClient)
-        entry_ids_by_method_set = {
-            method_values: [f"NMR{index}"]
-            for index, method_values in enumerate(NMR_METHOD_SETS, start=1)
-        }
-        client.fetch_entry_ids_for_method_set.side_effect = (
-            lambda method_label, method_values, require_protein_entities: (
-                entry_ids_by_method_set[method_values]
-            )
-        )
+        client.fetch_entry_ids_for_method_category.return_value = [
+            "NMR1",
+            "NMR2",
+            "NMR3",
+        ]
         client.fetch_deposit_dates_for_ids.return_value = [
             "2020-01-01",
             "2020-02-01",
@@ -54,16 +50,9 @@ class MethodCountsNMRTests(unittest.TestCase):
             records,
             [YearlyCountRecord(year=2020, method="NMR", count=3)],
         )
-        self.assertEqual(
-            client.fetch_entry_ids_for_method_set.call_args_list,
-            [
-                call(
-                    method_label="NMR",
-                    method_values=method_values,
-                    require_protein_entities=True,
-                )
-                for method_values in NMR_METHOD_SETS
-            ],
+        client.fetch_entry_ids_for_method_category.assert_called_once_with(
+            method=ExperimentalMethod.NMR,
+            require_protein_entities=True,
         )
 
     def test_two_method_case_requires_exactly_the_nmr_pair(self) -> None:
