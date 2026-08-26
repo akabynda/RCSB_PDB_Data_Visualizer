@@ -288,8 +288,9 @@ Counts PDB entries by deposition year and broad experimental-method category:
 X-ray, cryo-EM, and NMR. Every counted entry must contain at least one protein
 polymer entity.
 
-The NMR category combines exact single-method `SOLUTION NMR` and exact
-single-method `SOLID-STATE NMR` entries under the `NMR` label.
+The NMR category includes entries with exactly `SOLUTION NMR`, exactly
+`SOLID-STATE NMR`, or exactly the two-method combination `SOLID-STATE NMR` and
+`SOLUTION NMR`. All three cases are counted under the `NMR` label.
 
 Output:
 

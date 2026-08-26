@@ -148,6 +148,14 @@ class ExperimentalMethod(Enum):
         """Return the RCSB method values used in search queries."""
         return self.value[1]
 
+    @property
+    def exact_method_sets(self) -> tuple[tuple[str, ...], ...]:
+        """Return exact experimental-method sets assigned to this category."""
+        single_method_sets = tuple((value,) for value in self.query_values)
+        if self is ExperimentalMethod.NMR:
+            return single_method_sets + (("SOLID-STATE NMR", "SOLUTION NMR"),)
+        return single_method_sets
+
 
 class DatasetKind(str, Enum):
     """Identify each CSV dataset that the command-line builder can produce."""
@@ -2653,15 +2661,43 @@ class RCSBClient:
         require_protein_entities: bool = False,
     ) -> list[str]:
         """Fetch entry IDs for one experimental method."""
-        method_query: dict[str, Any] = {
-            "type": "terminal",
-            "service": "text",
-            "parameters": {
-                "attribute": "exptl.method",
-                "operator": "exact_match",
-                "value": query_value,
-            },
-        }
+        return self.fetch_entry_ids_for_method_set(
+            method_label=method_label,
+            method_values=(query_value,),
+            require_protein_entities=require_protein_entities,
+        )
+
+    def fetch_entry_ids_for_method_set(
+        self,
+        method_label: str,
+        method_values: tuple[str, ...],
+        require_protein_entities: bool = False,
+    ) -> list[str]:
+        """Fetch entry IDs whose experimental methods exactly match a set."""
+        if not method_values:
+            raise ValueError("method_values must not be empty")
+
+        method_queries: list[dict[str, Any]] = [
+            {
+                "type": "terminal",
+                "service": "text",
+                "parameters": {
+                    "attribute": "exptl.method",
+                    "operator": "exact_match",
+                    "value": method_value,
+                },
+            }
+            for method_value in method_values
+        ]
+        method_query: dict[str, Any]
+        if len(method_queries) == 1:
+            method_query = method_queries[0]
+        else:
+            method_query = {
+                "type": "group",
+                "logical_operator": "and",
+                "nodes": method_queries,
+            }
         query: dict[str, Any] = method_query
         if require_protein_entities:
             query = {
@@ -2683,7 +2719,7 @@ class RCSBClient:
         matched_entry_ids = self._fetch_paginated_identifiers(
             query=query,
             return_type="entry",
-            progress_label=f"{method_label} ({query_value})",
+            progress_label=f"{method_label} ({' + '.join(method_values)})",
         )
         if not matched_entry_ids:
             return []
@@ -2691,16 +2727,16 @@ class RCSBClient:
         filtered_entry_ids: list[str] = []
         for batch in chunked(matched_entry_ids, self.config.graphql_batch_size):
             filtered_entry_ids.extend(
-                self._filter_entry_ids_by_exact_single_method(
+                self._filter_entry_ids_by_exact_methods(
                     entry_ids=batch,
-                    method_value=query_value,
+                    method_values=method_values,
                 )
             )
 
         LOGGER.info(
-            "%s (%s): kept %d/%d entries with exactly one method",
+            "%s (%s): kept %d/%d entries with the exact method set",
             method_label,
-            query_value,
+            " + ".join(method_values),
             len(filtered_entry_ids),
             len(matched_entry_ids),
         )
@@ -2710,6 +2746,12 @@ class RCSBClient:
         self, entry_ids: list[str], method_value: str
     ) -> list[str]:
         """Keep entries whose experimental method list is exactly the requested method."""
+        return self._filter_entry_ids_by_exact_methods(entry_ids, (method_value,))
+
+    def _filter_entry_ids_by_exact_methods(
+        self, entry_ids: list[str], method_values: tuple[str, ...]
+    ) -> list[str]:
+        """Keep entries whose experimental methods exactly match the requested set."""
         if not entry_ids:
             return []
 
@@ -2744,7 +2786,7 @@ class RCSBClient:
                     methods.append(str(method))
 
             unique_methods = set(methods)
-            if len(unique_methods) == 1 and method_value in unique_methods:
+            if unique_methods == set(method_values):
                 filtered.append(str(entry_id))
 
         return filtered
@@ -3656,10 +3698,10 @@ class PDBMethodYearlyBuilder:
         entry_ids = sorted(
             {
                 entry_id
-                for query_value in method.query_values
-                for entry_id in self.client.fetch_entry_ids_for_method(
+                for method_values in method.exact_method_sets
+                for entry_id in self.client.fetch_entry_ids_for_method_set(
                     method_label=method.label,
-                    query_value=query_value,
+                    method_values=method_values,
                     require_protein_entities=True,
                 )
             }
@@ -4050,10 +4092,10 @@ class MembraneProteinYearlyBuilder:
             method_entry_ids = sorted(
                 {
                     entry_id
-                    for query_value in method.query_values
-                    for entry_id in self.client.fetch_entry_ids_for_method(
+                    for method_values in method.exact_method_sets
+                    for entry_id in self.client.fetch_entry_ids_for_method_set(
                         method_label=method.label,
-                        query_value=query_value,
+                        method_values=method_values,
                         require_protein_entities=True,
                     )
                 }
