@@ -39,7 +39,9 @@ _MISSING = object()
 PDB_CHAIN_ID_POOL = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
 _ACTIVE_DATASET_WARNING_LOG_PATHS: frozenset[Path] = frozenset()
 _ACTIVE_DATASET_FILTERED_CSV_PATHS: frozenset[Path] = frozenset()
-_FILTERED_STRUCTURE_KEYS_BY_OUTPUT: dict[Path, set[tuple[str, str]]] = {}
+_FILTERED_STRUCTURE_ROWS_BY_OUTPUT: dict[
+    Path, dict[tuple[str, str], str]
+] = {}
 _FILTERED_STRUCTURE_CSV_LOCK = Lock()
 XRAY_HOMOLOG_SEARCH_MAX_ATTEMPTS = 3
 
@@ -82,50 +84,80 @@ def _configure_dataset_filtered_csvs(
     preserve_existing_output_paths: Iterable[Path] = (),
 ) -> None:
     """Create fresh per-output CSV reports for structures rejected by filters."""
-    global _FILTERED_STRUCTURE_KEYS_BY_OUTPUT
+    global _FILTERED_STRUCTURE_ROWS_BY_OUTPUT
     output_paths = {
         Path(path) for paths in output_paths_by_dataset.values() for path in paths
     }
     preserved_paths = {Path(path) for path in preserve_existing_output_paths}
     with _FILTERED_STRUCTURE_CSV_LOCK:
-        keys_by_output: dict[Path, set[tuple[str, str]]] = {}
+        rows_by_output: dict[Path, dict[tuple[str, str], str]] = {}
         for output_path in sorted(output_paths, key=str):
             filtered_path = filtered_structures_csv_path(output_path)
-            existing_keys: set[tuple[str, str]] = set()
+            existing_rows: dict[tuple[str, str], str] = {}
             if output_path in preserved_paths and filtered_path.exists():
                 with filtered_path.open(newline="", encoding="utf-8") as csvfile:
                     for row in csv.DictReader(csvfile):
                         entry_id = str(row.get("entry_id") or "").strip()
+                        year = _normalize_filtered_structure_year(row.get("year"))
                         reason = " ".join(str(row.get("reason") or "").split())
                         if entry_id and reason:
-                            existing_keys.add((entry_id, reason))
-            keys_by_output[output_path] = existing_keys
+                            existing_rows[(entry_id, reason)] = year
+            rows_by_output[output_path] = existing_rows
             write_csv_rows(
                 output_path=filtered_path,
-                header=("entry_id", "reason"),
-                rows=sorted(existing_keys),
+                header=("entry_id", "year", "reason"),
+                rows=(
+                    (entry_id, year, reason)
+                    for (entry_id, reason), year in sorted(existing_rows.items())
+                ),
             )
-        _FILTERED_STRUCTURE_KEYS_BY_OUTPUT = keys_by_output
+        _FILTERED_STRUCTURE_ROWS_BY_OUTPUT = rows_by_output
 
 
-def _record_filtered_structure(entry_id: Any, reason: str) -> None:
+def _normalize_filtered_structure_year(year: Any) -> str:
+    """Normalize a deposit year for filtered-structure CSV serialization."""
+    raw_year = str(year or "").strip()
+    if len(raw_year) >= 4 and raw_year[:4].isdigit():
+        return raw_year[:4]
+    return ""
+
+
+def _record_filtered_structure(entry_id: Any, reason: str, year: Any = None) -> None:
     """Append one deduplicated filter decision to every active dataset report."""
     normalized_entry_id = str(entry_id or "").strip()
+    normalized_year = _normalize_filtered_structure_year(year)
     normalized_reason = " ".join(str(reason).split())
     if not normalized_entry_id or not normalized_reason:
         return
     with _FILTERED_STRUCTURE_CSV_LOCK:
         for output_path in _ACTIVE_DATASET_FILTERED_CSV_PATHS:
-            seen = _FILTERED_STRUCTURE_KEYS_BY_OUTPUT.get(output_path)
-            if seen is None:
+            rows = _FILTERED_STRUCTURE_ROWS_BY_OUTPUT.get(output_path)
+            if rows is None:
                 continue
             key = (normalized_entry_id, normalized_reason)
-            if key in seen:
+            existing_year = rows.get(key)
+            if existing_year is not None:
+                if not existing_year and normalized_year:
+                    rows[key] = normalized_year
+                    filtered_path = filtered_structures_csv_path(output_path)
+                    write_csv_rows(
+                        output_path=filtered_path,
+                        header=("entry_id", "year", "reason"),
+                        rows=(
+                            (stored_entry_id, stored_year, stored_reason)
+                            for (
+                                stored_entry_id,
+                                stored_reason,
+                            ), stored_year in sorted(rows.items())
+                        ),
+                    )
                 continue
             filtered_path = filtered_structures_csv_path(output_path)
             with filtered_path.open("a", newline="", encoding="utf-8") as csvfile:
-                csv.writer(csvfile).writerow(key)
-            seen.add(key)
+                csv.writer(csvfile).writerow(
+                    (normalized_entry_id, normalized_year, normalized_reason)
+                )
+            rows[key] = normalized_year
 
 
 def _import_filtered_structures(input_dataset_path: Path) -> None:
@@ -135,7 +167,11 @@ def _import_filtered_structures(input_dataset_path: Path) -> None:
         return
     with input_filtered_path.open(newline="", encoding="utf-8") as csvfile:
         for row in csv.DictReader(csvfile):
-            _record_filtered_structure(row.get("entry_id"), row.get("reason") or "")
+            _record_filtered_structure(
+                row.get("entry_id"),
+                row.get("reason") or "",
+                year=row.get("year"),
+            )
 
 
 def _configure_dataset_warning_logs(
@@ -2681,21 +2717,27 @@ class RCSBClient:
         if not entry_id:
             return None
         entry_id = str(entry_id)
+        year = extract_year(entry.get("rcsb_accession_info", {}).get("deposit_date"))
 
         model_count_raw = entry.get("rcsb_entry_info", {}).get("deposited_model_count")
         if model_count_raw is None:
-            _record_filtered_structure(entry_id, "deposited model count is missing")
+            _record_filtered_structure(
+                entry_id, "deposited model count is missing", year=year
+            )
             return None
         try:
             model_count = int(model_count_raw)
         except (TypeError, ValueError):
-            _record_filtered_structure(entry_id, "deposited model count is invalid")
+            _record_filtered_structure(
+                entry_id, "deposited model count is invalid", year=year
+            )
             return None
         if model_count <= 1:
-            _record_filtered_structure(entry_id, "fewer than 2 deposited models")
+            _record_filtered_structure(
+                entry_id, "fewer than 2 deposited models", year=year
+            )
             return None
 
-        year = extract_year(entry.get("rcsb_accession_info", {}).get("deposit_date"))
         if year is None:
             _record_filtered_structure(entry_id, "deposit year is missing or invalid")
             return None
@@ -2705,6 +2747,7 @@ class RCSBClient:
             _record_filtered_structure(
                 entry_id,
                 f"expected exactly 1 polymer entity (found {len(polymer_entities)})",
+                year=year,
             )
             return None
         polymer_entity = polymer_entities[0] or {}
@@ -2714,10 +2757,13 @@ class RCSBClient:
             _record_filtered_structure(
                 entry_id,
                 "polymer entity type is not polypeptide(L) or polypeptide(D)",
+                year=year,
             )
             return None
         if entity_poly.get("rcsb_entity_polymer_type") != PROTEIN_POLYMER_TYPE:
-            _record_filtered_structure(entry_id, "polymer entity is not a protein")
+            _record_filtered_structure(
+                entry_id, "polymer entity is not a protein", year=year
+            )
             return None
 
         chain_id = str(entity_poly.get("pdbx_strand_id") or "").strip()
@@ -2725,6 +2771,7 @@ class RCSBClient:
             _record_filtered_structure(
                 entry_id,
                 "polymer entity does not have exactly 1 chain ID",
+                year=year,
             )
             return None
 
@@ -2735,6 +2782,7 @@ class RCSBClient:
             _record_filtered_structure(
                 entry_id,
                 "coordinate models do not have equal full-chain lengths",
+                year=year,
             )
             return None
 
@@ -3022,6 +3070,9 @@ class RCSBClient:
         query($ids:[String!]!) {
           entries(entry_ids:$ids) {
             rcsb_id
+            rcsb_accession_info {
+              deposit_date
+            }
             exptl {
               method
             }
@@ -3048,6 +3099,9 @@ class RCSBClient:
                 continue
             normalized_entry_id = str(entry_id)
             returned_entry_ids.add(normalized_entry_id)
+            year = extract_year(
+                (entry.get("rcsb_accession_info") or {}).get("deposit_date")
+            )
 
             methods = []
             for exptl in entry.get("exptl") or []:
@@ -3070,6 +3124,7 @@ class RCSBClient:
                     normalized_entry_id,
                     "experimental method set does not exactly match "
                     f"{expected_methods} (found [{actual_methods}])",
+                    year=year,
                 )
                 continue
 
@@ -3084,6 +3139,7 @@ class RCSBClient:
                         _record_filtered_structure(
                             normalized_entry_id,
                             "protein polymer entity count is missing or invalid",
+                            year=year,
                         )
                     continue
                 if protein_count < 1:
@@ -3091,6 +3147,7 @@ class RCSBClient:
                         _record_filtered_structure(
                             normalized_entry_id,
                             "entry has no protein polymer entities",
+                            year=year,
                         )
                     continue
 
@@ -3147,7 +3204,11 @@ class RCSBClient:
                 (entry.get("rcsb_accession_info") or {}).get("deposit_date")
             ) is None:
                 _record_filtered_structure(
-                    entry["rcsb_id"], "deposit year is missing or invalid"
+                    entry["rcsb_id"],
+                    "deposit year is missing or invalid",
+                    year=(entry.get("rcsb_accession_info") or {}).get(
+                        "deposit_date"
+                    ),
                 )
         return [
             entry.get("rcsb_accession_info", {}).get("deposit_date")
@@ -3639,7 +3700,7 @@ class RCSBClient:
                 continue
             if year is None:
                 _record_filtered_structure(
-                    entry_id, "deposit year is missing or invalid"
+                    entry_id, "deposit year is missing or invalid", year=year
                 )
                 continue
             entry_mw_raw = (entry.get("rcsb_entry_info") or {}).get("molecular_weight")
@@ -3647,7 +3708,9 @@ class RCSBClient:
                 molecular_weight_kda = float(entry_mw_raw)
             except (TypeError, ValueError):
                 _record_filtered_structure(
-                    entry_id, "entry molecular weight is missing or invalid"
+                    entry_id,
+                    "entry molecular weight is missing or invalid",
+                    year=year,
                 )
                 continue
 
@@ -3787,6 +3850,7 @@ class RCSBClient:
             _record_filtered_structure(
                 entry_id,
                 f"expected exactly 1 polymer entity instance (found {len(instances)})",
+                year=year,
             )
             return None
         try:
@@ -3809,14 +3873,14 @@ class RCSBClient:
                 exc,
             )
             _record_filtered_structure(
-                entry_id, f"coordinate preparation failed: {exc}"
+                entry_id, f"coordinate preparation failed: {exc}", year=year
             )
             return None
 
         modeled_sequence_length = len(modeled_auth_seq_ids)
         if modeled_sequence_length <= 0:
             _record_filtered_structure(
-                entry_id, "no usable first-model modeled CA residues"
+                entry_id, "no usable first-model modeled CA residues", year=year
             )
             return None
         modeled_start_seq_id = min(modeled_auth_seq_ids)
@@ -3840,7 +3904,9 @@ class RCSBClient:
             LOGGER.warning(
                 "Skipping STRIDE modeled-first-model entry %s: %s", entry_id, exc
             )
-            _record_filtered_structure(entry_id, f"STRIDE calculation failed: {exc}")
+            _record_filtered_structure(
+                entry_id, f"STRIDE calculation failed: {exc}", year=year
+            )
             return None
         stride_coil_fraction = stride_coverages["C"]
         stride_secondary_percent = (1.0 - stride_coil_fraction) * 100.0
@@ -3924,7 +3990,7 @@ class RCSBClient:
             quality_items = entry.get("pdbx_vrpt_summary_geometry") or []
             if not quality_items:
                 _record_filtered_structure(
-                    entry_id, "validation quality metrics are missing"
+                    entry_id, "validation quality metrics are missing", year=year
                 )
                 continue
             quality = quality_items[0] or {}
@@ -3933,7 +3999,9 @@ class RCSBClient:
             rotamer = quality.get("percent_rotamer_outliers")
             if clashscore is None or rama is None or rotamer is None:
                 _record_filtered_structure(
-                    entry_id, "one or more validation quality metrics are missing"
+                    entry_id,
+                    "one or more validation quality metrics are missing",
+                    year=year,
                 )
                 continue
             try:
@@ -3942,7 +4010,9 @@ class RCSBClient:
                 rotamer_value = float(rotamer)
             except (TypeError, ValueError):
                 _record_filtered_structure(
-                    entry_id, "one or more validation quality metrics are invalid"
+                    entry_id,
+                    "one or more validation quality metrics are invalid",
+                    year=year,
                 )
                 continue
 
@@ -4191,17 +4261,19 @@ class SolutionNMRProgramYearlyBuilder:
                     ):
                         skipped_uncached_count += 1
                         _record_filtered_structure(
-                            entry_id, "PDB file is absent from cache in cache-only mode"
+                            entry_id,
+                            "PDB file is absent from cache in cache-only mode",
+                            year=year,
                         )
                     else:
                         missing_program_count += 1
                         _record_filtered_structure(
-                            entry_id, "PDB file could not be loaded"
+                            entry_id, "PDB file could not be loaded", year=year
                         )
                 elif not programs:
                     missing_program_count += 1
                     _record_filtered_structure(
-                        entry_id, "refinement program is missing"
+                        entry_id, "refinement program is missing", year=year
                     )
                 else:
                     for program in programs:
@@ -4473,10 +4545,20 @@ class MembraneProteinYearlyBuilder:
                 for entry_id in method_entry_ids
                 if entry_id in membrane_entry_ids
             ]
-            for entry_id in sorted(set(method_entry_ids) - membrane_entry_ids):
+            excluded_entry_ids = sorted(set(method_entry_ids) - membrane_entry_ids)
+            year_by_entry_id: dict[str, int] = {}
+            for batch_years in collect_batch_results(
+                batches=list(chunked(excluded_entry_ids, self.config.graphql_batch_size)),
+                max_workers=self.config.max_workers,
+                fetch_fn=self.client.fetch_deposit_year_by_entry_id_for_ids,
+                progress_label=f"Non-membrane {method.label} deposit years",
+            ):
+                year_by_entry_id.update(batch_years)
+            for entry_id in excluded_entry_ids:
                 _record_filtered_structure(
                     entry_id,
                     f"entry has no supported membrane-protein annotation for {method.label}",
+                    year=year_by_entry_id.get(entry_id),
                 )
             LOGGER.info(
                 "Membrane proteins %s: kept %d/%d method entries",
@@ -4722,6 +4804,7 @@ class SolutionNMRMonomerPrecisionBuilder:
             _record_filtered_structure(
                 entry_id,
                 f"precision calculation rejected the structural core: {skip_reason}",
+                year=year,
             )
             return None
         n_models, n_ca_core_used, n_ca_core_raw, mean_rmsd = result
@@ -4783,7 +4866,9 @@ class SolutionNMRMonomerPrecisionStrideModeledFirstModelBuilder(
                     seed.chain_id,
                 )
                 _record_filtered_structure(
-                    seed.entry_id, "no usable first-model modeled CA residues"
+                    seed.entry_id,
+                    "no usable first-model modeled CA residues",
+                    year=seed.year,
                 )
                 return None
             core_range = (
@@ -4803,7 +4888,9 @@ class SolutionNMRMonomerPrecisionStrideModeledFirstModelBuilder(
                     seed.chain_id,
                 )
                 _record_filtered_structure(
-                    seed.entry_id, "STRIDE found no modeled core residues"
+                    seed.entry_id,
+                    "STRIDE found no modeled core residues",
+                    year=seed.year,
                 )
                 return None
             core_start, core_end = core_range
@@ -4823,7 +4910,9 @@ class SolutionNMRMonomerPrecisionStrideModeledFirstModelBuilder(
                 exc,
             )
             _record_filtered_structure(
-                seed.entry_id, f"precision calculation failed: {exc}"
+                seed.entry_id,
+                f"precision calculation failed: {exc}",
+                year=seed.year,
             )
             return None
 
@@ -5231,7 +5320,9 @@ class SolutionNMRMonomerXrayHomologBuilder:
                     except NMRHomologyQueryIneligibleError as exc:
                         completed_count += 1
                         exclusion_reason_counts[exc.reason] += 1
-                        _record_filtered_structure(seed.entry_id, exc.reason)
+                        _record_filtered_structure(
+                            seed.entry_id, exc.reason, year=seed.year
+                        )
                         LOGGER.info(
                             "Excluding NMR entry %s from X-ray homology: %s",
                             seed.entry_id,
@@ -5264,7 +5355,9 @@ class SolutionNMRMonomerXrayHomologBuilder:
                         completed_count += 1
                         error_count += 1
                         _record_filtered_structure(
-                            seed.entry_id, f"X-ray homology search failed: {exc}"
+                            seed.entry_id,
+                            f"X-ray homology search failed: {exc}",
+                            year=seed.year,
                         )
                         if is_server_error:
                             LOGGER.warning(
@@ -5581,11 +5674,15 @@ class SolutionNMRMonomerXrayRmsdBuilder:
             homolog.nmr_core_start_seq_id is None
             or homolog.nmr_core_end_seq_id is None
         ):
-            _record_filtered_structure(homolog.entry_id, "NMR core range is missing")
+            _record_filtered_structure(
+                homolog.entry_id, "NMR core range is missing", year=homolog.year
+            )
             return None
         if not candidates:
             _record_filtered_structure(
-                homolog.entry_id, "no usable X-ray homolog candidates"
+                homolog.entry_id,
+                "no usable X-ray homolog candidates",
+                year=homolog.year,
             )
             return None
 
@@ -5607,6 +5704,7 @@ class SolutionNMRMonomerXrayRmsdBuilder:
             _record_filtered_structure(
                 homolog.entry_id,
                 "no X-ray homolog candidate produced a usable CA RMSD",
+                year=homolog.year,
             )
             return None
         except Exception as exc:
@@ -5614,7 +5712,9 @@ class SolutionNMRMonomerXrayRmsdBuilder:
                 "X-ray RMSD calculation failed for %s: %s", homolog.entry_id, exc
             )
             _record_filtered_structure(
-                homolog.entry_id, f"X-ray RMSD calculation failed: {exc}"
+                homolog.entry_id,
+                f"X-ray RMSD calculation failed: {exc}",
+                year=homolog.year,
             )
             return None
 
@@ -5629,11 +5729,15 @@ class SolutionNMRMonomerXrayRmsdBuilder:
             homolog.nmr_core_start_seq_id is None
             or homolog.nmr_core_end_seq_id is None
         ):
-            _record_filtered_structure(homolog.entry_id, "NMR core range is missing")
+            _record_filtered_structure(
+                homolog.entry_id, "NMR core range is missing", year=homolog.year
+            )
             return None
         if not candidates:
             _record_filtered_structure(
-                homolog.entry_id, "no usable X-ray homolog candidates"
+                homolog.entry_id,
+                "no usable X-ray homolog candidates",
+                year=homolog.year,
             )
             return None
 
@@ -5657,6 +5761,7 @@ class SolutionNMRMonomerXrayRmsdBuilder:
                 _record_filtered_structure(
                     homolog.entry_id,
                     "no X-ray homolog candidate produced a usable CA RMSD",
+                    year=homolog.year,
                 )
                 return None
 
@@ -5721,7 +5826,9 @@ class SolutionNMRMonomerXrayRmsdBuilder:
                 exc,
             )
             _record_filtered_structure(
-                homolog.entry_id, f"X-ray RMSD extremes calculation failed: {exc}"
+                homolog.entry_id,
+                f"X-ray RMSD extremes calculation failed: {exc}",
+                year=homolog.year,
             )
             return None
 
@@ -5748,12 +5855,15 @@ class SolutionNMRMonomerXrayRmsdBuilder:
                 record.nmr_core_start_seq_id is None
                 or record.nmr_core_end_seq_id is None
             ):
-                _record_filtered_structure(record.entry_id, "NMR core range is missing")
+                _record_filtered_structure(
+                    record.entry_id, "NMR core range is missing", year=record.year
+                )
                 continue
             if not record.xray_homolog_entity_ids:
                 _record_filtered_structure(
                     record.entry_id,
                     f"no X-ray homologs at {self.sequence_identity_percent}% sequence identity",
+                    year=record.year,
                 )
                 continue
             filtered_homologs.append(record)
@@ -5802,7 +5912,9 @@ class SolutionNMRMonomerXrayRmsdBuilder:
             nmr_chain_id = chain_by_entry_id.get(homolog.entry_id)
             if not nmr_chain_id:
                 _record_filtered_structure(
-                    homolog.entry_id, "NMR chain metadata is missing"
+                    homolog.entry_id,
+                    "NMR chain metadata is missing",
+                    year=homolog.year,
                 )
                 continue
             candidates = tuple(
@@ -5822,7 +5934,9 @@ class SolutionNMRMonomerXrayRmsdBuilder:
             )
             if not candidates:
                 _record_filtered_structure(
-                    homolog.entry_id, "X-ray homolog candidate metadata is missing"
+                    homolog.entry_id,
+                    "X-ray homolog candidate metadata is missing",
+                    year=homolog.year,
                 )
                 continue
             work_items.append((homolog, nmr_chain_id, candidates))
@@ -6627,13 +6741,16 @@ def filter_xray_homolog_records_by_deposit_date(
             _record_filtered_structure(
                 record.entry_id,
                 f"NMR query sequence is too short ({record.nmr_query_sequence_length} residues)",
+                year=record.year,
             )
             continue
         if (
             record.nmr_core_start_seq_id is None
             or record.nmr_core_end_seq_id is None
         ):
-            _record_filtered_structure(record.entry_id, "NMR core range is missing")
+            _record_filtered_structure(
+                record.entry_id, "NMR core range is missing", year=record.year
+            )
             continue
         eligible_records.append(record)
     records = eligible_records
@@ -6702,7 +6819,9 @@ def filter_xray_homolog_records_by_deposit_date(
                 "Excluding NMR entry %s from historical homology: missing NMR deposit date",
                 record.entry_id,
             )
-            _record_filtered_structure(record.entry_id, "NMR deposit date is missing")
+            _record_filtered_structure(
+                record.entry_id, "NMR deposit date is missing", year=record.year
+            )
             continue
         kept_entity_ids_list: list[str] = []
         dates_complete = True
@@ -6726,7 +6845,9 @@ def filter_xray_homolog_records_by_deposit_date(
                 record.entry_id,
             )
             _record_filtered_structure(
-                record.entry_id, "one or more X-ray release dates are missing"
+                record.entry_id,
+                "one or more X-ray release dates are missing",
+                year=record.year,
             )
             continue
         kept_entity_ids = tuple(kept_entity_ids_list)

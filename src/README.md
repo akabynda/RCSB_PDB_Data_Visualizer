@@ -86,8 +86,12 @@ Each output `name.csv` also receives a paired `name_filtered.csv`. The paired
 file has two columns:
 
 - `entry_id`: the RCSB PDB entry rejected from that output;
+- `year`: the structure deposition year;
 - `reason`: the exact metadata, eligibility, coordinate, STRIDE, homology,
-historical-date, or RMSD condition that caused the rejection.
+  historical-date, or RMSD condition that caused the rejection.
+
+The `year` cell is empty only when RCSB does not provide a valid deposit date or
+omits the requested entry from its metadata response.
 
 Rows are written as filtering happens, including from concurrent workers, and
 duplicate `entry_id`/`reason` decisions are suppressed. A structure can have

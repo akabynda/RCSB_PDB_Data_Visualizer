@@ -70,13 +70,21 @@ class FilteredStructureCsvTests(unittest.TestCase):
             _set_active_dataset_filtered_csvs((output_path,))
 
             _record_filtered_structure("1ABC", "missing   molecular weight")
-            _record_filtered_structure("1ABC", "missing molecular weight")
+            _record_filtered_structure(
+                "1ABC", "missing molecular weight", year=2001
+            )
 
             filtered_path = filtered_structures_csv_path(output_path)
             self.assertEqual(filtered_path.name, "dataset_filtered.csv")
             self.assertEqual(
                 self._read_rows(filtered_path),
-                [{"entry_id": "1ABC", "reason": "missing molecular weight"}],
+                [
+                    {
+                        "entry_id": "1ABC",
+                        "year": "2001",
+                        "reason": "missing molecular weight",
+                    }
+                ],
             )
 
     def test_routes_a_decision_only_to_selected_output(self) -> None:
@@ -94,14 +102,22 @@ class FilteredStructureCsvTests(unittest.TestCase):
             )
             _set_active_dataset_filtered_csvs((second_output,))
 
-            _record_filtered_structure("2DEF", "not a membrane protein")
+            _record_filtered_structure(
+                "2DEF", "not a membrane protein", year=2002
+            )
 
             self.assertEqual(
                 self._read_rows(filtered_structures_csv_path(first_output)), []
             )
             self.assertEqual(
                 self._read_rows(filtered_structures_csv_path(second_output)),
-                [{"entry_id": "2DEF", "reason": "not a membrane protein"}],
+                [
+                    {
+                        "entry_id": "2DEF",
+                        "year": "2002",
+                        "reason": "not a membrane protein",
+                    }
+                ],
             )
 
     def test_weight_fetch_records_every_rejected_requested_entry(self) -> None:
@@ -123,10 +139,12 @@ class FilteredStructureCsvTests(unittest.TestCase):
                 [
                     {
                         "entry_id": "NO_WEIGHT",
+                        "year": "2002",
                         "reason": "entry molecular weight is missing or invalid",
                     },
                     {
                         "entry_id": "NO_RESPONSE",
+                        "year": "",
                         "reason": "entry metadata missing from RCSB GraphQL response",
                     },
                 ],
@@ -139,7 +157,7 @@ class FilteredStructureCsvTests(unittest.TestCase):
             derived_output = Path(tmpdir) / "clusters.csv"
             upstream_filtered = filtered_structures_csv_path(upstream_output)
             upstream_filtered.write_text(
-                "entry_id,reason\nUPSTREAM,quality metrics are missing\n",
+                "entry_id,year,reason\nUPSTREAM,1999,quality metrics are missing\n",
                 encoding="utf-8",
             )
             _configure_dataset_filtered_csvs(
@@ -158,6 +176,7 @@ class FilteredStructureCsvTests(unittest.TestCase):
                 [
                     {
                         "entry_id": "UPSTREAM",
+                        "year": "1999",
                         "reason": "quality metrics are missing",
                     }
                 ],
@@ -183,11 +202,13 @@ class FilteredStructureCsvTests(unittest.TestCase):
                     "entries": [
                         {
                             "rcsb_id": "SINGLE",
+                            "rcsb_accession_info": {"deposit_date": "2001-01-01"},
                             "exptl": [{"method": "SOLUTION NMR"}],
                             "rcsb_entry_info": {"polymer_entity_count_protein": 1},
                         },
                         {
                             "rcsb_id": "PAIR",
+                            "rcsb_accession_info": {"deposit_date": "2002-01-01"},
                             "exptl": [
                                 {"method": "SOLUTION NMR"},
                                 {"method": "SOLID-STATE NMR"},
@@ -196,6 +217,7 @@ class FilteredStructureCsvTests(unittest.TestCase):
                         },
                         {
                             "rcsb_id": "EXTRA",
+                            "rcsb_accession_info": {"deposit_date": "2003-01-01"},
                             "exptl": [
                                 {"method": "SOLUTION NMR"},
                                 {"method": "X-RAY DIFFRACTION"},
@@ -204,6 +226,7 @@ class FilteredStructureCsvTests(unittest.TestCase):
                         },
                         {
                             "rcsb_id": "NO_PROTEIN",
+                            "rcsb_accession_info": {"deposit_date": "2004-01-01"},
                             "exptl": [{"method": "SOLUTION NMR"}],
                             "rcsb_entry_info": {"polymer_entity_count_protein": 0},
                         },
@@ -223,7 +246,11 @@ class FilteredStructureCsvTests(unittest.TestCase):
                 any("experimental method set" in row["reason"] for row in rows)
             )
             self.assertIn(
-                {"entry_id": "NO_PROTEIN", "reason": "entry has no protein polymer entities"},
+                {
+                    "entry_id": "NO_PROTEIN",
+                    "year": "2004",
+                    "reason": "entry has no protein polymer entities",
+                },
                 rows,
             )
 
@@ -252,6 +279,7 @@ class FilteredStructureCsvTests(unittest.TestCase):
                 [
                     {
                         "entry_id": "ONE_MODEL",
+                        "year": "2000",
                         "reason": "fewer than 2 deposited models",
                     }
                 ],

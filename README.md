@@ -230,8 +230,9 @@ Outputs:
 - To continue an interrupted X-ray homolog search, rerun its dataset command
   with `--xray-homolog-resume`.
 - Every generated `name.csv` has a paired `name_filtered.csv` containing the
-  `entry_id` and reason for each structure rejected while that dataset was
-  built. A header-only file means that no structures were filtered out.
+  `entry_id`, deposition `year`, and reason for each structure rejected while
+  that dataset was built. A header-only file means that no structures were
+  filtered out.
 - Every generated CSV has a sibling `.log` file. An empty log means no warnings
   or errors were recorded for that dataset.
 - Use `python src/pdb_dataset_builder.py --help` and
