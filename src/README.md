@@ -59,14 +59,17 @@ python src/pdb_dataset_builder.py --datasets all
 compute RMSD values.
 
 Coordinates are downloaded from RCSB, wwPDB, PDBe, or the EBI archive mirror.
-Each cached `.pdb` or `.cif` file has a `.cache.json` sidecar with its checksum,
-size, modification time, and available remote validators. Cache entries are
-revalidated after 24 hours by default. Set `--pdb-cache-validation-hours 0` to
-validate them on every access.
+Validated coordinate-cache entries have a `.cache.json` sidecar with their
+checksum, size, modification time, and available remote validators. An
+intermediate `.cif` retained after the legacy-PDB conversion fallback does not
+have its own sidecar; validation metadata is stored for the converted `.pdb`.
+Cache entries are revalidated after 24 hours by default. Set
+`--pdb-cache-validation-hours 0` to validate them on every access.
 
 Structures that do not fit the legacy PDB format are downloaded as mmCIF and
 converted to per-chain PDB subsets. The cache also stores the resulting chain-ID
-mapping. Cache writes are atomic and safe for concurrent workers.
+mapping. Per-chain subset PDBs and chain-ID mappings are installed through
+unique temporary files and atomic replacement.
 
 Each output CSV receives a sibling `.log` file containing warnings and errors
 from that build. An empty log indicates a clean run.
