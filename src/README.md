@@ -71,8 +71,14 @@ converted to per-chain PDB subsets. The cache also stores the resulting chain-ID
 mapping. Per-chain subset PDBs and chain-ID mappings are installed through
 unique temporary files and atomic replacement.
 
+A per-chain subset is reused only when its requested chain set and source mmCIF
+SHA-256 still match. Remote revalidation uses `ETag` and `Last-Modified` when
+available.
+
 Each output CSV receives a sibling `.log` file containing warnings and errors
-from that build. An empty log indicates a clean run.
+from that build. Logs are recreated at the start of a run; multi-output datasets
+send shared warnings and errors to each affected log. An empty log indicates a
+clean run.
 
 Each output `name.csv` also receives a paired `name_filtered.csv`. The paired
 file has three columns:
@@ -85,7 +91,10 @@ file has three columns:
 The `year` cell is empty when no valid deposition date is available. One entry
 can have several rows if it fails independent checks. Duplicate
 `entry_id`/`reason` rows are suppressed. A header-only file means that nothing
-was filtered. Resumed and derived builds preserve relevant earlier exclusions.
+was filtered. Normal builds recreate the report. A homolog resume preserves its
+earlier exclusions, while a derived dataset imports upstream exclusions and
+then appends its own. Shared multi-output exclusions are written to every
+affected report; output-specific exclusions stay in their own report.
 
 Build one dataset:
 
@@ -136,7 +145,8 @@ polymer entity in each entry. This is the same protein-presence filter used by
 The `solution_nmr_monomer_*` datasets do not use all proteins. They keep only
 protein monomers that pass several structural filters:
 
-- the entry has more than one deposited model;
+- the entry metadata reports more than one deposited model, and the coordinate
+  file contains at least two parsed models;
 - the entry has exactly one polymer entity;
 - that polymer entity is a protein, with entity type `polypeptide(L)` or
   `polypeptide(D)`;
@@ -145,7 +155,11 @@ protein monomers that pass several structural filters:
   defined below.
 
 All `solution_nmr_monomer_*` datasets use this filter. A model-length difference
-outside the STRIDE core therefore still excludes the entry.
+outside the STRIDE core therefore still excludes the entry. The equal-length
+test compares the number of selected CA positions, not their residue-number
+sets; precision later uses the positions shared by all models. Direct monomer
+datasets apply the filter themselves, while program-cluster, historical, and
+RMSD datasets inherit it through their input CSVs.
 
 `method_counts` and `membrane_protein_counts` are broader summary datasets. They
 intentionally count method trends across X-ray, cryo-EM, and NMR categories.
@@ -156,6 +170,12 @@ For coordinate-level monomer datasets, a modeled CA position is an author
 residue number with a positive-occupancy `ATOM` or `HETATM` CA record in a
 coordinate model. Duplicate records, insertion-code variants, and alternate
 locations with the same residue number are collapsed to one position.
+
+The selection is deterministic: `ATOM` is preferred to `HETATM`; insertion codes
+are ordered blank first and then lexically; higher occupancy is preferred next;
+alternate locations are ordered blank, `A`, `1`, then lexically. Residue-level
+operations retain PDB author residue numbers rather than replacing them with
+RCSB label IDs.
 
 The positions in the first model define the STRIDE summary, core endpoints, and
 homology query. Precision uses positions shared by all models. NMR-to-X-ray
@@ -175,7 +195,8 @@ one of these states in the first model:
 Both `ATOM` and `HETATM` CA records can define the endpoints. The STRIDE summary
 can retain an entry with no core states, but precision and homology datasets
 cannot. Homolog search also requires at least 11 modeled CA positions inside
-the core.
+the core. The core states define only the endpoints; downstream steps start from
+the observed CA positions between them, not only residues in those states.
 
 Homolog search excludes an NMR entry if any modeled CA position in its core is
 represented by a `HETATM` record. Entries without a valid query are absent from
@@ -202,11 +223,10 @@ python src/pdb_dataset_builder.py \
 ```
 
 First-model STRIDE state maps are cached by structure in `data/stride_cache/` by
-default and reused across STRIDE-based datasets. Use `--stride-cache-dir` to
-change that location.
-
-The cached STRIDE result covers the complete first model, including `ATOM` and
-`HETATM` records.
+default and reused across STRIDE-based datasets. A cache entry is accepted only
+when the SHA-1 of the complete first-model coordinate text still matches. The
+STRIDE path and version are not part of that key, so clear this cache after
+changing STRIDE. Use `--stride-cache-dir` to change the cache location.
 
 ## Useful Options
 
@@ -223,7 +243,8 @@ The cached STRIDE result covers the complete first model, including `ATOM` and
 
 Long-running calculations:
 
-- `--xray-homolog-resume`: continue a homolog build from its checkpoint.
+- `--xray-homolog-resume`: retain valid paired 95%/100% rows and entries marked
+  `ineligible`; retry every other seed.
 - `--precision-max-entries`: limit the number of entries processed for precision
   calculations.
 - `--precision-workers`: worker count for precision RMSD calculations.
@@ -238,6 +259,9 @@ Long-running calculations:
 The homolog completion checkpoint is written beside the 95% output as
 `<95%-output-stem>.resume.tsv`. Run without `--xray-homolog-resume` to rebuild
 the homolog CSV pair and checkpoint from scratch.
+
+Precision and RMSD datasets reuse valid rows from an existing output by default.
+Use `--precision-overwrite` or `--xray-rmsd-overwrite` to rebuild from scratch.
 
 ## Recommended Run Order
 
@@ -285,9 +309,9 @@ Counts PDB entries by deposition year and broad experimental-method category:
 X-ray, cryo-EM, and NMR. Every counted entry must contain at least one protein
 polymer entity.
 
-The NMR category includes entries with exactly `SOLUTION NMR`, exactly
-`SOLID-STATE NMR`, or exactly the two-method combination `SOLID-STATE NMR` and
-`SOLUTION NMR`. All three cases are counted under the `NMR` label.
+The categories use exact method sets: `X-RAY DIFFRACTION` for X-ray,
+`ELECTRON MICROSCOPY` for cryo-EM, and either `SOLUTION NMR`, `SOLID-STATE NMR`,
+or their two-method combination for NMR. Other hybrids are excluded.
 
 Output:
 
@@ -312,6 +336,10 @@ Collects exact single-method `SOLUTION NMR` entries, downloads PDB files into
 the cache, and extracts refinement program names from PDB remarks. The output
 shows refinement-program usage by year.
 
+Program names from `REMARK 3 PROGRAM` and wrapped `REMARK 210 SOFTWARE USED`
+fields are normalized before counting. Each entry contributes once to each
+distinct normalized name it reports.
+
 Output:
 
 - `data/solution_nmr_program_counts_by_year.csv`
@@ -327,6 +355,10 @@ Assigns SOLUTION NMR protein monomers to refinement-program clusters using PDB
 `REMARK 3 PROGRAM` and `REMARK 210 SOFTWARE USED`. If a structure names `n`
 known clusters, each receives a score of `1/n`, so the total score remains `1`.
 `OTHER` is used only when no known cluster is found.
+
+Wrapped `REMARK 210` fields are joined before matching. Program-aware boundaries
+prevent unrelated names such as `VARIAN` and `DISCOVERY STUDIO` from matching
+`ARIA` or `DISCOVER`.
 
 Matching is case-insensitive and accepts versions, separators, compound program
 strings, and these aliases:
@@ -344,6 +376,8 @@ strings, and these aliases:
 - `CLUSTER9` — `OTHER`, used only when no known cluster matches
 
 For example, `CNS ARIA` contributes `0.5` to both `CLUSTER3` and `CLUSTER2`.
+`cluster_score`, per-cluster `structure_count`, and per-cluster quality means use
+these fractional weights. Overall yearly totals count unique structures.
 This dataset requires the quality CSV and downloads missing PDB files itself.
 `solution_nmr_program_counts` is not a prerequisite.
 
@@ -366,6 +400,8 @@ Collects exact single-method `SOLUTION NMR` entries that contain at least one
 protein polymer entity and reads one total molecular-weight value per entry from
 RCSB entry metadata.
 
+Weight-category plots use `<10 kDa`, `10–20 kDa` inclusive, and `>20 kDa`.
+
 Output:
 
 - `data/solution_nmr_structure_weights.csv`
@@ -381,9 +417,13 @@ The output stores the modeled residue span and STRIDE fractions for `H`, `G`,
 `I`, `E`, `B`, `T`, and `C`.
 
 Unrecognized or missing assignments are counted as `C`. If STRIDE returns no
-usable state map, the row is retained with state fractions of `-1.0` and a
-secondary-structure value of `200.0`. Figure 3 excludes these sentinel rows. In
-the article snapshot, it excludes 97 rows and plots 10,030 through 2024.
+usable state map, the row is retained with state fractions of `-1.0` and
+`stride_secondary_structure_percent = 200.0`.
+
+That stored percentage is `100 * (1 - C)` and includes turns (`T`). Figure 3
+does not use it: the plot computes `100 * (H + G + I + E + B)`, removes values
+outside 0–100%, and takes the arithmetic mean for each year. In the article
+snapshot, this excludes 97 rows and plots 10,030 through 2024.
 
 Requires:
 
@@ -414,6 +454,10 @@ The current ensemble precision is
 ```text
 P = sqrt[(1 / (N*n)) * sum_i sum_j ||r_ij(aligned) - r_mean,j||^2].
 ```
+
+The CSV field `n_ca_core_used` is the size of the collapsed-CA intersection.
+`n_ca_core_raw` is the smallest raw positive-occupancy CA-record count across
+models at those positions.
 
 Requires:
 
@@ -450,20 +494,26 @@ Output:
 
 ### `solution_nmr_monomer_xray_homologs`
 
-Builds a modeled STRIDE-core sequence for each eligible NMR monomer and searches
-RCSB for X-ray polymer-entity homologs. The query must contain at least 11
-residues. Each candidate chain is then checked against its first-model
-coordinates.
+Builds a query from every modeled first-model CA position between the STRIDE
+core endpoints. The query must contain at least 11 residues. RCSB Search uses a
+protein-sequence identity cutoff of 0.95 or 1.0, an E-value cutoff of 0.1, and an
+`X-RAY DIFFRACTION` condition. This search can therefore return X-ray hybrids;
+it is not an exact single-method filter.
 
-- The 95% output requires at least `ceil(0.95 * query length)` modeled pairs and
-  the same number of identities.
-- The 100% output requires a complete one-to-one identity match.
+Every chain of each candidate polymer entity is then checked against its
+first-model coordinates.
+
+- The 95% coordinate check uses a local gapped alignment and requires at least
+  `ceil(0.95 * query length)` modeled pairs and identities.
+- The 100% check requires the complete query to match one consecutive window;
+  the X-ray chain may have additional residues outside that window.
 - An NMR core containing a `HETATM` CA is excluded.
 - X-ray `ATOM` and `HETATM` CA records can be used for sequence matching.
 - Missing resolution does not exclude a candidate and is written as `nan`.
 
-HTTP 5xx failures are retried up to three times. Other failures are not retried
-by this mechanism.
+After ordinary request retries, a remaining HTTP 5xx requeues the entry for at
+most three entry-level attempts. Other failures are not requeued. A final error
+removes the entry rather than writing `has_xray_homolog = 0`.
 
 Requires:
 
@@ -477,8 +527,10 @@ Outputs:
 
 ### `solution_nmr_monomer_xray_homologs_historical`
 
-Keeps only X-ray homologs released by the NMR deposition date. The NMR entry is
-omitted if its deposition date or any candidate release date is missing.
+Keeps only X-ray homologs released by the NMR deposition date. Records with no
+candidates remain with `has_xray_homolog = 0`. For a record with candidates, a
+missing NMR deposition date or any missing X-ray initial-release date removes
+the complete record. The release date is the RCSB `initial_release_date` field.
 
 Requires:
 
@@ -506,10 +558,12 @@ d_eh = RMSD_superposed(NMR_e,model1, Xray_h,model1)
 
 The coordinates are centered and optimally superposed before RMSD is calculated.
 
-The ordinary RMSD CSV keeps the first usable candidate after sorting by
-resolution, entry ID, and entity ID. Missing resolutions sort last. Within an
-entity, it chooses the chain with the most CA pairs, using lower RMSD to break a
-tie. The `*_extremes` dataset provides minima and maxima across candidates.
+The ordinary RMSD CSV keeps the first usable candidate after sorting known
+resolutions from lowest to highest, then by entry and entity ID; missing
+resolutions sort last. If one chain has several exact matching windows, the
+window with the lowest RMSD is used. Within an entity, the chain with the most
+CA pairs is selected, using lower RMSD to break a tie. The `*_extremes` dataset
+provides minima and maxima across candidates.
 
 Requires one of:
 
@@ -550,7 +604,9 @@ Y_y = median_{e: year(e)=y}(d_e,min).
 ```
 
 The precision-correlation plot compares `d_e,min` with ensemble precision `P`.
-An entry is written only if at least one candidate produces a usable RMSD.
+An entry is written only if at least one candidate produces a usable RMSD. The
+minimum and maximum are computed after the per-entity chain selection described
+above.
 
 Requires one of:
 
