@@ -166,6 +166,7 @@ protein monomers that pass several structural filters:
 
 - the entry metadata reports more than one deposited model, and the coordinate
   file contains at least two parsed models;
+- the entry has a valid deposition year;
 - the entry has exactly one polymer entity;
 - that polymer entity is a protein, with entity type `polypeptide(L)` or
   `polypeptide(D)`;
@@ -179,6 +180,8 @@ test compares the number of selected CA positions, not their residue-number
 sets; precision later uses the positions shared by all models. Direct monomer
 datasets apply the filter themselves, while program-cluster, historical, and
 RMSD datasets inherit it through their input CSVs.
+
+The STRIDE summary additionally requires exactly one polymer entity instance.
 
 `method_counts` and `membrane_protein_counts` are broader summary datasets. They
 intentionally count method trends across X-ray, cryo-EM, and NMR categories.
@@ -284,7 +287,7 @@ changing STRIDE. Use `--stride-cache-dir` to change the cache location.
 ## Useful Options
 
 - `--datasets`: dataset kind list, or `all`.
-- `--workers`: parallel workers for GraphQL/API calls.
+- `--workers`: parallel workers for API, coordinate, STRIDE, and homology work.
 - `--batch-size`: GraphQL batch size.
 - `--page-size`: RCSB Search API page size.
 - `--log-level`: logging level, for example `INFO` or `DEBUG`.
@@ -304,7 +307,7 @@ Long-running calculations:
 - `--precision-workers`: worker count for precision RMSD calculations.
 - `--xray-rmsd-workers`: worker count for X-ray RMSD calculations.
 - `--xray-rmsd-sequence-identity {95,100}`: choose which homolog CSV is used by
-  the X-ray RMSD datasets.
+  the X-ray RMSD datasets (default: `100`).
 
 The homolog completion checkpoint is written beside the 95% output as
 `<95%-output-stem>.resume.tsv`. With `--resume`, valid paired 95%/100% rows and
@@ -375,7 +378,9 @@ Output:
 ### `membrane_protein_counts`
 
 Counts entries with membrane-protein annotations by deposition year. It also
-writes a method split for membrane entries.
+writes a method split for protein-containing membrane entries whose experimental
+method set exactly matches one of the supported X-ray, cryo-EM, or NMR sets.
+Therefore, the method-split counts need not sum to the overall membrane count.
 
 Membrane annotations come from RCSB annotation types such as OPM, PDBTM,
 MemProtMD, and mpstruc.
@@ -566,7 +571,8 @@ first-model coordinates.
 - A matching X-ray region containing any positive-occupancy `HETATM` CA is
   excluded at every identity cutoff. If several regions match, clean regions
   remain eligible and dirty regions are ignored.
-- Missing resolution does not exclude a candidate and is written as `nan`.
+- Missing resolution does not exclude a candidate. Resolution is not stored in
+  the homolog CSV; downstream RMSD outputs write a missing value as `nan`.
 
 Within one NMR seed, the 95% and 100% passes share fetched candidate metadata
 and use the same durable, versioned first-model X-ray CA cache. This avoids
@@ -636,8 +642,9 @@ together, all usable candidate pairs are computed once per NMR entry. Ordinary
 retains the first resolution-sorted successful candidate; it is not replaced by
 the minimum-RMSD candidate. Extremes applies its min/max rules to the same pair
 set. Historical outputs filter that set to historical entity IDs and recompute
-their own total and successful homolog counts. Current/historical core metadata
-and the historical-subset invariant are validated before the shared run.
+their own total homolog counts; historical extremes outputs also recompute their
+successful homolog counts. Current/historical core metadata and the
+historical-subset invariant are validated before the shared run.
 
 Requires one of:
 
@@ -712,6 +719,8 @@ After the CSV files are ready, build figures with `src/pdb_plot.py`.
 
 By default, `src/pdb_plot.py` reads the standard CSV paths in `data/` and writes
 four PNG variants of each figure to `figures/<figure_name>/`.
+Without `--plots`, all plot groups are selected, so all standard input CSVs must
+be present.
 
 The variants combine title/no title with closed/open top and right axes. PNG is
 the default image format. The homolog-timing plot also writes two yearly count
