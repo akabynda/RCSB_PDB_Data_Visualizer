@@ -22,6 +22,9 @@ from matplotlib.ticker import AutoMinorLocator
 
 from src import pdb_plot
 from src.pdb_plot import (
+    AXIS_MAJOR_TICK_LENGTH,
+    AXIS_MINOR_TICK_LENGTH,
+    AXIS_MINOR_TICK_SUBDIVISIONS,
     MAX_PLOT_YEAR,
     NMR_MONOMER_PROGRAM_CLUSTER_LABELS,
     NMR_WEIGHT_LABELS,
@@ -237,23 +240,6 @@ class PlotInfrastructureTests(unittest.TestCase):
         axis.get_view_interval.return_value = (0.0, 10.0)
         self.assertIsNone(self.plotter._visible_major_step(axis))
 
-    def test_integer_minor_subdivisions_selects_readable_divisors(self) -> None:
-        cases = {
-            20.0: 10,
-            16.0: 8,
-            15.0: 5,
-            12.0: 4,
-            6.0: 2,
-            7.0: None,
-            1.0: None,
-            2.5: None,
-        }
-        for step, expected in cases.items():
-            with self.subTest(step=step):
-                self.assertEqual(
-                    self.plotter._integer_minor_subdivisions(step), expected
-                )
-
     def test_categorical_tick_detection_distinguishes_numeric_labels(self) -> None:
         ax = Mock()
         ax.get_xticklabels.return_value = [Mock(get_text=Mock(return_value=""))]
@@ -291,25 +277,38 @@ class PlotInfrastructureTests(unittest.TestCase):
         self.assertEqual(formatter(2020.25, 0), "")
         plt.close(fig)
 
-    def test_configure_minor_ticks_sets_numeric_axes_only(self) -> None:
+    def test_configure_minor_ticks_matches_numeric_x_and_y_axes(self) -> None:
         fig, ax = plt.subplots()
         ax.set_xlim(0.0, 10.0)
-        ax.set_ylim(0.0, 20.0)
+        ax.set_ylim(-1.0, 1.0)
         # Fixed visible ticks keep Matplotlib from adding an out-of-range tick
         # whose Unicode minus sign is not accepted by Python's ``float``.
         ax.set_xticks([0.0, 5.0, 10.0])
-        ax.set_yticks([0.0, 10.0, 20.0])
+        ax.set_yticks([-1.0, -0.5, 0.5, 1.0])
 
         self.plotter._configure_minor_ticks(ax, use_year_x_ticks=False)
 
         self.assertIsInstance(ax.xaxis.get_minor_locator(), AutoMinorLocator)
         self.assertIsInstance(ax.yaxis.get_minor_locator(), AutoMinorLocator)
+        self.assertEqual(
+            ax.xaxis.get_minor_locator().ndivs, AXIS_MINOR_TICK_SUBDIVISIONS
+        )
+        self.assertEqual(
+            ax.yaxis.get_minor_locator().ndivs, AXIS_MINOR_TICK_SUBDIVISIONS
+        )
+        self.assertEqual(ax.xaxis.majorTicks[0]._size, AXIS_MAJOR_TICK_LENGTH)
+        self.assertEqual(ax.yaxis.majorTicks[0]._size, AXIS_MAJOR_TICK_LENGTH)
+        self.assertEqual(ax.xaxis.minorTicks[0]._size, AXIS_MINOR_TICK_LENGTH)
+        self.assertEqual(ax.yaxis.minorTicks[0]._size, AXIS_MINOR_TICK_LENGTH)
         plt.close(fig)
 
         mocked_ax = MagicMock()
         with patch.object(self.plotter, "_visible_major_step", return_value=None):
             self.plotter._configure_minor_ticks(mocked_ax, use_year_x_ticks=True)
         mocked_ax.xaxis.set_minor_locator.assert_not_called()
+        mocked_ax.yaxis.set_minor_locator.assert_called_with(
+            unittest.mock.ANY
+        )
 
         with (
             patch.object(self.plotter, "_visible_major_step", return_value=None),
@@ -1458,7 +1457,10 @@ class PlotOrchestrationTests(unittest.TestCase):
                 Path("stride.csv"), Path("stride.png"), Path("stride.svg")
             )
         self.assertEqual(axes[0].scatter.call_args.args[0].tolist(), [2020])
+        self.assertFalse(axes[0].scatter.call_args.kwargs["clip_on"])
+        self.assertEqual(axes[0].scatter.call_args.kwargs["zorder"], 3)
         np.testing.assert_allclose(step.call_args.kwargs["y_values"], [50.0])
+        self.assertEqual(step.call_args.kwargs["zorder"], 4)
 
         precision = pd.DataFrame(
             {

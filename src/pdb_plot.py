@@ -305,6 +305,9 @@ NMR_MONOMER_PROGRAM_CLUSTER_COLORS: tuple[str, ...] = (
 )
 YEAR_MAJOR_TICK_STEP: int = 5
 YEAR_MINOR_TICK_STEP: int = 1
+AXIS_MINOR_TICK_SUBDIVISIONS: int = YEAR_MAJOR_TICK_STEP // YEAR_MINOR_TICK_STEP
+AXIS_MAJOR_TICK_LENGTH: float = 5.0
+AXIS_MINOR_TICK_LENGTH: float = 3.0
 
 
 @lru_cache(maxsize=1)
@@ -428,8 +431,8 @@ class PDBScientificPlotter:
             )
         )
         ax.xaxis.set_minor_locator(MultipleLocator(YEAR_MINOR_TICK_STEP))
-        ax.tick_params(axis="x", which="major", length=5)
-        ax.tick_params(axis="x", which="minor", length=3)
+        ax.tick_params(axis="x", which="major", length=AXIS_MAJOR_TICK_LENGTH)
+        ax.tick_params(axis="x", which="minor", length=AXIS_MINOR_TICK_LENGTH)
 
     @staticmethod
     def _visible_major_step(axis: plt.Axis) -> float | None:
@@ -460,19 +463,6 @@ class PDBScientificPlotter:
         return step
 
     @staticmethod
-    def _integer_minor_subdivisions(step: float) -> int | None:
-        """Choose readable minor-tick subdivisions for an integer major step."""
-        rounded_step = round(step)
-        if abs(step - rounded_step) > 1e-6:
-            return None
-        if rounded_step <= 1:
-            return None
-        for subdivisions in (10, 8, 5, 4, 2):
-            if rounded_step % subdivisions == 0:
-                return subdivisions
-        return None
-
-    @staticmethod
     def _has_categorical_x_ticks(ax: plt.Axes) -> bool:
         """Return whether visible x tick labels represent categories."""
         labels = [label.get_text().strip() for label in ax.get_xticklabels()]
@@ -488,23 +478,24 @@ class PDBScientificPlotter:
 
     @classmethod
     def _configure_minor_ticks(cls, ax: plt.Axes, use_year_x_ticks: bool) -> None:
-        """Add minor ticks where major tick spacing supports subdivisions."""
-        y_step = cls._visible_major_step(ax.yaxis)
-        if y_step is not None:
-            y_subdivisions = cls._integer_minor_subdivisions(y_step)
-            if y_subdivisions is not None:
-                ax.yaxis.set_minor_locator(AutoMinorLocator(y_subdivisions))
-                ax.tick_params(axis="y", which="minor", length=3, labelleft=False)
+        """Give numeric x and y axes matching major and minor tick marks."""
+        ax.yaxis.set_minor_locator(AutoMinorLocator(AXIS_MINOR_TICK_SUBDIVISIONS))
+        ax.tick_params(axis="y", which="major", length=AXIS_MAJOR_TICK_LENGTH)
+        ax.tick_params(
+            axis="y",
+            which="minor",
+            length=AXIS_MINOR_TICK_LENGTH,
+            labelleft=False,
+        )
 
         if use_year_x_ticks or cls._has_categorical_x_ticks(ax):
             return
         x_step = cls._visible_major_step(ax.xaxis)
         if x_step is None:
             return
-        x_subdivisions = cls._integer_minor_subdivisions(x_step)
-        if x_subdivisions is not None:
-            ax.xaxis.set_minor_locator(AutoMinorLocator(x_subdivisions))
-            ax.tick_params(axis="x", which="minor", length=3)
+        ax.xaxis.set_minor_locator(AutoMinorLocator(AXIS_MINOR_TICK_SUBDIVISIONS))
+        ax.tick_params(axis="x", which="major", length=AXIS_MAJOR_TICK_LENGTH)
+        ax.tick_params(axis="x", which="minor", length=AXIS_MINOR_TICK_LENGTH)
 
     @staticmethod
     def _remove_zero_y_tick(ax: plt.Axes) -> None:
@@ -1873,6 +1864,8 @@ class PDBScientificPlotter:
                 alpha=0.2,
                 color="#7f7f7f",
                 label="Individual structures",
+                clip_on=False,
+                zorder=3,
             )
             self._plot_step_series(
                 ax=ax,
@@ -1881,6 +1874,7 @@ class PDBScientificPlotter:
                 linewidth=2.2,
                 color=self.config.nmr_color,
                 label="Yearly mean",
+                zorder=4,
             )
             ax.set_ylim(0, 100)
             self._add_legend(ax, loc="upper left")

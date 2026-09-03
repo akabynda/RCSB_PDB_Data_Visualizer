@@ -55,6 +55,9 @@ _PDB_CACHE_ENTRY_LOCK_DEPTH = local()
 _FIRST_MODEL_CA_CACHE_LOCKS_GUARD = Lock()
 _FIRST_MODEL_CA_CACHE_LOCKS: dict[str, tuple[Any, int]] = {}
 XRAY_HOMOLOG_SEARCH_MAX_ATTEMPTS = 3
+XRAY_HOMOLOG_REJECTION_REASON = (
+    "no eligible HETATM-free modeled core match at requested sequence identity"
+)
 
 
 class ActiveDatasetWarningLogFilter(logging.Filter):
@@ -519,6 +522,23 @@ class SolutionNMRMonomerQualityRecord:
 
 
 @dataclass(frozen=True)
+class RejectedXrayHomologRecord:
+    """Describe one sequence-search hit rejected by the coordinate filter."""
+
+    nmr_entry_id: str
+    nmr_year: int
+    nmr_chain_id: str
+    sequence_identity_percent: int
+    nmr_core_start_seq_id: int | None
+    nmr_core_end_seq_id: int | None
+    nmr_query_sequence_length: int
+    xray_entry_id: str
+    xray_entity_id: str
+    xray_chain_ids: tuple[str, ...]
+    reason: str
+
+
+@dataclass(frozen=True)
 class SolutionNMRMonomerXrayHomologRecord:
     """Store X-ray homolog search results for a solution-NMR monomer."""
 
@@ -531,6 +551,7 @@ class SolutionNMRMonomerXrayHomologRecord:
     xray_homolog_entry_ids: tuple[str, ...]
     xray_homolog_entity_ids: tuple[str, ...]
     has_xray_homolog: bool
+    rejected_xray_homologs: tuple[RejectedXrayHomologRecord, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -6250,13 +6271,46 @@ class SolutionNMRMonomerXrayHomologBuilder:
                 sequence_identity_percent=sequence_identity_percent,
             )
         )
+        resolved_candidate_cache = (
+            candidate_cache if candidate_cache is not None else {}
+        )
         xray_entity_ids = self._filter_modeled_xray_homolog_entity_ids(
             xray_entity_ids=raw_xray_entity_ids,
             nmr_core_residues=nmr_core_residues,
             sequence_identity_percent=sequence_identity_percent,
-            candidate_cache=candidate_cache,
+            candidate_cache=resolved_candidate_cache,
             chain_residue_cache=chain_residue_cache,
         )
+        kept_entity_ids = set(xray_entity_ids)
+        rejected_xray_homologs: list[RejectedXrayHomologRecord] = []
+        seen_rejected_entity_ids: set[str] = set()
+        for entity_id in raw_xray_entity_ids:
+            if entity_id in kept_entity_ids or entity_id in seen_rejected_entity_ids:
+                continue
+            candidate = resolved_candidate_cache.get(entity_id)
+            if candidate is None:
+                candidate = XrayPolymerEntityCandidateRecord(
+                    polymer_entity_id=entity_id,
+                    entry_id=str(entity_id).split("_", 1)[0],
+                    chain_ids=(),
+                    resolution_angstrom=float("nan"),
+                )
+            seen_rejected_entity_ids.add(entity_id)
+            rejected_xray_homologs.append(
+                RejectedXrayHomologRecord(
+                    nmr_entry_id=seed.entry_id,
+                    nmr_year=seed.year,
+                    nmr_chain_id=seed.chain_id,
+                    sequence_identity_percent=sequence_identity_percent,
+                    nmr_core_start_seq_id=core_start,
+                    nmr_core_end_seq_id=core_end,
+                    nmr_query_sequence_length=len(query_sequence),
+                    xray_entry_id=candidate.entry_id,
+                    xray_entity_id=candidate.polymer_entity_id,
+                    xray_chain_ids=candidate.chain_ids,
+                    reason=XRAY_HOMOLOG_REJECTION_REASON,
+                )
+            )
         xray_entry_ids = self._entry_ids_from_polymer_entity_ids(xray_entity_ids)
         return SolutionNMRMonomerXrayHomologRecord(
             entry_id=seed.entry_id,
@@ -6268,6 +6322,7 @@ class SolutionNMRMonomerXrayHomologBuilder:
             xray_homolog_entry_ids=xray_entry_ids,
             xray_homolog_entity_ids=xray_entity_ids,
             has_xray_homolog=bool(xray_entity_ids),
+            rejected_xray_homologs=tuple(rejected_xray_homologs),
         )
 
     def _build_record_pair(
@@ -6311,11 +6366,16 @@ class SolutionNMRMonomerXrayHomologBuilder:
         ) = None,
         skip_entry_ids: set[str] | None = None,
         on_entry_complete: Callable[[str, str], None] | None = None,
+        retain_rejected_xray_homologs: bool = True,
     ) -> tuple[
         list[SolutionNMRMonomerXrayHomologRecord],
         list[SolutionNMRMonomerXrayHomologRecord],
     ]:
-        """Collect X-ray homolog records for SOLUTION NMR monomer seeds."""
+        """Collect X-ray homolog records for SOLUTION NMR monomer seeds.
+
+        Streaming callers can disable retention of candidate-level rejection
+        details after ``on_record_pair`` has persisted them.
+        """
         skip_entry_ids = skip_entry_ids or set()
         entry_ids = fetch_solution_nmr_entry_ids(
             client=self.client,
@@ -6347,6 +6407,8 @@ class SolutionNMRMonomerXrayHomologBuilder:
             total = len(pending)
             completed_count = 0
             error_count = 0
+            rejected_candidate_count_95 = 0
+            rejected_candidate_count_100 = 0
             exclusion_reason_counts: Counter[str] = Counter()
             last_progress_log = time.monotonic()
 
@@ -6369,7 +6431,7 @@ class SolutionNMRMonomerXrayHomologBuilder:
                     continue
 
                 for future in done:
-                    seed = future_map[future]
+                    seed = future_map.pop(future)
                     try:
                         record_95, record_100 = future.result()
                     except NMRHomologyQueryIneligibleError as exc:
@@ -6435,8 +6497,20 @@ class SolutionNMRMonomerXrayHomologBuilder:
                         continue
 
                     completed_count += 1
-                    records_95.append(record_95)
-                    records_100.append(record_100)
+                    rejected_candidate_count_95 += len(record_95.rejected_xray_homologs)
+                    rejected_candidate_count_100 += len(
+                        record_100.rejected_xray_homologs
+                    )
+                    records_95.append(
+                        record_95
+                        if retain_rejected_xray_homologs
+                        else replace(record_95, rejected_xray_homologs=())
+                    )
+                    records_100.append(
+                        record_100
+                        if retain_rejected_xray_homologs
+                        else replace(record_100, rejected_xray_homologs=())
+                    )
                     if on_record_pair is not None:
                         on_record_pair(record_95, record_100)
                     if on_entry_complete is not None:
@@ -6468,6 +6542,14 @@ class SolutionNMRMonomerXrayHomologBuilder:
             sum(1 for record in records_100 if record.has_xray_homolog),
             len(records_100),
             sum(exclusion_reason_counts.values()),
+        )
+        LOGGER.info(
+            "SOLUTION NMR monomer X-ray candidates rejected by the modeled-core "
+            "filter: %d%%=%d, %d%%=%d",
+            95,
+            rejected_candidate_count_95,
+            100,
+            rejected_candidate_count_100,
         )
         for reason, count in sorted(exclusion_reason_counts.items()):
             LOGGER.info(
@@ -7788,6 +7870,150 @@ SOLUTION_NMR_MONOMER_XRAY_HOMOLOG_HEADER = [
     "xray_homolog_entity_ids",
 ]
 
+REJECTED_XRAY_HOMOLOG_HEADER = [
+    "nmr_entry_id",
+    "nmr_year",
+    "nmr_chain_id",
+    "sequence_identity_percent",
+    "nmr_core_start_seq_id",
+    "nmr_core_end_seq_id",
+    "nmr_query_sequence_length",
+    "xray_entry_id",
+    "xray_entity_id",
+    "xray_chain_ids",
+    "reason",
+]
+
+
+def rejected_xray_homologs_csv_path(homolog_output_path: Path) -> Path:
+    """Return the sibling CSV for candidates rejected from a homolog output."""
+    homolog_output_path = Path(homolog_output_path)
+    return homolog_output_path.with_name(f"{homolog_output_path.stem}_rejected.csv")
+
+
+def _rejected_xray_homolog_csv_row(
+    record: RejectedXrayHomologRecord,
+) -> tuple[Any, ...]:
+    """Convert one rejected X-ray candidate to its stable CSV representation."""
+    return (
+        record.nmr_entry_id,
+        record.nmr_year,
+        record.nmr_chain_id,
+        record.sequence_identity_percent,
+        (
+            record.nmr_core_start_seq_id
+            if record.nmr_core_start_seq_id is not None
+            else ""
+        ),
+        record.nmr_core_end_seq_id if record.nmr_core_end_seq_id is not None else "",
+        record.nmr_query_sequence_length,
+        record.xray_entry_id,
+        record.xray_entity_id,
+        ";".join(record.xray_chain_ids),
+        record.reason,
+    )
+
+
+def write_rejected_xray_homolog_csv(
+    records: Iterable[RejectedXrayHomologRecord], output_path: Path
+) -> None:
+    """Write X-ray sequence hits rejected by the modeled-core filter."""
+    _atomic_write_csv_rows(
+        output_path=output_path,
+        header=REJECTED_XRAY_HOMOLOG_HEADER,
+        rows=(_rejected_xray_homolog_csv_row(record) for record in records),
+    )
+
+
+def _read_rejected_xray_homolog_csv_with_status(
+    input_path: Path,
+) -> tuple[list[RejectedXrayHomologRecord], bool]:
+    """Read a rejection report and indicate whether its full schema is valid."""
+    if not input_path.exists():
+        return [], False
+    records: list[RejectedXrayHomologRecord] = []
+    with input_path.open("r", newline="", encoding="utf-8") as csvfile:
+        reader = csv.DictReader(csvfile)
+        if reader.fieldnames != REJECTED_XRAY_HOMOLOG_HEADER:
+            LOGGER.warning(
+                "Ignoring incompatible rejected X-ray homolog CSV %s",
+                input_path,
+            )
+            return [], False
+        is_valid = True
+        try:
+            numbered_rows = enumerate(reader, start=2)
+            for line_number, row in numbered_rows:
+                if not row or not any(value for value in row.values() if value):
+                    continue
+                try:
+                    if None in row:
+                        raise ValueError("row has unexpected extra columns")
+                    nmr_entry_id = str(row.get("nmr_entry_id") or "").strip()
+                    xray_entry_id = str(row.get("xray_entry_id") or "").strip()
+                    xray_entity_id = str(row.get("xray_entity_id") or "").strip()
+                    reason = str(row.get("reason") or "").strip()
+                    if not all((nmr_entry_id, xray_entry_id, xray_entity_id, reason)):
+                        raise ValueError("required text field is empty")
+                    nmr_core_start_raw = row.get("nmr_core_start_seq_id")
+                    nmr_core_end_raw = row.get("nmr_core_end_seq_id")
+                    record = RejectedXrayHomologRecord(
+                        nmr_entry_id=nmr_entry_id,
+                        nmr_year=int(row["nmr_year"]),
+                        nmr_chain_id=str(row.get("nmr_chain_id") or ""),
+                        sequence_identity_percent=int(row["sequence_identity_percent"]),
+                        nmr_core_start_seq_id=(
+                            int(nmr_core_start_raw)
+                            if nmr_core_start_raw not in {None, ""}
+                            else None
+                        ),
+                        nmr_core_end_seq_id=(
+                            int(nmr_core_end_raw)
+                            if nmr_core_end_raw not in {None, ""}
+                            else None
+                        ),
+                        nmr_query_sequence_length=int(
+                            row.get("nmr_query_sequence_length") or 0
+                        ),
+                        xray_entry_id=xray_entry_id,
+                        xray_entity_id=xray_entity_id,
+                        xray_chain_ids=tuple(
+                            chain_id.strip()
+                            for chain_id in str(row.get("xray_chain_ids") or "").split(
+                                ";"
+                            )
+                            if chain_id.strip()
+                        ),
+                        reason=reason,
+                    )
+                except (KeyError, TypeError, ValueError) as exc:
+                    is_valid = False
+                    LOGGER.warning(
+                        "Ignoring malformed row %d in rejected X-ray homolog "
+                        "CSV %s: %s",
+                        line_number,
+                        input_path,
+                        exc,
+                    )
+                    continue
+                records.append(record)
+        except csv.Error as exc:
+            LOGGER.warning(
+                "Ignoring malformed tail in rejected X-ray homolog CSV %s: %s",
+                input_path,
+                exc,
+            )
+            is_valid = False
+    return records, is_valid
+
+
+def read_rejected_xray_homolog_csv(
+    input_path: Path,
+) -> list[RejectedXrayHomologRecord]:
+    """Read valid rows from a modeled-core rejection report when present."""
+    records, _ = _read_rejected_xray_homolog_csv_with_status(input_path)
+    return records
+
 
 def _solution_nmr_monomer_xray_homolog_csv_row(
     record: SolutionNMRMonomerXrayHomologRecord,
@@ -7878,16 +8104,41 @@ def _xray_homolog_resume_checkpoint_path(output_95_path: Path) -> Path:
 
 
 def _read_xray_homolog_resume_checkpoint(checkpoint_path: Path) -> dict[str, str]:
-    """Read the latest completion status recorded for each NMR entry."""
+    """Read the latest recognized completion status for each NMR entry."""
     statuses: dict[str, str] = {}
     if not checkpoint_path.exists():
         return statuses
     with checkpoint_path.open("r", encoding="utf-8", errors="ignore") as handle:
         for line in handle:
             entry_id, separator, status = line.rstrip("\n").partition("\t")
-            if separator and entry_id and status in {"success", "ineligible"}:
+            if (
+                separator
+                and entry_id
+                and status
+                in {
+                    "success",
+                    "success_with_rejected_audit",
+                    "pending_rejected_audit",
+                    "ineligible",
+                }
+            ):
                 statuses[entry_id] = status
     return statuses
+
+
+def _write_xray_homolog_resume_checkpoint_statuses(
+    checkpoint_path: Path,
+    statuses: Iterable[tuple[str, str]],
+    *,
+    mode: str,
+) -> None:
+    """Durably replace or append homolog completion statuses."""
+    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+    with checkpoint_path.open(mode, encoding="utf-8") as checkpoint_file:
+        for entry_id, status in statuses:
+            checkpoint_file.write(f"{entry_id}\t{status}\n")
+        checkpoint_file.flush()
+        os.fsync(checkpoint_file.fileno())
 
 
 def filter_xray_homolog_records_by_deposit_date(
@@ -9042,13 +9293,19 @@ def parse_args() -> argparse.Namespace:
         "--solution-nmr-monomer-xray-homolog-95-output",
         type=Path,
         default=Path("data/solution_nmr_monomer_xray_homologs_95.csv"),
-        help="Output CSV path for solution_nmr_monomer_xray_homologs dataset at 95%% sequence identity.",
+        help=(
+            "Output CSV path for solution_nmr_monomer_xray_homologs dataset at "
+            "95%% sequence identity; rejected candidates use sibling *_rejected.csv."
+        ),
     )
     parser.add_argument(
         "--solution-nmr-monomer-xray-homolog-100-output",
         type=Path,
         default=Path("data/solution_nmr_monomer_xray_homologs_100.csv"),
-        help="Output CSV path for solution_nmr_monomer_xray_homologs dataset at 100%% sequence identity.",
+        help=(
+            "Output CSV path for solution_nmr_monomer_xray_homologs dataset at "
+            "100%% sequence identity; rejected candidates use sibling *_rejected.csv."
+        ),
     )
     parser.add_argument(
         "--solution-nmr-monomer-xray-homolog-95-historical-output",
@@ -9584,14 +9841,23 @@ def main() -> None:
         homolog_100_output_path = Path(
             args.solution_nmr_monomer_xray_homolog_100_output
         )
+        rejected_95_output_path = rejected_xray_homologs_csv_path(
+            homolog_95_output_path
+        )
+        rejected_100_output_path = rejected_xray_homologs_csv_path(
+            homolog_100_output_path
+        )
         homolog_95_output_path.parent.mkdir(parents=True, exist_ok=True)
         homolog_100_output_path.parent.mkdir(parents=True, exist_ok=True)
+        rejected_95_output_path.parent.mkdir(parents=True, exist_ok=True)
+        rejected_100_output_path.parent.mkdir(parents=True, exist_ok=True)
 
         existing_records_95: list[SolutionNMRMonomerXrayHomologRecord] = []
         existing_records_100: list[SolutionNMRMonomerXrayHomologRecord] = []
+        existing_rejected_95: list[RejectedXrayHomologRecord] = []
+        existing_rejected_100: list[RejectedXrayHomologRecord] = []
         skip_homolog_entry_ids: set[str] = set()
         checkpoint_path = _xray_homolog_resume_checkpoint_path(homolog_95_output_path)
-        checkpoint_mode = "w"
         if args.resume:
             records_95_by_entry_id = {
                 record.entry_id: record
@@ -9613,9 +9879,54 @@ def main() -> None:
                 and record.nmr_core_start_seq_id is not None
                 and record.nmr_core_end_seq_id is not None
             }
-            paired_entry_ids = set(records_95_by_entry_id) & set(
+            paired_csv_entry_ids = set(records_95_by_entry_id) & set(
                 records_100_by_entry_id
             )
+            checkpoint_statuses = _read_xray_homolog_resume_checkpoint(checkpoint_path)
+            audited_entry_ids = {
+                entry_id
+                for entry_id, status in checkpoint_statuses.items()
+                if status == "success_with_rejected_audit"
+            }
+            paired_entry_ids = paired_csv_entry_ids & audited_entry_ids
+            unaudited_pair_count = len(paired_csv_entry_ids - paired_entry_ids)
+            if unaudited_pair_count:
+                LOGGER.warning(
+                    "SOLUTION NMR monomer X-ray homolog resume: recomputing %d "
+                    "record pairs without a completed rejected-candidate audit",
+                    unaudited_pair_count,
+                )
+            (
+                rejected_records_95,
+                rejected_report_95_is_valid,
+            ) = _read_rejected_xray_homolog_csv_with_status(rejected_95_output_path)
+            (
+                rejected_records_100,
+                rejected_report_100_is_valid,
+            ) = _read_rejected_xray_homolog_csv_with_status(rejected_100_output_path)
+            rejected_report_95_is_valid = rejected_report_95_is_valid and all(
+                record.sequence_identity_percent == 95 for record in rejected_records_95
+            )
+            rejected_report_100_is_valid = rejected_report_100_is_valid and all(
+                record.sequence_identity_percent == 100
+                for record in rejected_records_100
+            )
+            if not (rejected_report_95_is_valid and rejected_report_100_is_valid):
+                LOGGER.warning(
+                    "SOLUTION NMR monomer X-ray homolog resume: rejected-candidate "
+                    "reports are missing or incomplete; recomputing %d previously "
+                    "completed record pairs",
+                    len(paired_entry_ids),
+                )
+                _write_xray_homolog_resume_checkpoint_statuses(
+                    checkpoint_path,
+                    (
+                        (entry_id, "pending_rejected_audit")
+                        for entry_id in sorted(paired_entry_ids)
+                    ),
+                    mode="a",
+                )
+                paired_entry_ids = set()
             existing_records_95 = sorted(
                 (records_95_by_entry_id[entry_id] for entry_id in paired_entry_ids),
                 key=lambda record: (record.year, record.entry_id),
@@ -9624,41 +9935,138 @@ def main() -> None:
                 (records_100_by_entry_id[entry_id] for entry_id in paired_entry_ids),
                 key=lambda record: (record.year, record.entry_id),
             )
-            checkpoint_statuses = _read_xray_homolog_resume_checkpoint(checkpoint_path)
+            existing_rejected_95 = sorted(
+                (
+                    record
+                    for record in rejected_records_95
+                    if record.nmr_entry_id in paired_entry_ids
+                    and record.sequence_identity_percent == 95
+                ),
+                key=lambda record: (
+                    record.nmr_year,
+                    record.nmr_entry_id,
+                    record.xray_entity_id,
+                ),
+            )
+            existing_rejected_100 = sorted(
+                (
+                    record
+                    for record in rejected_records_100
+                    if record.nmr_entry_id in paired_entry_ids
+                    and record.sequence_identity_percent == 100
+                ),
+                key=lambda record: (
+                    record.nmr_year,
+                    record.nmr_entry_id,
+                    record.xray_entity_id,
+                ),
+            )
             completed_ineligible_entry_ids = {
                 entry_id
                 for entry_id, status in checkpoint_statuses.items()
                 if status == "ineligible"
             }
             skip_homolog_entry_ids = paired_entry_ids | completed_ineligible_entry_ids
-            checkpoint_mode = "a"
             LOGGER.info(
                 "SOLUTION NMR monomer X-ray homolog resume: keeping %d completed record pairs and %d ineligible entries; retrying all other seeds",
                 len(paired_entry_ids),
                 len(completed_ineligible_entry_ids),
             )
+        else:
+            _write_xray_homolog_resume_checkpoint_statuses(
+                checkpoint_path,
+                (),
+                mode="w",
+            )
+
+        rejected_by_key_95 = {
+            (
+                record.nmr_entry_id,
+                record.sequence_identity_percent,
+                record.xray_entity_id,
+            ): record
+            for record in existing_rejected_95
+        }
+        rejected_by_key_100 = {
+            (
+                record.nmr_entry_id,
+                record.sequence_identity_percent,
+                record.xray_entity_id,
+            ): record
+            for record in existing_rejected_100
+        }
+        write_rejected_xray_homolog_csv(
+            rejected_by_key_95.values(), rejected_95_output_path
+        )
+        write_rejected_xray_homolog_csv(
+            rejected_by_key_100.values(), rejected_100_output_path
+        )
 
         with (
             homolog_95_output_path.open("w", newline="", encoding="utf-8") as file_95,
             homolog_100_output_path.open("w", newline="", encoding="utf-8") as file_100,
-            checkpoint_path.open(checkpoint_mode, encoding="utf-8") as checkpoint_file,
+            rejected_95_output_path.open(
+                "a", newline="", encoding="utf-8"
+            ) as rejected_file_95,
+            rejected_100_output_path.open(
+                "a", newline="", encoding="utf-8"
+            ) as rejected_file_100,
+            checkpoint_path.open("a", encoding="utf-8") as checkpoint_file,
         ):
             writer_95 = csv.writer(file_95)
             writer_100 = csv.writer(file_100)
+            rejected_writer_95 = csv.writer(rejected_file_95)
+            rejected_writer_100 = csv.writer(rejected_file_100)
             writer_95.writerow(SOLUTION_NMR_MONOMER_XRAY_HOMOLOG_HEADER)
             writer_100.writerow(SOLUTION_NMR_MONOMER_XRAY_HOMOLOG_HEADER)
             for record in existing_records_95:
                 writer_95.writerow(_solution_nmr_monomer_xray_homolog_csv_row(record))
             for record in existing_records_100:
                 writer_100.writerow(_solution_nmr_monomer_xray_homolog_csv_row(record))
+            rejected_keys_95 = set(rejected_by_key_95)
+            rejected_keys_100 = set(rejected_by_key_100)
             file_95.flush()
             file_100.flush()
+
+            def _persist_rejected_xray_homologs(
+                records: Iterable[RejectedXrayHomologRecord],
+                writer: Any,
+                output_file: Any,
+                known_keys: set[tuple[str, int, str]],
+            ) -> None:
+                """Append new candidate rejections before checkpointing the seed."""
+                wrote_row = False
+                for rejected_record in records:
+                    key = (
+                        rejected_record.nmr_entry_id,
+                        rejected_record.sequence_identity_percent,
+                        rejected_record.xray_entity_id,
+                    )
+                    if key in known_keys:
+                        continue
+                    writer.writerow(_rejected_xray_homolog_csv_row(rejected_record))
+                    known_keys.add(key)
+                    wrote_row = True
+                if wrote_row:
+                    output_file.flush()
 
             def _on_homolog_record_pair(
                 record_95: SolutionNMRMonomerXrayHomologRecord,
                 record_100: SolutionNMRMonomerXrayHomologRecord,
             ) -> None:
-                """Persist current and historical homolog records for one seed."""
+                """Persist homolog and rejected-candidate records for one seed."""
+                _persist_rejected_xray_homologs(
+                    record_95.rejected_xray_homologs,
+                    rejected_writer_95,
+                    rejected_file_95,
+                    rejected_keys_95,
+                )
+                _persist_rejected_xray_homologs(
+                    record_100.rejected_xray_homologs,
+                    rejected_writer_100,
+                    rejected_file_100,
+                    rejected_keys_100,
+                )
                 writer_95.writerow(
                     _solution_nmr_monomer_xray_homolog_csv_row(record_95)
                 )
@@ -9670,13 +10078,17 @@ def main() -> None:
 
             def _on_homolog_entry_complete(entry_id: str, status: str) -> None:
                 """Checkpoint successes and intentional exclusions, not failures."""
-                checkpoint_file.write(f"{entry_id}\t{status}\n")
+                checkpoint_status = (
+                    "success_with_rejected_audit" if status == "success" else status
+                )
+                checkpoint_file.write(f"{entry_id}\t{checkpoint_status}\n")
                 checkpoint_file.flush()
 
             new_records_95, new_records_100 = homolog_builder.build(
                 on_record_pair=_on_homolog_record_pair,
                 skip_entry_ids=skip_homolog_entry_ids,
                 on_entry_complete=_on_homolog_entry_complete,
+                retain_rejected_xray_homologs=False,
             )
         records_95 = existing_records_95 + new_records_95
         records_100 = existing_records_100 + new_records_100
@@ -9689,6 +10101,16 @@ def main() -> None:
             "Saved %d records to %s",
             len(records_100),
             homolog_100_output_path,
+        )
+        LOGGER.info(
+            "Saved %d rejected X-ray candidates to %s",
+            len(rejected_keys_95),
+            rejected_95_output_path,
+        )
+        LOGGER.info(
+            "Saved %d rejected X-ray candidates to %s",
+            len(rejected_keys_100),
+            rejected_100_output_path,
         )
 
     if DatasetKind.SOLUTION_NMR_MONOMER_XRAY_HOMOLOGS_HISTORICAL in args.datasets:

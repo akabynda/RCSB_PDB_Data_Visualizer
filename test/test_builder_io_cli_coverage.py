@@ -400,6 +400,365 @@ class BuilderMainDispatchTests(unittest.TestCase):
         builder._configure_dataset_warning_logs({})
         builder._configure_dataset_filtered_csvs({})
 
+    @staticmethod
+    def _homolog_cli_args(root: Path, *, resume: bool = False):
+        """Build isolated CLI arguments for the X-ray homolog dataset."""
+        arguments = [
+            "pdb_dataset_builder.py",
+            "--datasets",
+            "solution_nmr_monomer_xray_homologs",
+            "--solution-nmr-monomer-xray-homolog-95-output",
+            str(root / "homologs_95.csv"),
+            "--solution-nmr-monomer-xray-homolog-100-output",
+            str(root / "homologs_100.csv"),
+        ]
+        if resume:
+            arguments.append("--resume")
+        with patch.object(sys, "argv", arguments):
+            args = builder.parse_args()
+        args.solution_nmr_monomer_cache_dir = root / "pdb-cache"
+        args.stride_cache_dir = root / "stride-cache"
+        args.stride_install_dir = root / "stride-install"
+        return args
+
+    @staticmethod
+    def _rejected_homolog(
+        nmr_entry_id: str,
+        sequence_identity_percent: int,
+        xray_entity_id: str,
+    ) -> builder.RejectedXrayHomologRecord:
+        """Create one compact rejected-candidate fixture."""
+        return builder.RejectedXrayHomologRecord(
+            nmr_entry_id=nmr_entry_id,
+            nmr_year=2020,
+            nmr_chain_id="N",
+            sequence_identity_percent=sequence_identity_percent,
+            nmr_core_start_seq_id=1,
+            nmr_core_end_seq_id=11,
+            nmr_query_sequence_length=11,
+            xray_entry_id=xray_entity_id.split("_", 1)[0],
+            xray_entity_id=xray_entity_id,
+            xray_chain_ids=("A", "B"),
+            reason=builder.XRAY_HOMOLOG_REJECTION_REASON,
+        )
+
+    @staticmethod
+    def _write_homolog_checkpoint(output_95: Path, entry_id: str, status: str) -> None:
+        """Write one completion marker beside a homolog output pair."""
+        builder._xray_homolog_resume_checkpoint_path(output_95).write_text(
+            f"{entry_id}\t{status}\n",
+            encoding="utf-8",
+        )
+
+    @staticmethod
+    def _homolog_with_rejections(
+        entry_id: str,
+        sequence_identity_percent: int,
+        rejected: tuple[builder.RejectedXrayHomologRecord, ...] = (),
+    ) -> builder.SolutionNMRMonomerXrayHomologRecord:
+        """Create one completed homolog row carrying callback-only rejections."""
+        return builder.SolutionNMRMonomerXrayHomologRecord(
+            entry_id=entry_id,
+            year=2020,
+            sequence_identity_percent=sequence_identity_percent,
+            nmr_core_start_seq_id=1,
+            nmr_core_end_seq_id=11,
+            nmr_query_sequence_length=11,
+            xray_homolog_entry_ids=("1KEEP",),
+            xray_homolog_entity_ids=("1KEEP_1",),
+            has_xray_homolog=True,
+            rejected_xray_homologs=rejected,
+        )
+
+    def test_main_writes_rejected_homolog_callbacks_without_changing_main_headers(
+        self,
+    ) -> None:
+        """Persist separate 95/100 rejection reports from completed record pairs."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            args = self._homolog_cli_args(root)
+            rejected_95 = self._rejected_homolog("NMR1", 95, "2DROP_1")
+            rejected_100 = self._rejected_homolog("NMR1", 100, "3DROP_2")
+            record_95 = self._homolog_with_rejections("NMR1", 95, (rejected_95,))
+            record_100 = self._homolog_with_rejections("NMR1", 100, (rejected_100,))
+
+            def build_homologs(*, on_record_pair, on_entry_complete, **_kwargs):
+                on_record_pair(record_95, record_100)
+                on_entry_complete("NMR1", "success")
+                return [record_95], [record_100]
+
+            with (
+                patch.object(builder, "parse_args", return_value=args),
+                patch.object(builder, "RCSBClient"),
+                patch.object(
+                    builder, "ensure_stride_executable", return_value="/bin/true"
+                ),
+                patch.object(builder, "_configure_dataset_warning_logs"),
+                patch.object(
+                    builder, "SolutionNMRMonomerXrayHomologBuilder"
+                ) as builder_class,
+            ):
+                builder_class.return_value.build.side_effect = build_homologs
+                builder.main()
+
+            output_95 = Path(args.solution_nmr_monomer_xray_homolog_95_output)
+            output_100 = Path(args.solution_nmr_monomer_xray_homolog_100_output)
+            for output_path in (output_95, output_100):
+                with output_path.open(newline="", encoding="utf-8") as csvfile:
+                    reader = csv.reader(csvfile)
+                    self.assertEqual(
+                        next(reader), builder.SOLUTION_NMR_MONOMER_XRAY_HOMOLOG_HEADER
+                    )
+                    self.assertEqual(len(list(reader)), 1)
+
+            self.assertEqual(
+                builder.read_rejected_xray_homolog_csv(
+                    builder.rejected_xray_homologs_csv_path(output_95)
+                ),
+                [rejected_95],
+            )
+            self.assertEqual(
+                builder.read_rejected_xray_homolog_csv(
+                    builder.rejected_xray_homologs_csv_path(output_100)
+                ),
+                [rejected_100],
+            )
+            self.assertEqual(
+                builder._read_xray_homolog_resume_checkpoint(
+                    builder._xray_homolog_resume_checkpoint_path(output_95)
+                )["NMR1"],
+                "success_with_rejected_audit",
+            )
+
+    def test_main_resume_keeps_only_paired_rejections_and_deduplicates(
+        self,
+    ) -> None:
+        """Retain audited completed pairs and rewrite stale or duplicate rows."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            args = self._homolog_cli_args(root, resume=True)
+            output_95 = Path(args.solution_nmr_monomer_xray_homolog_95_output)
+            output_100 = Path(args.solution_nmr_monomer_xray_homolog_100_output)
+            paired_95 = self._homolog_with_rejections("PAIRED", 95)
+            paired_100 = self._homolog_with_rejections("PAIRED", 100)
+            unpaired_95 = self._homolog_with_rejections("UNPAIRED", 95)
+            builder.write_solution_nmr_monomer_xray_homolog_csv(
+                [paired_95, unpaired_95], output_95
+            )
+            builder.write_solution_nmr_monomer_xray_homolog_csv(
+                [paired_100], output_100
+            )
+            self._write_homolog_checkpoint(
+                output_95, "PAIRED", "success_with_rejected_audit"
+            )
+
+            paired_rejected_95 = self._rejected_homolog("PAIRED", 95, "2OLD_1")
+            unpaired_rejected_95 = self._rejected_homolog("UNPAIRED", 95, "3STALE_1")
+            paired_rejected_100 = self._rejected_homolog("PAIRED", 100, "4OLD_1")
+            builder.write_rejected_xray_homolog_csv(
+                [paired_rejected_95, paired_rejected_95, unpaired_rejected_95],
+                builder.rejected_xray_homologs_csv_path(output_95),
+            )
+            builder.write_rejected_xray_homolog_csv(
+                [paired_rejected_100, paired_rejected_100],
+                builder.rejected_xray_homologs_csv_path(output_100),
+            )
+
+            new_rejected_95 = self._rejected_homolog("NEW", 95, "5NEW_1")
+            new_rejected_100 = self._rejected_homolog("NEW", 100, "6NEW_1")
+            new_95 = self._homolog_with_rejections(
+                "NEW", 95, (new_rejected_95, new_rejected_95)
+            )
+            new_100 = self._homolog_with_rejections(
+                "NEW", 100, (new_rejected_100, new_rejected_100)
+            )
+
+            def resume_homologs(
+                *, skip_entry_ids, on_record_pair, on_entry_complete, **_kwargs
+            ):
+                self.assertEqual(skip_entry_ids, {"PAIRED"})
+                on_record_pair(new_95, new_100)
+                on_entry_complete("NEW", "success")
+                return [new_95], [new_100]
+
+            with (
+                patch.object(builder, "parse_args", return_value=args),
+                patch.object(builder, "RCSBClient"),
+                patch.object(
+                    builder, "ensure_stride_executable", return_value="/bin/true"
+                ),
+                patch.object(builder, "_configure_dataset_warning_logs"),
+                patch.object(
+                    builder, "SolutionNMRMonomerXrayHomologBuilder"
+                ) as builder_class,
+            ):
+                builder_class.return_value.build.side_effect = resume_homologs
+                builder.main()
+
+            self.assertEqual(
+                builder.read_rejected_xray_homolog_csv(
+                    builder.rejected_xray_homologs_csv_path(output_95)
+                ),
+                [paired_rejected_95, new_rejected_95],
+            )
+            self.assertEqual(
+                builder.read_rejected_xray_homolog_csv(
+                    builder.rejected_xray_homologs_csv_path(output_100)
+                ),
+                [paired_rejected_100, new_rejected_100],
+            )
+            self.assertEqual(
+                {
+                    record.entry_id
+                    for record in builder.read_solution_nmr_monomer_xray_homolog_csv(
+                        output_95
+                    )
+                },
+                {"PAIRED", "NEW"},
+            )
+            with output_95.open(newline="", encoding="utf-8") as csvfile:
+                self.assertEqual(
+                    next(csv.reader(csvfile)),
+                    builder.SOLUTION_NMR_MONOMER_XRAY_HOMOLOG_HEADER,
+                )
+
+    def test_main_resume_recomputes_paired_rows_when_rejected_reports_are_missing(
+        self,
+    ) -> None:
+        """Do not trust legacy paired rows that have no rejection audit sidecars."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            args = self._homolog_cli_args(root, resume=True)
+            output_95 = Path(args.solution_nmr_monomer_xray_homolog_95_output)
+            output_100 = Path(args.solution_nmr_monomer_xray_homolog_100_output)
+            builder.write_solution_nmr_monomer_xray_homolog_csv(
+                [self._homolog_with_rejections("PAIRED", 95)], output_95
+            )
+            builder.write_solution_nmr_monomer_xray_homolog_csv(
+                [self._homolog_with_rejections("PAIRED", 100)], output_100
+            )
+            self._write_homolog_checkpoint(
+                output_95, "PAIRED", "success_with_rejected_audit"
+            )
+            rejected_95_path = builder.rejected_xray_homologs_csv_path(output_95)
+            rejected_100_path = builder.rejected_xray_homologs_csv_path(output_100)
+            self.assertFalse(rejected_95_path.exists())
+            self.assertFalse(rejected_100_path.exists())
+
+            audit_95 = self._rejected_homolog("PAIRED", 95, "2AUDIT_1")
+            audit_100 = self._rejected_homolog("PAIRED", 100, "3AUDIT_1")
+            rebuilt_95 = self._homolog_with_rejections("PAIRED", 95, (audit_95,))
+            rebuilt_100 = self._homolog_with_rejections("PAIRED", 100, (audit_100,))
+
+            def resume_homologs(
+                *, skip_entry_ids, on_record_pair, on_entry_complete, **_kwargs
+            ):
+                self.assertEqual(skip_entry_ids, set())
+                on_record_pair(rebuilt_95, rebuilt_100)
+                on_entry_complete("PAIRED", "success")
+                return [rebuilt_95], [rebuilt_100]
+
+            with (
+                patch.object(builder, "parse_args", return_value=args),
+                patch.object(builder, "RCSBClient"),
+                patch.object(
+                    builder, "ensure_stride_executable", return_value="/bin/true"
+                ),
+                patch.object(builder, "_configure_dataset_warning_logs"),
+                patch.object(
+                    builder, "SolutionNMRMonomerXrayHomologBuilder"
+                ) as builder_class,
+            ):
+                builder_class.return_value.build.side_effect = resume_homologs
+                builder.main()
+
+            self.assertEqual(
+                builder.read_rejected_xray_homolog_csv(rejected_95_path),
+                [audit_95],
+            )
+            self.assertEqual(
+                builder.read_rejected_xray_homolog_csv(rejected_100_path),
+                [audit_100],
+            )
+            self.assertEqual(
+                [
+                    record.entry_id
+                    for record in builder.read_solution_nmr_monomer_xray_homolog_csv(
+                        output_95
+                    )
+                ],
+                ["PAIRED"],
+            )
+
+    def test_malformed_rejected_tail_is_read_partially_and_forces_resume_rebuild(
+        self,
+    ) -> None:
+        """Return valid audit rows publicly but distrust their damaged report."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            args = self._homolog_cli_args(root, resume=True)
+            output_95 = Path(args.solution_nmr_monomer_xray_homolog_95_output)
+            output_100 = Path(args.solution_nmr_monomer_xray_homolog_100_output)
+            builder.write_solution_nmr_monomer_xray_homolog_csv(
+                [self._homolog_with_rejections("PAIRED", 95)], output_95
+            )
+            builder.write_solution_nmr_monomer_xray_homolog_csv(
+                [self._homolog_with_rejections("PAIRED", 100)], output_100
+            )
+            self._write_homolog_checkpoint(
+                output_95, "PAIRED", "success_with_rejected_audit"
+            )
+
+            rejected_95_path = builder.rejected_xray_homologs_csv_path(output_95)
+            rejected_100_path = builder.rejected_xray_homologs_csv_path(output_100)
+            valid_95 = self._rejected_homolog("PAIRED", 95, "2VALID_1")
+            valid_100 = self._rejected_homolog("PAIRED", 100, "3VALID_1")
+            builder.write_rejected_xray_homolog_csv([valid_95], rejected_95_path)
+            builder.write_rejected_xray_homolog_csv([valid_100], rejected_100_path)
+            with rejected_95_path.open("a", encoding="utf-8") as csvfile:
+                csvfile.write("BROKEN,not-a-year\n")
+
+            self.assertEqual(
+                builder.read_rejected_xray_homolog_csv(rejected_95_path),
+                [valid_95],
+            )
+
+            audit_95 = self._rejected_homolog("PAIRED", 95, "4REBUILT_1")
+            audit_100 = self._rejected_homolog("PAIRED", 100, "5REBUILT_1")
+            rebuilt_95 = self._homolog_with_rejections("PAIRED", 95, (audit_95,))
+            rebuilt_100 = self._homolog_with_rejections("PAIRED", 100, (audit_100,))
+
+            def resume_homologs(
+                *, skip_entry_ids, on_record_pair, on_entry_complete, **_kwargs
+            ):
+                self.assertEqual(skip_entry_ids, set())
+                on_record_pair(rebuilt_95, rebuilt_100)
+                on_entry_complete("PAIRED", "success")
+                return [rebuilt_95], [rebuilt_100]
+
+            with (
+                patch.object(builder, "parse_args", return_value=args),
+                patch.object(builder, "RCSBClient"),
+                patch.object(
+                    builder, "ensure_stride_executable", return_value="/bin/true"
+                ),
+                patch.object(builder, "_configure_dataset_warning_logs"),
+                patch.object(
+                    builder, "SolutionNMRMonomerXrayHomologBuilder"
+                ) as builder_class,
+            ):
+                builder_class.return_value.build.side_effect = resume_homologs
+                builder.main()
+
+            self.assertEqual(
+                builder.read_rejected_xray_homolog_csv(rejected_95_path),
+                [audit_95],
+            )
+            self.assertEqual(
+                builder.read_rejected_xray_homolog_csv(rejected_100_path),
+                [audit_100],
+            )
+
     def test_main_dispatches_all_dataset_builders_without_network(self) -> None:
         """Keep CLI argument and builder APIs wired together across all datasets."""
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -93,13 +93,13 @@ accepted only when the source PDB SHA-256 matches. A changed source, old
 revision, or damaged NPZ is reparsed and atomically replaced. The cache is
 shared by 95%/100% homology checks and all X-ray RMSD views.
 
-Each output CSV receives a sibling `.log` file containing warnings and errors
-from that build. Logs are recreated at the start of a run; multi-output datasets
-send shared warnings and errors to each affected log. An empty log indicates a
-clean run.
+Each primary dataset CSV receives a sibling `.log` file containing warnings and
+errors from that build. Logs are recreated at the start of a run; multi-output
+datasets send shared warnings and errors to each affected log. An empty log
+indicates a clean run.
 
-Each output `name.csv` also receives a paired `name_filtered.csv`. The paired
-file has three columns:
+Each primary dataset `name.csv` also receives a paired `name_filtered.csv`. The
+paired file has three columns:
 
 - `entry_id`: the RCSB PDB entry rejected from that output;
 - `year`: the structure deposition year;
@@ -114,6 +114,18 @@ homolog build preserves its earlier exclusions, while a derived dataset imports
 upstream exclusions and then appends its own. Shared multi-output exclusions are
 written to every affected report; output-specific exclusions stay in their own
 report.
+
+The 95% and 100% X-ray homolog outputs additionally receive sibling
+`*_rejected.csv` reports. These are candidate-level audit files, distinct from
+the NMR-structure-level `*_filtered.csv` reports. Each row identifies the NMR
+entry and core, the sequence-identity cutoff, and one X-ray polymer entity (and
+its chains) returned by RCSB Search but rejected because no eligible
+HETATM-free modeled-core match was found. Header-only files mean no candidates
+were rejected. Fresh runs recreate the reports; `--resume` retains rows for
+completed homolog record pairs, removes rows left by incomplete pairs, and
+deduplicates new rows by NMR entry, cutoff, and X-ray entity. If either report
+is missing or malformed, previously completed homolog pairs are recomputed so
+their rejected candidates are not silently lost.
 
 Build one dataset:
 
@@ -310,9 +322,11 @@ Long-running calculations:
   the X-ray RMSD datasets (default: `100`).
 
 The homolog completion checkpoint is written beside the 95% output as
-`<95%-output-stem>.resume.tsv`. With `--resume`, valid paired 95%/100% rows and
-entries checkpointed as `ineligible` are retained; unfinished or failed entries
-are retried. Without the flag, the homolog CSV pair and checkpoint are rebuilt.
+`<95%-output-stem>.resume.tsv`. With `--resume`, valid paired 95%/100% rows are
+retained only after their rejected-candidate audit was checkpointed; entries
+checkpointed as `ineligible` are also retained. Unfinished, failed, or legacy
+unaudited pairs are retried. Without the flag, the homolog CSV pair, rejected
+reports, and checkpoint are rebuilt.
 
 Every selected dataset is rebuilt by default. With `--resume`, precision and
 each selected RMSD output reuse valid existing rows independently, so a
@@ -574,6 +588,15 @@ first-model coordinates.
 - Missing resolution does not exclude a candidate. Resolution is not stored in
   the homolog CSV; downstream RMSD outputs write a missing value as `nan`.
 
+Every RCSB sequence hit for which no chain has an eligible modeled-core match
+is written to the cutoff-specific `*_rejected.csv` report. The report has one
+row per NMR/X-ray polymer-entity pair and records the NMR chain and core, X-ray
+entry/entity and chains, cutoff, and rejection reason. A candidate is not
+reported as rejected when any of its chains contains a clean matching region.
+Metadata or coordinate errors make the evaluation inconclusive and continue to
+fail/retry the complete NMR entry instead of being recorded as a normal
+rejection.
+
 Within one NMR seed, the 95% and 100% passes share fetched candidate metadata
 and use the same durable, versioned first-model X-ray CA cache. This avoids
 downloading and parsing their common candidates twice while preserving separate
@@ -592,6 +615,8 @@ Outputs:
 
 - `data/solution_nmr_monomer_xray_homologs_95.csv`
 - `data/solution_nmr_monomer_xray_homologs_100.csv`
+- `data/solution_nmr_monomer_xray_homologs_95_rejected.csv`
+- `data/solution_nmr_monomer_xray_homologs_100_rejected.csv`
 
 ### `solution_nmr_monomer_xray_homologs_historical`
 

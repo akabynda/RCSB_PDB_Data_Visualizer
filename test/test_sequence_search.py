@@ -14,12 +14,16 @@ from src.pdb_dataset_builder import (
     NMRCoreContainsHetatmError,
     NMRHomologyQueryIneligibleError,
     RCSBClient,
+    RejectedXrayHomologRecord,
     SolutionNMRMonomerXrayHomologRecord,
     SolutionNMRMonomerXrayHomologBuilder,
     SolutionNMRMonomerXrayHomologSeedRecord,
     XrayPolymerEntityCandidateRecord,
     _read_xray_homolog_resume_checkpoint,
     find_modeled_ca_core_identity_matches,
+    read_rejected_xray_homolog_csv,
+    rejected_xray_homologs_csv_path,
+    write_rejected_xray_homolog_csv,
 )
 
 
@@ -66,13 +70,21 @@ class SequenceSearchTests(unittest.TestCase):
                 "2BBB\tineligible\n"
                 "1AAA\tineligible\n"
                 "3CCC\tfailed\n"
+                "4DDD\tsuccess_with_rejected_audit\n"
+                "5EEE\tsuccess_with_rejected_audit\n"
+                "5EEE\tpending_rejected_audit\n"
                 "malformed\n",
                 encoding="utf-8",
             )
 
             self.assertEqual(
                 _read_xray_homolog_resume_checkpoint(checkpoint_path),
-                {"1AAA": "ineligible", "2BBB": "ineligible"},
+                {
+                    "1AAA": "ineligible",
+                    "2BBB": "ineligible",
+                    "4DDD": "success_with_rejected_audit",
+                    "5EEE": "pending_rejected_audit",
+                },
             )
 
     def test_homolog_build_skips_completed_entries_and_checkpoints_success(
@@ -135,6 +147,80 @@ class SequenceSearchTests(unittest.TestCase):
             self.assertEqual([record.entry_id for record in records_95], ["2BBB"])
             self.assertEqual([record.entry_id for record in records_100], ["2BBB"])
             self.assertEqual(completed, [("2BBB", "success")])
+
+    def test_homolog_build_streams_rejections_before_releasing_returned_details(
+        self,
+    ) -> None:
+        """Expose rejects to the callback without retaining them in result lists."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config = DatasetBuildConfig(graphql_batch_size=10, max_workers=1)
+            client = RCSBClient(config)
+            seed = SolutionNMRMonomerXrayHomologSeedRecord("1NMR", 2000, "N")
+            client.fetch_solution_nmr_monomer_xray_homolog_seed_records_for_ids = Mock(
+                return_value=[seed]
+            )
+            builder = SolutionNMRMonomerXrayHomologBuilder(
+                client=client,
+                config=config,
+                stride_executable="stride",
+                cache_dir=root,
+                stride_cache_dir=root / "stride_cache",
+            )
+
+            def record(identity: int) -> SolutionNMRMonomerXrayHomologRecord:
+                rejected = RejectedXrayHomologRecord(
+                    nmr_entry_id=seed.entry_id,
+                    nmr_year=seed.year,
+                    nmr_chain_id=seed.chain_id,
+                    sequence_identity_percent=identity,
+                    nmr_core_start_seq_id=1,
+                    nmr_core_end_seq_id=11,
+                    nmr_query_sequence_length=11,
+                    xray_entry_id="2DROP",
+                    xray_entity_id="2DROP_1",
+                    xray_chain_ids=("A",),
+                    reason="no eligible modeled core match",
+                )
+                return SolutionNMRMonomerXrayHomologRecord(
+                    entry_id=seed.entry_id,
+                    year=seed.year,
+                    sequence_identity_percent=identity,
+                    nmr_core_start_seq_id=1,
+                    nmr_core_end_seq_id=11,
+                    nmr_query_sequence_length=11,
+                    xray_homolog_entry_ids=(),
+                    xray_homolog_entity_ids=(),
+                    has_xray_homolog=False,
+                    rejected_xray_homologs=(rejected,),
+                )
+
+            built_pair = (record(95), record(100))
+            callback_pairs: list[
+                tuple[
+                    SolutionNMRMonomerXrayHomologRecord,
+                    SolutionNMRMonomerXrayHomologRecord,
+                ]
+            ] = []
+            with (
+                patch(
+                    "src.pdb_dataset_builder.fetch_solution_nmr_entry_ids",
+                    return_value=[seed.entry_id],
+                ),
+                patch.object(builder, "_build_record_pair", return_value=built_pair),
+            ):
+                records_95, records_100 = builder.build(
+                    on_record_pair=lambda current, historical: callback_pairs.append(
+                        (current, historical)
+                    ),
+                    retain_rejected_xray_homologs=False,
+                )
+
+            self.assertEqual(callback_pairs, [built_pair])
+            self.assertTrue(callback_pairs[0][0].rejected_xray_homologs)
+            self.assertTrue(callback_pairs[0][1].rejected_xray_homologs)
+            self.assertEqual(records_95[0].rejected_xray_homologs, ())
+            self.assertEqual(records_100[0].rejected_xray_homologs, ())
 
     def test_homolog_build_requeues_http_500_failures_up_to_three_attempts(
         self,
@@ -551,6 +637,114 @@ class SequenceSearchTests(unittest.TestCase):
                 client.fetch_xray_polymer_entity_candidates_for_ids.call_count,
                 3,
             )
+
+    def test_build_record_keeps_matches_and_reports_rejected_xray_homologs(
+        self,
+    ) -> None:
+        """Retain modeled matches while describing every rejected X-ray entity."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config = DatasetBuildConfig()
+            client = RCSBClient(config)
+            client.fetch_xray_polymer_entity_ids_by_sequence = Mock(
+                return_value=["1KEEP_1", "2DROP_2"]
+            )
+            client.fetch_xray_polymer_entity_candidates_for_ids = Mock(
+                return_value=[
+                    XrayPolymerEntityCandidateRecord(
+                        polymer_entity_id="1KEEP_1",
+                        entry_id="1KEEP",
+                        chain_ids=("A",),
+                        resolution_angstrom=1.5,
+                    ),
+                    XrayPolymerEntityCandidateRecord(
+                        polymer_entity_id="2DROP_2",
+                        entry_id="2DROP",
+                        chain_ids=("B", "C"),
+                        resolution_angstrom=2.5,
+                    ),
+                ]
+            )
+            builder = SolutionNMRMonomerXrayHomologBuilder(
+                client=client,
+                config=config,
+                stride_executable="stride",
+                cache_dir=root,
+                stride_cache_dir=root / "stride_cache",
+            )
+            sequence = "ACDEFGHIKLM"
+            nmr_residues = [
+                CAResidueRecord(index, identity, True)
+                for index, identity in enumerate(sequence, start=7)
+            ]
+            seed = SolutionNMRMonomerXrayHomologSeedRecord("3NMR", 2003, "N")
+
+            with patch.object(
+                builder,
+                "_xray_candidate_has_modeled_core_match",
+                side_effect=lambda **kwargs: (
+                    kwargs["candidate"].polymer_entity_id == "1KEEP_1"
+                ),
+            ):
+                record = builder._build_record(
+                    seed,
+                    sequence_identity_percent=100,
+                    core_query=(sequence, 7, 17, nmr_residues),
+                )
+
+            self.assertEqual(record.xray_homolog_entry_ids, ("1KEEP",))
+            self.assertEqual(record.xray_homolog_entity_ids, ("1KEEP_1",))
+            self.assertTrue(record.has_xray_homolog)
+            self.assertEqual(len(record.rejected_xray_homologs), 1)
+            rejected = record.rejected_xray_homologs[0]
+            self.assertEqual(rejected.nmr_entry_id, "3NMR")
+            self.assertEqual(rejected.nmr_year, 2003)
+            self.assertEqual(rejected.nmr_chain_id, "N")
+            self.assertEqual(rejected.sequence_identity_percent, 100)
+            self.assertEqual(rejected.nmr_core_start_seq_id, 7)
+            self.assertEqual(rejected.nmr_core_end_seq_id, 17)
+            self.assertEqual(rejected.nmr_query_sequence_length, len(sequence))
+            self.assertEqual(rejected.xray_entry_id, "2DROP")
+            self.assertEqual(rejected.xray_entity_id, "2DROP_2")
+            self.assertEqual(rejected.xray_chain_ids, ("B", "C"))
+            self.assertIn("modeled core", rejected.reason.lower())
+
+    def test_rejected_xray_homolog_csv_path_round_trip_and_empty_header(
+        self,
+    ) -> None:
+        """Derive the sibling path and preserve rejected-homolog CSV records."""
+        record = RejectedXrayHomologRecord(
+            nmr_entry_id="3NMR",
+            nmr_year=2003,
+            nmr_chain_id="N",
+            sequence_identity_percent=95,
+            nmr_core_start_seq_id=7,
+            nmr_core_end_seq_id=17,
+            nmr_query_sequence_length=11,
+            xray_entry_id="2DROP",
+            xray_entity_id="2DROP_2",
+            xray_chain_ids=("B", "C"),
+            reason="no eligible modeled core match",
+        )
+        expected_header = (
+            "nmr_entry_id,nmr_year,nmr_chain_id,sequence_identity_percent,"
+            "nmr_core_start_seq_id,nmr_core_end_seq_id,nmr_query_sequence_length,"
+            "xray_entry_id,xray_entity_id,xray_chain_ids,reason\n"
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            primary_path = root / "homologs.csv"
+            rejected_path = rejected_xray_homologs_csv_path(primary_path)
+            self.assertEqual(rejected_path, root / "homologs_rejected.csv")
+
+            write_rejected_xray_homolog_csv([record], rejected_path)
+            self.assertEqual(read_rejected_xray_homolog_csv(rejected_path), [record])
+
+            empty_path = root / "empty.csv"
+            write_rejected_xray_homolog_csv([], empty_path)
+            self.assertEqual(empty_path.read_text(encoding="utf-8"), expected_header)
+            self.assertEqual(read_rejected_xray_homolog_csv(empty_path), [])
 
     def test_record_pair_reuses_candidate_metadata_and_parsed_chain(self) -> None:
         """Avoid repeating common X-ray work for the 95% and 100% rows."""
