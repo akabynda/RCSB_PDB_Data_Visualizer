@@ -99,9 +99,6 @@ class PlotConfig:
         "Number of NMR structures by deposition year and refinement program"
     )
     nmr_program_annual_y_label: str = "Number of structures"
-    nmr_monomer_program_clusters_title: str = (
-        "NMR program clusters and quality metrics by deposition year"
-    )
     nmr_monomer_program_cluster_share_title: str = (
         "Share of NMR structures by structure-determination software"
     )
@@ -206,7 +203,8 @@ class PlotConfig:
     )
     nmr_monomer_xray_rmsd_y_label: str = "Mean RMSD(CA) (Å)"
     nmr_monomer_xray_median_rmsd_title: str = (
-        "Median RMSD between NMR and analog X-ray structures by deposition year"
+        "Median RMSD(CA) between NMR structures and their best-resolution "
+        "X-ray analogs by NMR deposition year"
     )
     nmr_monomer_xray_median_rmsd_y_label: str = (
         "Median RMSD to X-ray structure (Å)"
@@ -1135,9 +1133,6 @@ class PDBScientificPlotter:
                 "cluster_id",
                 "cluster_name",
                 "structure_count",
-                "avg_ramachandran_outliers_percent",
-                "avg_sidechain_outliers_percent",
-                "avg_clashscore",
             },
             dataset_name="Solution NMR monomer program cluster summary CSV",
         )
@@ -1146,12 +1141,6 @@ class PDBScientificPlotter:
         prepared["cluster_id"] = prepared["cluster_id"].astype(str)
         prepared["cluster_name"] = prepared["cluster_name"].astype(str)
         prepared["structure_count"] = prepared["structure_count"].astype(float)
-        for metric in (
-            "avg_ramachandran_outliers_percent",
-            "avg_sidechain_outliers_percent",
-            "avg_clashscore",
-        ):
-            prepared[metric] = pd.to_numeric(prepared[metric], errors="coerce")
         limited = PDBScientificPlotter._limit_year_column(prepared)
         return limited.sort_values(["cluster_id", "year"]).reset_index(drop=True)
 
@@ -1361,160 +1350,6 @@ class PDBScientificPlotter:
             open_axes=True,
         )
 
-    @classmethod
-    def _build_cluster_metric_heatmap(
-        cls,
-        table: pd.DataFrame,
-        value_column: str,
-    ) -> tuple[np.ndarray, list[str], list[int]]:
-        """Return a cluster-by-year metric matrix with axis labels."""
-        cluster_rows = (
-            table[["cluster_id", "cluster_name"]]
-            .drop_duplicates()
-            .sort_values("cluster_id")
-        )
-        years = sorted(int(year) for year in table["year"].dropna().unique())
-        heatmap = table.pivot(
-            index="cluster_id", columns="year", values=value_column
-        ).reindex(index=cluster_rows["cluster_id"], columns=years)
-        cluster_labels = [
-            cls._display_cluster_label(
-                cluster_id=str(row.cluster_id),
-                cluster_name=str(row.cluster_name),
-            )
-            for row in cluster_rows.itertuples(index=False)
-        ]
-        return heatmap.to_numpy(dtype=float), cluster_labels, years
-
-    def _render_cluster_metric_heatmaps(
-        self,
-        table: pd.DataFrame,
-        output_png: Path,
-        output_svg: Path,
-    ) -> None:
-        """Render count and quality heatmaps for software clusters."""
-        metrics = (
-            ("structure_count", "Weighted structure score", "Blues"),
-            (
-                "avg_ramachandran_outliers_percent",
-                "Avg. Ramachandran outliers (%)",
-                "Oranges",
-            ),
-            (
-                "avg_sidechain_outliers_percent",
-                "Avg. side-chain outliers (%)",
-                "Greens",
-            ),
-            ("avg_clashscore", "Avg. clashscore", "Purples"),
-        )
-        self._scientific_style()
-        fig, axes = plt.subplots(
-            2,
-            2,
-            figsize=self.config.figure_size(height_scale=1.9),
-        )
-        axes_flat = list(axes.flat)
-
-        for ax, (column, panel_title, cmap_name) in zip(
-            axes_flat, metrics, strict=True
-        ):
-            matrix, cluster_labels, years = self._build_cluster_metric_heatmap(
-                table=table,
-                value_column=column,
-            )
-            masked = np.ma.masked_invalid(matrix)
-            cmap = plt.get_cmap(cmap_name).copy()
-            cmap.set_bad("#f2f2f2")
-            image = ax.imshow(
-                masked,
-                aspect="auto",
-                interpolation="nearest",
-                cmap=cmap,
-            )
-            tick_positions = [
-                idx
-                for idx, year in enumerate(years)
-                if year == years[0]
-                or year == years[-1]
-                or year % YEAR_MAJOR_TICK_STEP == 0
-            ]
-            ax.set_xticks(tick_positions)
-            ax.set_xticklabels(
-                [str(years[idx]) for idx in tick_positions],
-                rotation=45,
-                ha="right",
-            )
-            ax.set_yticks(list(range(len(cluster_labels))))
-            ax.set_yticklabels(cluster_labels)
-            ax.set_title(
-                panel_title,
-                fontsize=TITLE_FONTSIZE,
-                fontweight="bold",
-            )
-            ax.set_xlabel(self.config.x_label)
-            ax.set_ylabel("Program cluster")
-            ax.set_xticks(np.arange(-0.5, len(years), 1), minor=True)
-            ax.set_yticks(np.arange(-0.5, len(cluster_labels), 1), minor=True)
-            ax.grid(which="minor", color="white", linestyle="-", linewidth=0.5)
-            ax.tick_params(which="minor", bottom=False, left=False)
-            self._configure_boxed_axes(ax, y_tick_labels_on_both_sides=False)
-            ax.tick_params(
-                which="minor",
-                bottom=False,
-                top=False,
-                left=False,
-                right=False,
-            )
-            colorbar = fig.colorbar(image, ax=ax, fraction=0.046, pad=0.02)
-            colorbar.ax.tick_params(labelsize=10)
-
-        suptitle = fig.suptitle(
-            self.config.nmr_monomer_program_clusters_title,
-            fontsize=TITLE_FONTSIZE,
-            fontweight="bold",
-            y=0.98,
-        )
-        self._apply_tight_layout(fig=fig, tight_layout_rect=(0.0, 0.0, 1.0, 0.96))
-        self._save_figure_files(fig=fig, output_png=output_png, output_svg=output_svg)
-
-        for ax in axes_flat:
-            self._configure_open_axes(ax)
-            ax.tick_params(which="minor", top=False, right=False)
-        self._save_figure_files(
-            fig=fig,
-            output_png=self._open_axes_output_path(output_png),
-            output_svg=self._open_axes_output_path(output_svg),
-        )
-
-        suptitle.set_visible(False)
-        suptitle.set_in_layout(False)
-        self._apply_tight_layout(fig=fig, tight_layout_rect=None)
-        self._save_figure_files(
-            fig=fig,
-            output_png=self._open_axes_output_path(
-                self._titleless_output_path(output_png)
-            ),
-            output_svg=self._open_axes_output_path(
-                self._titleless_output_path(output_svg)
-            ),
-        )
-
-        for ax in axes_flat:
-            self._configure_boxed_axes(ax, y_tick_labels_on_both_sides=False)
-            ax.tick_params(
-                which="minor",
-                bottom=False,
-                top=False,
-                left=False,
-                right=False,
-            )
-        self._save_figure_files(
-            fig=fig,
-            output_png=self._titleless_output_path(output_png),
-            output_svg=self._titleless_output_path(output_svg),
-        )
-        plt.close(fig)
-
     @staticmethod
     def _prepare_membrane_count_table(df: pd.DataFrame) -> pd.DataFrame:
         """Validate and normalize yearly membrane-protein counts."""
@@ -1716,10 +1551,8 @@ class PDBScientificPlotter:
         share_output_svg: Path,
         share_without_other_output_png: Path,
         share_without_other_output_svg: Path,
-        metrics_output_png: Path,
-        metrics_output_svg: Path,
     ) -> None:
-        """Render software-cluster shares and quality-metric heatmaps."""
+        """Render software-cluster share plots."""
         table = self._prepare_nmr_monomer_program_cluster_table(
             self._read_csv(data_path)
         )
@@ -1774,11 +1607,6 @@ class PDBScientificPlotter:
             x_right=float(count_share_without_other_table.index.max()),
             use_step_segments=True,
             legend_outside=True,
-        )
-        self._render_cluster_metric_heatmaps(
-            table=table,
-            output_png=metrics_output_png,
-            output_svg=metrics_output_svg,
         )
 
     def plot_solution_nmr_weight_stats(
@@ -2919,7 +2747,7 @@ def parse_args() -> argparse.Namespace:
         "--nmr-monomer-program-cluster-summary-input",
         type=Path,
         default=Path("data/solution_nmr_monomer_program_cluster_quality_by_year.csv"),
-        help="Input CSV for SOLUTION NMR monomer program cluster heatmaps.",
+        help="Input CSV for SOLUTION NMR monomer program cluster share plots.",
     )
     parser.add_argument(
         "--nmr-monomer-stride-modeled-first-model-input",
@@ -3120,23 +2948,6 @@ def parse_args() -> argparse.Namespace:
             "stacked-area plot excluding OTHER."
         ),
     )
-    parser.add_argument(
-        "--nmr-monomer-program-cluster-output-png",
-        type=Path,
-        default=Path(
-            "figures/solution_nmr_monomer_program_cluster_metrics_by_year.png"
-        ),
-        help="Output PNG for SOLUTION NMR monomer program cluster metric heatmaps.",
-    )
-    parser.add_argument(
-        "--nmr-monomer-program-cluster-output-svg",
-        type=Path,
-        default=Path(
-            "figures/solution_nmr_monomer_program_cluster_metrics_by_year.svg"
-        ),
-        help="Output SVG for SOLUTION NMR monomer program cluster metric heatmaps.",
-    )
-
     parser.add_argument(
         "--nmr-avg-output-png",
         type=Path,
@@ -3773,8 +3584,6 @@ def main() -> None:
             share_without_other_output_svg=(
                 args.nmr_monomer_program_cluster_share_without_other_output_svg
             ),
-            metrics_output_png=args.nmr_monomer_program_cluster_output_png,
-            metrics_output_svg=args.nmr_monomer_program_cluster_output_svg,
         )
 
     if PlotKind.SOLUTION_NMR_WEIGHT_STATS in args.plots:

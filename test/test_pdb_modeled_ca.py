@@ -217,6 +217,28 @@ class PdbModeledCaTests(unittest.TestCase):
                 [("A", True), ("HET:A1BEB", False)],
             )
 
+    def test_marks_hetatm_when_atom_is_selected_at_the_same_residue_id(self) -> None:
+        """Retain raw HETATM presence when ATOM wins residue collapsing."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pdb_path = Path(tmpdir) / "atom_and_hetatm.pdb"
+            pdb_path.write_text(
+                "".join(
+                    [
+                        "MODEL        1\n",
+                        _hetatm_ca_line(1, "MSE", 5, 1.0),
+                        _ca_line(2, 5, 1.0),
+                        "ENDMDL\n",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            residues = parse_first_model_ca_residues(pdb_path, "A")
+
+            self.assertEqual(len(residues), 1)
+            self.assertTrue(residues[0].is_standard_atom)
+            self.assertTrue(residues[0].has_hetatm_ca)
+
 
 if __name__ == "__main__":
     unittest.main()

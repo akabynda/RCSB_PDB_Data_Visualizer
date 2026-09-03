@@ -9,6 +9,7 @@ from unittest.mock import Mock, patch
 import requests
 
 from src.pdb_dataset_builder import (
+    CAResidueRecord,
     DatasetBuildConfig,
     NMRCoreContainsHetatmError,
     NMRHomologyQueryIneligibleError,
@@ -18,6 +19,7 @@ from src.pdb_dataset_builder import (
     SolutionNMRMonomerXrayHomologSeedRecord,
     XrayPolymerEntityCandidateRecord,
     _read_xray_homolog_resume_checkpoint,
+    find_modeled_ca_core_identity_matches,
 )
 
 
@@ -73,7 +75,9 @@ class SequenceSearchTests(unittest.TestCase):
                 {"1AAA": "ineligible", "2BBB": "ineligible"},
             )
 
-    def test_homolog_build_skips_completed_entries_and_checkpoints_success(self) -> None:
+    def test_homolog_build_skips_completed_entries_and_checkpoints_success(
+        self,
+    ) -> None:
         """Skip completed entries and checkpoint newly successful searches."""
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -83,8 +87,8 @@ class SequenceSearchTests(unittest.TestCase):
                 SolutionNMRMonomerXrayHomologSeedRecord("1AAA", 2000, "A"),
                 SolutionNMRMonomerXrayHomologSeedRecord("2BBB", 2001, "A"),
             ]
-            client.fetch_solution_nmr_monomer_xray_homolog_seed_records_for_ids = (
-                Mock(return_value=seeds)
+            client.fetch_solution_nmr_monomer_xray_homolog_seed_records_for_ids = Mock(
+                return_value=seeds
             )
             builder = SolutionNMRMonomerXrayHomologBuilder(
                 client=client,
@@ -96,6 +100,7 @@ class SequenceSearchTests(unittest.TestCase):
 
             def record_pair(seed):
                 """Build paired 95 and 100 percent records for ``seed``."""
+
                 def record(identity: int) -> SolutionNMRMonomerXrayHomologRecord:
                     """Build one successful homolog record at ``identity``."""
                     return SolutionNMRMonomerXrayHomologRecord(
@@ -143,8 +148,8 @@ class SequenceSearchTests(unittest.TestCase):
                 SolutionNMRMonomerXrayHomologSeedRecord("1AAA", 2000, "A"),
                 SolutionNMRMonomerXrayHomologSeedRecord("2BBB", 2001, "A"),
             ]
-            client.fetch_solution_nmr_monomer_xray_homolog_seed_records_for_ids = (
-                Mock(return_value=seeds)
+            client.fetch_solution_nmr_monomer_xray_homolog_seed_records_for_ids = Mock(
+                return_value=seeds
             )
             builder = SolutionNMRMonomerXrayHomologBuilder(
                 client=client,
@@ -206,8 +211,8 @@ class SequenceSearchTests(unittest.TestCase):
             config = DatasetBuildConfig(graphql_batch_size=10, max_workers=1)
             client = RCSBClient(config)
             seed = SolutionNMRMonomerXrayHomologSeedRecord("1AAA", 2000, "A")
-            client.fetch_solution_nmr_monomer_xray_homolog_seed_records_for_ids = (
-                Mock(return_value=[seed])
+            client.fetch_solution_nmr_monomer_xray_homolog_seed_records_for_ids = Mock(
+                return_value=[seed]
             )
             builder = SolutionNMRMonomerXrayHomologBuilder(
                 client=client,
@@ -279,9 +284,7 @@ class SequenceSearchTests(unittest.TestCase):
             side_effect=[entity_response, empty_resolution_response]
         )
 
-        result = client.fetch_xray_polymer_entity_candidates_for_ids(
-            ["1MCD_1"]
-        )
+        result = client.fetch_xray_polymer_entity_candidates_for_ids(["1MCD_1"])
 
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0].polymer_entity_id, "1MCD_1")
@@ -334,6 +337,104 @@ class SequenceSearchTests(unittest.TestCase):
             ):
                 with self.assertRaises(NMRCoreContainsHetatmError):
                     builder._build_stride_core_query_sequence(seed)
+
+    def test_rejects_xray_regions_containing_hetatm_at_all_cutoffs(self) -> None:
+        """Reject an otherwise matching X-ray region at 95% and 100%."""
+        sequence = "ACDEFGHIKLMNPQRSTVWY"
+        nmr_residues = [
+            CAResidueRecord(index, identity, True)
+            for index, identity in enumerate(sequence, start=1)
+        ]
+        xray_residues = [
+            CAResidueRecord(
+                index,
+                identity,
+                index != 10,
+                has_hetatm_ca=index == 10,
+            )
+            for index, identity in enumerate(sequence, start=1)
+        ]
+
+        for identity_percent in (95, 100):
+            with self.subTest(identity_percent=identity_percent):
+                self.assertEqual(
+                    find_modeled_ca_core_identity_matches(
+                        nmr_residues=nmr_residues,
+                        xray_residues=xray_residues,
+                        sequence_identity_percent=identity_percent,
+                    ),
+                    [],
+                )
+
+    def test_uses_clean_xray_repeat_when_another_repeat_has_hetatm(self) -> None:
+        """Keep a candidate when a second matching region is HETATM-free."""
+        sequence = "ACDEFGHIKLMNPQRSTVWY"
+        nmr_residues = [
+            CAResidueRecord(index, identity, True)
+            for index, identity in enumerate(sequence, start=1)
+        ]
+        dirty_region = [
+            CAResidueRecord(
+                index,
+                identity,
+                index != 10,
+                has_hetatm_ca=index == 10,
+            )
+            for index, identity in enumerate(sequence, start=1)
+        ]
+        separator = CAResidueRecord(
+            50,
+            "X",
+            False,
+            has_hetatm_ca=True,
+        )
+        clean_region = [
+            CAResidueRecord(index, identity, True)
+            for index, identity in enumerate(sequence, start=101)
+        ]
+
+        for identity_percent in (95, 100):
+            with self.subTest(identity_percent=identity_percent):
+                matches = find_modeled_ca_core_identity_matches(
+                    nmr_residues=nmr_residues,
+                    xray_residues=dirty_region + [separator] + clean_region,
+                    sequence_identity_percent=identity_percent,
+                )
+
+                self.assertTrue(matches)
+                self.assertTrue(
+                    all(
+                        xray_record.resid >= 101 and not xray_record.has_hetatm_ca
+                        for match in matches
+                        for _, xray_record in match
+                    )
+                )
+
+    def test_rejects_95_percent_alignment_that_skips_internal_hetatm(self) -> None:
+        """Treat a gapped-over HETATM CA as part of the X-ray region."""
+        sequence = "ACDEFGHIKLMNPQRSTVWY"
+        nmr_residues = [
+            CAResidueRecord(index, identity, True)
+            for index, identity in enumerate(sequence, start=1)
+        ]
+        xray_residues = [
+            CAResidueRecord(index, identity, True)
+            for index, identity in enumerate(sequence[:10], start=1)
+        ]
+        xray_residues.append(CAResidueRecord(11, "X", False, has_hetatm_ca=True))
+        xray_residues.extend(
+            CAResidueRecord(index, identity, True)
+            for index, identity in enumerate(sequence[10:], start=12)
+        )
+
+        self.assertEqual(
+            find_modeled_ca_core_identity_matches(
+                nmr_residues=nmr_residues,
+                xray_residues=xray_residues,
+                sequence_identity_percent=95,
+            ),
+            [],
+        )
 
     def test_excludes_nmr_entry_when_no_modeled_query_can_be_built(self) -> None:
         """Exclude an entry when no modeled amino-acid query can be built."""
@@ -451,6 +552,74 @@ class SequenceSearchTests(unittest.TestCase):
                 3,
             )
 
+    def test_record_pair_reuses_candidate_metadata_and_parsed_chain(self) -> None:
+        """Avoid repeating common X-ray work for the 95% and 100% rows."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            pdb_path = root / "1XYZ.pdb"
+            sequence = "ACDEFGHIKLMNPQRSTVWY"
+            pdb_path.write_text(
+                "".join(
+                    f"ATOM  {serial:5d}  CA  ALA A{serial:4d}    "
+                    f"{0.0:8.3f}{0.0:8.3f}{0.0:8.3f}{1.0:6.2f}{20.0:6.2f}"
+                    "           C\n"
+                    for serial in range(1, len(sequence) + 1)
+                ),
+                encoding="utf-8",
+            )
+            config = DatasetBuildConfig()
+            client = RCSBClient(config)
+            client.fetch_xray_polymer_entity_ids_by_sequence = Mock(
+                return_value=["1XYZ_1"]
+            )
+            candidate = XrayPolymerEntityCandidateRecord(
+                polymer_entity_id="1XYZ_1",
+                entry_id="1XYZ",
+                chain_ids=("A",),
+                resolution_angstrom=2.0,
+            )
+            client.fetch_xray_polymer_entity_candidates_for_ids = Mock(
+                return_value=[candidate]
+            )
+            builder = SolutionNMRMonomerXrayHomologBuilder(
+                client=client,
+                config=config,
+                stride_executable="stride",
+                cache_dir=root,
+                stride_cache_dir=root / "stride_cache",
+            )
+            nmr_residues = [
+                CAResidueRecord(index, identity, True)
+                for index, identity in enumerate(sequence, start=1)
+            ]
+            seed = SolutionNMRMonomerXrayHomologSeedRecord("2NMR", 2000, "A")
+
+            with (
+                patch.object(
+                    builder,
+                    "_build_stride_core_query_sequence",
+                    return_value=(sequence, 1, len(sequence), nmr_residues),
+                ),
+                patch(
+                    "src.pdb_dataset_builder.download_pdb_chain_subset_if_needed",
+                    return_value=(pdb_path, {}),
+                ) as download_subset,
+                patch(
+                    "src.pdb_dataset_builder.load_cached_first_model_ca_data",
+                    return_value=(tuple(nmr_residues), {}),
+                ) as load_ca_data,
+            ):
+                record_95, record_100 = builder._build_record_pair(seed)
+
+            self.assertTrue(record_95.has_xray_homolog)
+            self.assertTrue(record_100.has_xray_homolog)
+            self.assertEqual(
+                client.fetch_xray_polymer_entity_candidates_for_ids.call_count,
+                1,
+            )
+            self.assertEqual(download_subset.call_count, 1)
+            self.assertEqual(load_ca_data.call_count, 1)
+
     def test_evaluates_large_candidate_chain_sets_one_chain_at_a_time(self) -> None:
         """Evaluate large candidate sets without materializing all chain files."""
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -476,8 +645,8 @@ class SequenceSearchTests(unittest.TestCase):
                     return_value=(root / "subset.pdb", {}),
                 ) as download_subset,
                 patch(
-                    "src.pdb_dataset_builder.parse_first_model_ca_residues",
-                    return_value=[],
+                    "src.pdb_dataset_builder.load_cached_first_model_ca_data",
+                    return_value=(tuple(), {}),
                 ),
                 patch(
                     "src.pdb_dataset_builder.find_modeled_ca_core_identity_matches",

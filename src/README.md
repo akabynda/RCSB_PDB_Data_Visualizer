@@ -72,8 +72,26 @@ mapping. Per-chain subset PDBs and chain-ID mappings are installed through
 unique temporary files and atomic replacement.
 
 A per-chain subset is reused only when its requested chain set and source mmCIF
-SHA-256 still match. Remote revalidation uses `ETag` and `Last-Modified` when
-available.
+SHA-256 still match. Its chain-ID mapping is also embedded in the metadata
+transaction, so an absent or truncated mapping cannot be combined with an
+otherwise valid subset. Remote revalidation uses `ETag` and `Last-Modified`
+when available.
+
+All coordinate artifacts for one PDB ID—legacy PDB, mmCIF, converted subsets,
+chain maps, and metadata—share one keyed lock. Cache state is checked again
+after acquiring the lock. A transaction revision lets concurrent waiters reuse
+the result even with `--pdb-cache-validation-hours 0`; a later sequential call
+still performs the requested validation. Locks are per entry, so unrelated PDB
+downloads remain parallel. On POSIX, persistent lock files in
+`data/pdb_cache/.locks/` also protect the cache between builder processes.
+
+First-model X-ray CA residues and coordinates are cached beside each parsed PDB
+as `*.pdb.first_model_ca.v1.npz`. One cold pass parses every chain and records
+residue order, identity, `ATOM`/`HETATM` flags, and selected coordinates. The
+pickle-free payload contains both a schema version and parser revision and is
+accepted only when the source PDB SHA-256 matches. A changed source, old
+revision, or damaged NPZ is reparsed and atomically replaced. The cache is
+shared by 95%/100% homology checks and all X-ray RMSD views.
 
 Each output CSV receives a sibling `.log` file containing warnings and errors
 from that build. Logs are recreated at the start of a run; multi-output datasets
@@ -91,10 +109,11 @@ file has three columns:
 The `year` cell is empty when no valid deposition date is available. One entry
 can have several rows if it fails independent checks. Duplicate
 `entry_id`/`reason` rows are suppressed. A header-only file means that nothing
-was filtered. Normal builds recreate the report. A homolog resume preserves its
-earlier exclusions, while a derived dataset imports upstream exclusions and
-then appends its own. Shared multi-output exclusions are written to every
-affected report; output-specific exclusions stay in their own report.
+was filtered. Fresh builds recreate the report. A resumed
+homolog build preserves its earlier exclusions, while a derived dataset imports
+upstream exclusions and then appends its own. Shared multi-output exclusions are
+written to every affected report; output-specific exclusions stay in their own
+report.
 
 Build one dataset:
 
@@ -175,7 +194,10 @@ The selection is deterministic: `ATOM` is preferred to `HETATM`; insertion codes
 are ordered blank first and then lexically; higher occupancy is preferred next;
 alternate locations are ordered blank, `A`, `1`, then lexically. Residue-level
 operations retain PDB author residue numbers rather than replacing them with
-RCSB label IDs.
+RCSB label IDs. The parser also remembers that a positive-occupancy `HETATM` CA
+was present when an `ATOM` CA wins this collapsing step at the same author
+residue number. This prevents the stricter homology filters from masking the
+`HETATM` record.
 
 The positions in the first model define the STRIDE summary, core endpoints, and
 homology query. Precision uses positions shared by all models. NMR-to-X-ray
@@ -199,9 +221,15 @@ the core. The core states define only the endpoints; downstream steps start from
 the observed CA positions between them, not only residues in those states.
 
 Homolog search excludes an NMR entry if any modeled CA position in its core is
-represented by a `HETATM` record. Entries without a valid query are absent from
-the homolog datasets. Therefore, `has_xray_homolog = 0` means that a valid
-search found no homolog.
+represented by, or also contains, a positive-occupancy `HETATM` record. An
+X-ray candidate is accepted only if at least one matching modeled region in at
+least one entity chain contains no such `HETATM` CA position. `HETATM` positions
+split the X-ray sequence for matching, so a 95% gapped alignment cannot skip
+over one. If a chain contains repeated matching regions, a clean region keeps
+the candidate eligible even when another repeat contains `HETATM`; a `HETATM`
+outside the selected region does not exclude it. Entries without a valid NMR
+query are absent from the homolog datasets. Therefore,
+`has_xray_homolog = 0` means that a valid search found no eligible homolog.
 
 ## STRIDE
 
@@ -236,32 +264,29 @@ changing STRIDE. Use `--stride-cache-dir` to change the cache location.
 - `--page-size`: RCSB Search API page size.
 - `--log-level`: logging level, for example `INFO` or `DEBUG`.
 - `--solution-nmr-monomer-cache-dir`: PDB cache used by the base monomer
-  model-length filter and coordinate-level monomer datasets. The legacy option
-  name `--solution-nmr-monomer-stride-cache-dir` remains accepted as an alias.
+  model-length filter and coordinate-level monomer datasets.
 - `--pdb-cache-validation-hours`: remote PDB/mmCIF validation interval; `0`
   validates every access.
 
 Long-running calculations:
 
-- `--xray-homolog-resume`: retain valid paired 95%/100% rows and entries marked
-  `ineligible`; retry every other seed.
-- `--precision-max-entries`: limit the number of entries processed for precision
-  calculations.
+- `--resume`: retain existing homolog, precision, and selected X-ray RMSD
+  results and process unfinished entries.
 - `--precision-workers`: worker count for precision RMSD calculations.
-- `--precision-overwrite`: recompute the precision CSV from scratch.
-- `--xray-rmsd-max-entries`: limit the number of entries processed for X-ray
-  RMSD calculations.
 - `--xray-rmsd-workers`: worker count for X-ray RMSD calculations.
-- `--xray-rmsd-overwrite`: recompute the X-ray RMSD CSV from scratch.
 - `--xray-rmsd-sequence-identity {95,100}`: choose which homolog CSV is used by
   the X-ray RMSD datasets.
 
 The homolog completion checkpoint is written beside the 95% output as
-`<95%-output-stem>.resume.tsv`. Run without `--xray-homolog-resume` to rebuild
-the homolog CSV pair and checkpoint from scratch.
+`<95%-output-stem>.resume.tsv`. With `--resume`, valid paired 95%/100% rows and
+entries checkpointed as `ineligible` are retained; unfinished or failed entries
+are retried. Without the flag, the homolog CSV pair and checkpoint are rebuilt.
 
-Precision and RMSD datasets reuse valid rows from an existing output by default.
-Use `--precision-overwrite` or `--xray-rmsd-overwrite` to rebuild from scratch.
+Every selected dataset is rebuilt by default. With `--resume`, precision and
+each selected RMSD output reuse valid existing rows independently, so a
+completed ordinary CSV does not suppress missing extremes or historical rows.
+Resume should be used only with the same inputs and calculation settings as the
+interrupted run.
 
 ## Recommended Run Order
 
@@ -285,17 +310,18 @@ python src/pdb_dataset_builder.py \
   --datasets solution_nmr_monomer_xray_homologs,solution_nmr_monomer_xray_homologs_historical
 
 rmsd_datasets=solution_nmr_monomer_xray_rmsd,\
-solution_nmr_monomer_xray_rmsd_extremes
+solution_nmr_monomer_xray_rmsd_extremes,\
+solution_nmr_monomer_xray_rmsd_historical,\
+solution_nmr_monomer_xray_rmsd_extremes_historical
 python src/pdb_dataset_builder.py \
   --datasets "$rmsd_datasets" \
   --xray-rmsd-sequence-identity 100
-
-historical_rmsd_datasets=solution_nmr_monomer_xray_rmsd_historical,\
-solution_nmr_monomer_xray_rmsd_extremes_historical
-python src/pdb_dataset_builder.py \
-  --datasets "$historical_rmsd_datasets" \
-  --xray-rmsd-sequence-identity 100
 ```
+
+When several RMSD dataset kinds are selected in one command, each NMR–X-ray
+candidate pair is calculated once. The ordinary, extremes, current, and
+historical rows are projected from that shared candidate set. Historical-only
+runs remain supported and do not require the current homolog CSV.
 
 Use `--xray-rmsd-sequence-identity 95` to read candidates from the 95% homolog
 CSV. The RMSD calculation itself still requires an exact modeled-core match.
@@ -347,7 +373,6 @@ Output:
 Useful options:
 
 - `--solution-nmr-program-cache-dir`
-- `--solution-nmr-program-cache-only`
 
 ### `solution_nmr_monomer_program_clusters`
 
@@ -503,13 +528,21 @@ it is not an exact single-method filter.
 Every chain of each candidate polymer entity is then checked against its
 first-model coordinates.
 
-- The 95% coordinate check uses a local gapped alignment and requires at least
+- The 95% coordinate check runs a local gapped alignment independently in each
+  HETATM-free X-ray region and requires at least
   `ceil(0.95 * query length)` modeled pairs and identities.
 - The 100% check requires the complete query to match one consecutive window;
   the X-ray chain may have additional residues outside that window.
 - An NMR core containing a `HETATM` CA is excluded.
-- X-ray `ATOM` and `HETATM` CA records can be used for sequence matching.
+- A matching X-ray region containing any positive-occupancy `HETATM` CA is
+  excluded at every identity cutoff. If several regions match, clean regions
+  remain eligible and dirty regions are ignored.
 - Missing resolution does not exclude a candidate and is written as `nan`.
+
+Within one NMR seed, the 95% and 100% passes share fetched candidate metadata
+and use the same durable, versioned first-model X-ray CA cache. This avoids
+downloading and parsing their common candidates twice while preserving separate
+RCSB sequence searches and cutoff checks.
 
 After ordinary request retries, a remaining HTTP 5xx requeues the entry for at
 most three entry-level attempts. Other failures are not requeued. A final error
@@ -548,9 +581,13 @@ Computes CA RMSD between an NMR STRIDE core and a matching X-ray homolog. The
 input homolog CSV is selected with `--xray-rmsd-sequence-identity`, but the RMSD
 stage always requires an exact modeled-core sequence match.
 
-The sequence match may use X-ray `ATOM` and `HETATM` CA records. The RMSD uses
-only matched `ATOM` CA pairs from the first NMR and X-ray models and requires at
-least three pairs. An NMR core containing a `HETATM` CA is excluded.
+The exact sequence match is repeated over HETATM-free X-ray regions, so RMSD
+cannot silently select a dirty repeat after the homolog stage accepted a clean
+one. The RMSD uses matched `ATOM` CA pairs from the first NMR and X-ray models
+and requires at least three pairs. An NMR core containing a `HETATM` CA is
+excluded. Invariant NMR residues and first-model coordinates are parsed once per
+NMR entry and reused across its X-ray candidates. X-ray first-model residues and
+coordinates come from the source-SHA-bound versioned CA cache described above.
 
 ```text
 d_eh = RMSD_superposed(NMR_e,model1, Xray_h,model1)
@@ -564,6 +601,14 @@ resolutions sort last. If one chain has several exact matching windows, the
 window with the lowest RMSD is used. Within an entity, the chain with the most
 CA pairs is selected, using lower RMSD to break a tie. The `*_extremes` dataset
 provides minima and maxima across candidates.
+
+If ordinary, extremes, current, and historical RMSD datasets are selected
+together, all usable candidate pairs are computed once per NMR entry. Ordinary
+retains the first resolution-sorted successful candidate; it is not replaced by
+the minimum-RMSD candidate. Extremes applies its min/max rules to the same pair
+set. Historical outputs filter that set to historical entity IDs and recompute
+their own total and successful homolog counts. Current/historical core metadata
+and the historical-subset invariant are validated before the shared run.
 
 Requires one of:
 

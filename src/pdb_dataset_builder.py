@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+import uuid
 import warnings
 import requests
 import numpy as np
@@ -24,14 +25,20 @@ from Bio.SeqUtils import seq1
 from collections import Counter
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
-from dataclasses import dataclass
+from contextlib import ExitStack, contextmanager
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from threading import Lock
+from threading import Lock, RLock, local
 from typing import Any, TypeVar
 from MDAnalysis.analysis.align import rotation_matrix as mda_rotation_matrix
 from MDAnalysis.analysis.rms import rmsd as mda_rmsd
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows fallback for library users.
+    fcntl = None  # type: ignore[assignment]
 
 LOGGER = logging.getLogger(__name__)
 T = TypeVar("T")
@@ -39,10 +46,13 @@ _MISSING = object()
 PDB_CHAIN_ID_POOL = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
 _ACTIVE_DATASET_WARNING_LOG_PATHS: frozenset[Path] = frozenset()
 _ACTIVE_DATASET_FILTERED_CSV_PATHS: frozenset[Path] = frozenset()
-_FILTERED_STRUCTURE_ROWS_BY_OUTPUT: dict[
-    Path, dict[tuple[str, str], str]
-] = {}
+_FILTERED_STRUCTURE_ROWS_BY_OUTPUT: dict[Path, dict[tuple[str, str], str]] = {}
 _FILTERED_STRUCTURE_CSV_LOCK = Lock()
+_PDB_CACHE_ENTRY_LOCKS_GUARD = Lock()
+_PDB_CACHE_ENTRY_LOCKS: dict[tuple[str, str], tuple[Any, int]] = {}
+_PDB_CACHE_ENTRY_LOCK_DEPTH = local()
+_FIRST_MODEL_CA_CACHE_LOCKS_GUARD = Lock()
+_FIRST_MODEL_CA_CACHE_LOCKS: dict[str, tuple[Any, int]] = {}
 XRAY_HOMOLOG_SEARCH_MAX_ATTEMPTS = 3
 
 
@@ -255,6 +265,8 @@ DEFAULT_PDB_CACHE_DIR = Path("data/pdb_cache")
 DEFAULT_STRIDE_CACHE_DIR = Path("data/stride_cache")
 DEFAULT_PDB_CACHE_VALIDATION_HOURS = 24.0
 PDB_CACHE_METADATA_SCHEMA_VERSION = 1
+XRAY_CA_CACHE_SCHEMA_VERSION = 1
+XRAY_CA_PARSER_REVISION = 1
 LOCAL_STRIDE_CANDIDATE = Path("/tmp/stride_src/src/stride")
 STRIDE_STATE_CODES: tuple[str, ...] = ("H", "G", "I", "E", "B", "T", "C")
 STRIDE_CORE_STATE_CODES: frozenset[str] = frozenset({"H", "G", "I", "E", "B"})
@@ -340,6 +352,17 @@ class CAResidueRecord:
     resid: int
     identity: str
     is_standard_atom: bool
+    has_hetatm_ca: bool = False
+
+
+PreparedNMRCoreData = tuple[
+    tuple[CAResidueRecord, ...],
+    dict[int, np.ndarray],
+]
+PreparedXrayCAData = tuple[
+    tuple[CAResidueRecord, ...],
+    dict[int, np.ndarray],
+]
 
 
 @dataclass(frozen=True)
@@ -643,9 +666,7 @@ def _record_entries_missing_from_response(
 ) -> None:
     """Record requested PDB entries omitted from a GraphQL batch response."""
     returned_entry_ids = {
-        str(entry.get("rcsb_id"))
-        for entry in entries
-        if entry and entry.get("rcsb_id")
+        str(entry.get("rcsb_id")) for entry in entries if entry and entry.get("rcsb_id")
     }
     for entry_id in sorted(set(requested_entry_ids) - returned_entry_ids):
         _record_filtered_structure(
@@ -700,6 +721,77 @@ def resolve_stride_executable(explicit_value: str) -> str | None:
 def _pdb_cache_metadata_path(pdb_path: Path) -> Path:
     """Return the sidecar metadata path for a cached coordinate file."""
     return pdb_path.with_suffix(pdb_path.suffix + ".cache.json")
+
+
+def _cache_revision(metadata: dict[str, Any] | None) -> str | None:
+    """Return the transaction revision recorded by a coordinate sidecar."""
+    if metadata is None:
+        return None
+    value = metadata.get("cache_revision")
+    return value if isinstance(value, str) and value else None
+
+
+@contextmanager
+def _pdb_cache_entry_lock(cache_dir: Path, entry_id: str) -> Iterator[None]:
+    """Serialize every cache artifact belonging to one PDB entry.
+
+    The process-local lock prevents duplicate work between worker threads.  The
+    persistent flock also protects a shared cache when two builder processes run
+    at the same time.  Lock files are deliberately retained: unlinking a locked
+    file can create two independently locked inodes.
+    """
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    normalized_entry_id = entry_id.upper()
+    resolved_cache_dir = str(cache_dir.resolve())
+    key = (resolved_cache_dir, normalized_entry_id)
+    with _PDB_CACHE_ENTRY_LOCKS_GUARD:
+        state = _PDB_CACHE_ENTRY_LOCKS.get(key)
+        if state is None:
+            thread_lock = RLock()
+            waiter_count = 0
+        else:
+            thread_lock, waiter_count = state
+        _PDB_CACHE_ENTRY_LOCKS[key] = (thread_lock, waiter_count + 1)
+
+    thread_lock.acquire()
+    lock_handle: Any | None = None
+    depths = getattr(_PDB_CACHE_ENTRY_LOCK_DEPTH, "depths", None)
+    if depths is None:
+        depths = {}
+        _PDB_CACHE_ENTRY_LOCK_DEPTH.depths = depths
+    previous_depth = int(depths.get(key, 0))
+    depths[key] = previous_depth + 1
+    is_outermost = previous_depth == 0
+    try:
+        if is_outermost:
+            lock_dir = cache_dir / ".locks"
+            lock_dir.mkdir(parents=True, exist_ok=True)
+            lock_path = lock_dir / f"{normalized_entry_id}.lock"
+            lock_handle = lock_path.open("a+b")
+            if fcntl is not None:
+                fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            if lock_handle is not None and fcntl is not None:
+                fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            if lock_handle is not None:
+                lock_handle.close()
+            if previous_depth == 0:
+                depths.pop(key, None)
+            else:
+                depths[key] = previous_depth
+            thread_lock.release()
+            with _PDB_CACHE_ENTRY_LOCKS_GUARD:
+                current_lock, current_count = _PDB_CACHE_ENTRY_LOCKS[key]
+                if current_count <= 1:
+                    del _PDB_CACHE_ENTRY_LOCKS[key]
+                else:
+                    _PDB_CACHE_ENTRY_LOCKS[key] = (
+                        current_lock,
+                        current_count - 1,
+                    )
 
 
 def _utc_now_iso() -> str:
@@ -787,6 +879,16 @@ def _response_chunks(response: requests.Response) -> Iterator[bytes]:
             yield chunk
 
 
+def _close_http_response(response: Any | None) -> None:
+    """Release a streaming HTTP response without masking the primary result."""
+    close = getattr(response, "close", None)
+    if callable(close):
+        try:
+            close()
+        except Exception:
+            LOGGER.debug("Could not close an HTTP response", exc_info=True)
+
+
 def _atomic_install_pdb_response(
     response: requests.Response,
     pdb_path: Path,
@@ -859,6 +961,7 @@ def _cache_metadata_from_response(
     """Build the durable sidecar for one successfully installed PDB file."""
     return {
         "schema_version": PDB_CACHE_METADATA_SCHEMA_VERSION,
+        "cache_revision": uuid.uuid4().hex,
         "entry_id": entry_id.upper(),
         "source_url": source_url,
         "etag": response.headers.get("ETag"),
@@ -886,8 +989,7 @@ def _pdb_download_sources(entry_id: str) -> tuple[tuple[str, bool], ...]:
             True,
         ),
         (
-            f"https://www.ebi.ac.uk/pdbe/entry-files/download/"
-            f"pdb{lower_entry_id}.ent",
+            f"https://www.ebi.ac.uk/pdbe/entry-files/download/pdb{lower_entry_id}.ent",
             False,
         ),
         (
@@ -914,8 +1016,7 @@ def _mmcif_download_sources(entry_id: str) -> tuple[tuple[str, bool], ...]:
             True,
         ),
         (
-            f"https://www.ebi.ac.uk/pdbe/entry-files/download/"
-            f"{lower_entry_id}.cif",
+            f"https://www.ebi.ac.uk/pdbe/entry-files/download/{lower_entry_id}.cif",
             False,
         ),
         (
@@ -938,7 +1039,9 @@ def _prioritize_cached_source(
     )
     if cached_source is None:
         return sources
-    return (cached_source,) + tuple(source for source in sources if source != cached_source)
+    return (cached_source,) + tuple(
+        source for source in sources if source != cached_source
+    )
 
 
 def download_pdb_if_needed(
@@ -947,8 +1050,29 @@ def download_pdb_if_needed(
     cache_dir: Path,
     entry_id: str,
 ) -> Path:
-    """Download or remotely revalidate an atomically cached PDB file."""
+    """Download or remotely revalidate one single-flight cached PDB file."""
     cache_dir.mkdir(parents=True, exist_ok=True)
+    normalized_entry_id = entry_id.upper()
+    path = cache_dir / f"{normalized_entry_id}.pdb"
+    observed_revision = _cache_revision(_load_pdb_cache_metadata(path))
+    with _pdb_cache_entry_lock(cache_dir, normalized_entry_id):
+        return _download_pdb_if_needed_locked(
+            session=session,
+            config=config,
+            cache_dir=cache_dir,
+            entry_id=normalized_entry_id,
+            observed_revision=observed_revision,
+        )
+
+
+def _download_pdb_if_needed_locked(
+    session: requests.Session,
+    config: DatasetBuildConfig,
+    cache_dir: Path,
+    entry_id: str,
+    observed_revision: str | None,
+) -> Path:
+    """Download a PDB while the entry bundle lock is already held."""
     normalized_entry_id = entry_id.upper()
     path = cache_dir / f"{normalized_entry_id}.pdb"
     metadata_path = _pdb_cache_metadata_path(path)
@@ -956,6 +1080,13 @@ def download_pdb_if_needed(
     cache_is_valid = metadata is not None and _cached_pdb_matches_metadata(
         path, metadata
     )
+    current_revision = _cache_revision(metadata)
+    if (
+        cache_is_valid
+        and current_revision is not None
+        and current_revision != observed_revision
+    ):
+        return path
     if cache_is_valid and _pdb_cache_validation_is_fresh(
         metadata, config.pdb_cache_validation_hours
     ):
@@ -986,6 +1117,7 @@ def download_pdb_if_needed(
             request_headers = (
                 conditional_headers if source_url == cached_source_url else {}
             )
+            response: Any | None = None
             try:
                 response = session.get(
                     source_url,
@@ -1001,7 +1133,9 @@ def download_pdb_if_needed(
                 ):
                     refreshed_metadata = dict(metadata)
                     refreshed_metadata["validated_at"] = _utc_now_iso()
+                    refreshed_metadata["cache_revision"] = uuid.uuid4().hex
                     _atomic_write_json(metadata_path, refreshed_metadata)
+                    _close_http_response(response)
                     return path
                 if response.status_code == 404:
                     saw_not_found = True
@@ -1009,12 +1143,16 @@ def download_pdb_if_needed(
                     last_error = requests.HTTPError(
                         f"404 Client Error: Not Found for url: {source_url}"
                     )
+                    _close_http_response(response)
                     continue
                 response.raise_for_status()
                 sha256, size_bytes, mtime_ns = _atomic_install_pdb_response(
                     response=response,
                     pdb_path=path,
                     compressed=compressed,
+                )
+                (cache_dir / f"{normalized_entry_id}.chain_map.csv").unlink(
+                    missing_ok=True
                 )
                 _atomic_write_json(
                     metadata_path,
@@ -1027,6 +1165,7 @@ def download_pdb_if_needed(
                         mtime_ns=mtime_ns,
                     ),
                 )
+                _close_http_response(response)
                 return path
             except (
                 requests.RequestException,
@@ -1035,6 +1174,7 @@ def download_pdb_if_needed(
                 gzip.BadGzipFile,
                 RuntimeError,
             ) as exc:
+                _close_http_response(response)
                 last_error = exc
                 LOGGER.debug(
                     "PDB download route failed for %s (%s): %s",
@@ -1053,6 +1193,7 @@ def download_pdb_if_needed(
             normalized_entry_id,
         )
         for attempt in range(1, config.retries + 1):
+            response: Any | None = None
             try:
                 response = session.get(
                     cif_url,
@@ -1060,33 +1201,54 @@ def download_pdb_if_needed(
                     timeout=config.timeout_seconds,
                 )
                 response.raise_for_status()
-                with tempfile.NamedTemporaryFile(
-                    "wb",
-                    suffix=".cif.tmp",
-                    prefix=f"{normalized_entry_id}.",
-                    dir=str(cache_dir),
-                    delete=False,
-                ) as handle:
-                    temp_cif_path = Path(handle.name)
-                    for chunk in _response_chunks(response):
-                        handle.write(chunk)
-                    handle.flush()
-                    os.fsync(handle.fileno())
-                temp_cif_path.replace(cif_path)
+                temp_cif_path: Path | None = None
+                try:
+                    with tempfile.NamedTemporaryFile(
+                        "wb",
+                        suffix=".cif.tmp",
+                        prefix=f"{normalized_entry_id}.",
+                        dir=str(cache_dir),
+                        delete=False,
+                    ) as handle:
+                        temp_cif_path = Path(handle.name)
+                        for chunk in _response_chunks(response):
+                            handle.write(chunk)
+                        handle.flush()
+                        os.fsync(handle.fileno())
+                    temp_cif_path.replace(cif_path)
+                finally:
+                    if temp_cif_path is not None:
+                        temp_cif_path.unlink(missing_ok=True)
                 structure = parse_mmcif_structure(normalized_entry_id, cif_path)
                 chain_id_map = _coerce_structure_chain_ids_for_pdbio(structure)
                 io = PDBIO()
                 io.set_structure(structure)
-                temp_pdb_path = cache_dir / f".{normalized_entry_id}.pdb.tmp"
-                io.save(str(temp_pdb_path))
-                temp_pdb_path.replace(path)
+                temp_pdb_path: Path | None = None
+                try:
+                    with tempfile.NamedTemporaryFile(
+                        "wb",
+                        suffix=".pdb.tmp",
+                        prefix=f".{normalized_entry_id}.",
+                        dir=str(cache_dir),
+                        delete=False,
+                    ) as pdb_handle:
+                        temp_pdb_path = Path(pdb_handle.name)
+                    io.save(str(temp_pdb_path))
+                    temp_pdb_path.replace(path)
+                finally:
+                    if temp_pdb_path is not None:
+                        temp_pdb_path.unlink(missing_ok=True)
                 if path.exists() and path.stat().st_size > 0:
                     if chain_id_map:
                         map_path = cache_dir / f"{normalized_entry_id}.chain_map.csv"
-                        write_csv_rows(
+                        _atomic_write_csv_rows(
                             output_path=map_path,
                             header=["original_chain_id", "mapped_chain_id"],
                             rows=sorted(chain_id_map.items()),
+                        )
+                    else:
+                        (cache_dir / f"{normalized_entry_id}.chain_map.csv").unlink(
+                            missing_ok=True
                         )
                     LOGGER.info(
                         "Converted mmCIF fallback to cached PDB for %s",
@@ -1094,19 +1256,21 @@ def download_pdb_if_needed(
                     )
                     pdb_bytes = path.read_bytes()
                     stat = path.stat()
-                    _atomic_write_json(
-                        metadata_path,
-                        _cache_metadata_from_response(
-                            entry_id=normalized_entry_id,
-                            source_url=sources[0][0],
-                            response=response,
-                            sha256=hashlib.sha256(pdb_bytes).hexdigest(),
-                            size_bytes=stat.st_size,
-                            mtime_ns=stat.st_mtime_ns,
-                        ),
+                    fallback_metadata = _cache_metadata_from_response(
+                        entry_id=normalized_entry_id,
+                        source_url=cif_url,
+                        response=response,
+                        sha256=hashlib.sha256(pdb_bytes).hexdigest(),
+                        size_bytes=stat.st_size,
+                        mtime_ns=stat.st_mtime_ns,
                     )
+                    fallback_metadata["chain_id_map"] = chain_id_map
+                    _atomic_write_json(metadata_path, fallback_metadata)
+                    _close_http_response(response)
                     return path
+                _close_http_response(response)
             except Exception as exc:
+                _close_http_response(response)
                 last_error = exc
                 wait_seconds = config.backoff_seconds * attempt
                 if attempt < config.retries:
@@ -1128,8 +1292,29 @@ def _download_mmcif_if_needed(
     cache_dir: Path,
     entry_id: str,
 ) -> Path:
-    """Download or remotely revalidate an atomically cached mmCIF file."""
+    """Download or remotely revalidate one single-flight cached mmCIF file."""
     cache_dir.mkdir(parents=True, exist_ok=True)
+    normalized_entry_id = entry_id.upper()
+    cif_path = cache_dir / f"{normalized_entry_id}.cif"
+    observed_revision = _cache_revision(_load_pdb_cache_metadata(cif_path))
+    with _pdb_cache_entry_lock(cache_dir, normalized_entry_id):
+        return _download_mmcif_if_needed_locked(
+            session=session,
+            config=config,
+            cache_dir=cache_dir,
+            entry_id=normalized_entry_id,
+            observed_revision=observed_revision,
+        )
+
+
+def _download_mmcif_if_needed_locked(
+    session: requests.Session,
+    config: DatasetBuildConfig,
+    cache_dir: Path,
+    entry_id: str,
+    observed_revision: str | None,
+) -> Path:
+    """Download an mmCIF while the entry bundle lock is already held."""
     normalized_entry_id = entry_id.upper()
     cif_path = cache_dir / f"{normalized_entry_id}.cif"
     metadata_path = _pdb_cache_metadata_path(cif_path)
@@ -1137,6 +1322,13 @@ def _download_mmcif_if_needed(
     cache_is_valid = metadata is not None and _cached_pdb_matches_metadata(
         cif_path, metadata
     )
+    current_revision = _cache_revision(metadata)
+    if (
+        cache_is_valid
+        and current_revision is not None
+        and current_revision != observed_revision
+    ):
+        return cif_path
     if cache_is_valid and _pdb_cache_validation_is_fresh(
         metadata, config.pdb_cache_validation_hours
     ):
@@ -1155,9 +1347,7 @@ def _download_mmcif_if_needed(
         if metadata.get("etag"):
             conditional_headers["If-None-Match"] = str(metadata["etag"])
         if metadata.get("last_modified"):
-            conditional_headers["If-Modified-Since"] = str(
-                metadata["last_modified"]
-            )
+            conditional_headers["If-Modified-Since"] = str(metadata["last_modified"])
 
     last_error: Exception | None = None
     unavailable_sources: set[str] = set()
@@ -1168,6 +1358,7 @@ def _download_mmcif_if_needed(
             request_headers = (
                 conditional_headers if source_url == cached_source_url else {}
             )
+            response: Any | None = None
             try:
                 response = session.get(
                     source_url,
@@ -1183,13 +1374,16 @@ def _download_mmcif_if_needed(
                 ):
                     refreshed_metadata = dict(metadata)
                     refreshed_metadata["validated_at"] = _utc_now_iso()
+                    refreshed_metadata["cache_revision"] = uuid.uuid4().hex
                     _atomic_write_json(metadata_path, refreshed_metadata)
+                    _close_http_response(response)
                     return cif_path
                 if response.status_code == 404:
                     unavailable_sources.add(source_url)
                     last_error = requests.HTTPError(
                         f"404 Client Error: Not Found for url: {source_url}"
                     )
+                    _close_http_response(response)
                     continue
                 response.raise_for_status()
                 sha256, size_bytes, mtime_ns = _atomic_install_pdb_response(
@@ -1208,6 +1402,7 @@ def _download_mmcif_if_needed(
                         mtime_ns=mtime_ns,
                     ),
                 )
+                _close_http_response(response)
                 return cif_path
             except (
                 requests.RequestException,
@@ -1216,6 +1411,7 @@ def _download_mmcif_if_needed(
                 gzip.BadGzipFile,
                 RuntimeError,
             ) as exc:
+                _close_http_response(response)
                 last_error = exc
                 LOGGER.debug(
                     "mmCIF download route failed for %s (%s): %s",
@@ -1343,7 +1539,18 @@ def _apply_chain_id_map_without_transient_conflicts(
 
 def load_cached_chain_id_map(cache_dir: Path, entry_id: str) -> dict[str, str]:
     """Load the cached original-to-PDB chain ID mapping for an entry."""
-    map_path = cache_dir / f"{entry_id}.chain_map.csv"
+    normalized_entry_id = entry_id.upper()
+    pdb_path = cache_dir / f"{normalized_entry_id}.pdb"
+    metadata = _load_pdb_cache_metadata(pdb_path)
+    if metadata is not None and _cached_pdb_matches_metadata(pdb_path, metadata):
+        raw_mapping = metadata.get("chain_id_map")
+        if isinstance(raw_mapping, dict):
+            return {
+                str(original): str(mapped)
+                for original, mapped in raw_mapping.items()
+                if str(original) and str(mapped)
+            }
+    map_path = cache_dir / f"{normalized_entry_id}.chain_map.csv"
     if not map_path.exists():
         return {}
     chain_id_map: dict[str, str] = {}
@@ -1371,50 +1578,121 @@ def download_pdb_chain_subset_if_needed(
     entry_id: str,
     chain_ids: Sequence[str],
 ) -> tuple[Path, dict[str, str]]:
-    """Create a source-hash-bound PDB cache containing selected chains."""
+    """Create a single-flight, source-hash-bound selected-chain PDB cache."""
     selected_chain_ids = {str(chain_id) for chain_id in chain_ids if str(chain_id)}
     if not selected_chain_ids:
         raise RuntimeError(f"No chain IDs selected for {entry_id}")
 
     cache_dir.mkdir(parents=True, exist_ok=True)
-    if all(len(chain_id) == 1 for chain_id in selected_chain_ids):
-        try:
-            full_pdb_path = download_pdb_if_needed(
-                session=session,
-                config=config,
-                cache_dir=cache_dir,
-                entry_id=entry_id,
+    normalized_entry_id = entry_id.upper()
+    stem = _chain_subset_cache_stem(normalized_entry_id, sorted(selected_chain_ids))
+    subset_path = cache_dir / f"{stem}.pdb"
+    observed_subset_revision = _cache_revision(_load_pdb_cache_metadata(subset_path))
+    with _pdb_cache_entry_lock(cache_dir, normalized_entry_id):
+        cif_path = cache_dir / f"{normalized_entry_id}.cif"
+        cached_subset = _load_valid_cached_chain_subset(
+            subset_path=subset_path,
+            cif_path=cif_path,
+            selected_chain_ids=selected_chain_ids,
+        )
+        current_subset_metadata = _load_pdb_cache_metadata(subset_path)
+        current_subset_revision = _cache_revision(current_subset_metadata)
+        cif_metadata = _load_pdb_cache_metadata(cif_path)
+        if cached_subset is not None and (
+            (
+                current_subset_revision is not None
+                and current_subset_revision != observed_subset_revision
             )
-        except RuntimeError as exc:
-            LOGGER.info(
-                "Full PDB is unavailable for %s (%s); creating an mmCIF chain subset",
-                entry_id.upper(),
-                exc,
+            or (
+                cif_metadata is not None
+                and _pdb_cache_validation_is_fresh(
+                    cif_metadata, config.pdb_cache_validation_hours
+                )
             )
-        else:
-            return full_pdb_path, load_cached_chain_id_map(cache_dir, entry_id)
+        ):
+            return cached_subset
 
-    stem = _chain_subset_cache_stem(entry_id, sorted(selected_chain_ids))
+        if all(len(chain_id) == 1 for chain_id in selected_chain_ids):
+            try:
+                full_pdb_path = download_pdb_if_needed(
+                    session=session,
+                    config=config,
+                    cache_dir=cache_dir,
+                    entry_id=normalized_entry_id,
+                )
+            except RuntimeError as exc:
+                LOGGER.info(
+                    "Full PDB is unavailable for %s (%s); creating an mmCIF chain subset",
+                    normalized_entry_id,
+                    exc,
+                )
+            else:
+                return full_pdb_path, load_cached_chain_id_map(
+                    cache_dir, normalized_entry_id
+                )
+
+        cif_path = _download_mmcif_if_needed(
+            session=session,
+            config=config,
+            cache_dir=cache_dir,
+            entry_id=normalized_entry_id,
+        )
+        return _download_pdb_chain_subset_if_needed_locked(
+            cache_dir=cache_dir,
+            entry_id=normalized_entry_id,
+            selected_chain_ids=selected_chain_ids,
+            stem=stem,
+            cif_path=cif_path,
+        )
+
+
+def _load_valid_cached_chain_subset(
+    *,
+    subset_path: Path,
+    cif_path: Path,
+    selected_chain_ids: set[str],
+) -> tuple[Path, dict[str, str]] | None:
+    """Load a complete subset bundle bound to the current mmCIF snapshot."""
+    subset_metadata = _load_pdb_cache_metadata(subset_path)
+    cif_metadata = _load_pdb_cache_metadata(cif_path)
+    if subset_metadata is None or cif_metadata is None:
+        return None
+    cached_chain_map = subset_metadata.get("chain_id_map")
+    if not (
+        _cached_pdb_matches_metadata(subset_path, subset_metadata)
+        and subset_metadata.get("source_cif_sha256") == cif_metadata.get("sha256")
+        and subset_metadata.get("chain_ids") == sorted(selected_chain_ids)
+        and isinstance(cached_chain_map, dict)
+        and set(cached_chain_map) == selected_chain_ids
+        and all(str(value) for value in cached_chain_map.values())
+    ):
+        return None
+    return subset_path, {
+        str(original): str(mapped) for original, mapped in cached_chain_map.items()
+    }
+
+
+def _download_pdb_chain_subset_if_needed_locked(
+    cache_dir: Path,
+    entry_id: str,
+    selected_chain_ids: set[str],
+    stem: str,
+    cif_path: Path,
+) -> tuple[Path, dict[str, str]]:
+    """Build a selected-chain PDB while the entry bundle lock is held."""
     path = cache_dir / f"{stem}.pdb"
     map_path = cache_dir / f"{stem}.chain_map.csv"
     metadata_path = _pdb_cache_metadata_path(path)
-    cif_path = _download_mmcif_if_needed(
-        session=session,
-        config=config,
-        cache_dir=cache_dir,
-        entry_id=entry_id,
-    )
     cif_metadata = _load_pdb_cache_metadata(cif_path)
     if cif_metadata is None:
         raise RuntimeError(f"Missing validated mmCIF metadata for {entry_id}")
-    subset_metadata = _load_pdb_cache_metadata(path)
-    if (
-        subset_metadata is not None
-        and _cached_pdb_matches_metadata(path, subset_metadata)
-        and subset_metadata.get("source_cif_sha256") == cif_metadata.get("sha256")
-        and subset_metadata.get("chain_ids") == sorted(selected_chain_ids)
-    ):
-        return path, load_chain_id_map(map_path)
+    cached_subset = _load_valid_cached_chain_subset(
+        subset_path=path,
+        cif_path=cif_path,
+        selected_chain_ids=selected_chain_ids,
+    )
+    if cached_subset is not None:
+        return cached_subset
 
     structure = parse_mmcif_structure(entry_id, cif_path)
     chain_id_map, selected_chain_object_ids = (
@@ -1459,10 +1737,12 @@ def download_pdb_chain_subset_if_needed(
         metadata_path,
         {
             "schema_version": PDB_CACHE_METADATA_SCHEMA_VERSION,
+            "cache_revision": uuid.uuid4().hex,
             "entry_id": entry_id.upper(),
             "source_url": str(cif_metadata.get("source_url") or ""),
             "source_cif_sha256": cif_metadata["sha256"],
             "chain_ids": sorted(selected_chain_ids),
+            "chain_id_map": chain_id_map,
             "etag": None,
             "last_modified": None,
             "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
@@ -2161,9 +2441,10 @@ def parse_first_model_ca_residues(
     end_seq_id: int | None = None,
     include_hetatm: bool = True,
 ) -> list[CAResidueRecord]:
-    """Return first-model CA residue records with identity and atom-standard flags."""
+    """Return first-model CA residues and whether each position has HETATM CA."""
     residue_order: list[int] = []
     candidates: dict[int, tuple[str, float, str, CAResidueRecord]] = {}
+    hetatm_ca_resids: set[int] = set()
     modres_identity_by_key = _parse_pdb_modres_identity_map(pdb_path)
     has_model_records = False
     in_model = False
@@ -2207,6 +2488,8 @@ def parse_first_model_ca_residues(
 
             if occupancy <= 0.0:
                 continue
+            if is_hetero_atom:
+                hetatm_ca_resids.add(resid)
             if is_standard_atom:
                 identity = seq1(resname, custom_map={"MSE": "M"}, undef_code="X")
             else:
@@ -2221,6 +2504,7 @@ def parse_first_model_ca_residues(
                 resid=resid,
                 identity=identity,
                 is_standard_atom=is_standard_atom,
+                has_hetatm_ca=is_hetero_atom,
             )
 
             if resid not in candidates:
@@ -2253,7 +2537,21 @@ def parse_first_model_ca_residues(
             ):
                 candidates[resid] = (insertion_code, occupancy, alt_loc, ca_record)
 
-    return [candidates[resid][3] for resid in residue_order if resid in candidates]
+    records: list[CAResidueRecord] = []
+    for resid in residue_order:
+        candidate = candidates.get(resid)
+        if candidate is None:
+            continue
+        selected = candidate[3]
+        records.append(
+            CAResidueRecord(
+                resid=selected.resid,
+                identity=selected.identity,
+                is_standard_atom=selected.is_standard_atom,
+                has_hetatm_ca=resid in hetatm_ca_resids,
+            )
+        )
+    return records
 
 
 def parse_first_model_modeled_ca_auth_seq_ids(
@@ -2314,42 +2612,64 @@ def find_modeled_ca_core_identity_matches(
     xray_residues: list[CAResidueRecord],
     sequence_identity_percent: int,
 ) -> list[list[tuple[CAResidueRecord, CAResidueRecord]]]:
-    """Find matching first-model CA ranges that align to a modeled core sequence."""
+    """Find HETATM-free X-ray CA ranges matching a modeled NMR core."""
     if not nmr_residues or not xray_residues:
         return []
     if not 0 <= sequence_identity_percent <= 100:
         raise ValueError("sequence_identity_percent must be between 0 and 100")
     nmr_identities = [record.identity for record in nmr_residues]
-    xray_identities = [record.identity for record in xray_residues]
     query_length = len(nmr_identities)
-    if query_length > len(xray_identities):
-        if sequence_identity_percent == 100:
-            return []
+    xray_regions = _split_xray_ca_residues_at_hetatm(xray_residues)
     if sequence_identity_percent < 100:
-        match = _find_gapped_modeled_ca_core_identity_match(
-            nmr_residues=nmr_residues,
-            xray_residues=xray_residues,
-            sequence_identity_percent=sequence_identity_percent,
-        )
-        return [match] if match else []
-    if query_length > len(xray_identities):
-        return []
+        min_count = (query_length * sequence_identity_percent + 99) // 100
+        matches: list[list[tuple[CAResidueRecord, CAResidueRecord]]] = []
+        for xray_region in xray_regions:
+            if len(xray_region) < min_count:
+                continue
+            match = _find_gapped_modeled_ca_core_identity_match(
+                nmr_residues=nmr_residues,
+                xray_residues=xray_region,
+                sequence_identity_percent=sequence_identity_percent,
+            )
+            if match:
+                matches.append(match)
+        return matches
 
     matches: list[list[tuple[CAResidueRecord, CAResidueRecord]]] = []
-    for start_idx in range(0, len(xray_identities) - query_length + 1):
-        end_idx = start_idx + query_length
-        match_count = sum(
-            1
-            for nmr_identity, xray_identity in zip(
-                nmr_identities,
-                xray_identities[start_idx:end_idx],
-            )
-            if nmr_identity == xray_identity
-        )
-        if match_count * 100 < sequence_identity_percent * query_length:
+    query_sequence = "".join(nmr_identities)
+    for xray_region in xray_regions:
+        if query_length > len(xray_region):
             continue
-        matches.append(list(zip(nmr_residues, xray_residues[start_idx:end_idx])))
+        xray_sequence = "".join(record.identity for record in xray_region)
+        start_idx = xray_sequence.find(query_sequence)
+        while start_idx >= 0:
+            end_idx = start_idx + query_length
+            matches.append(list(zip(nmr_residues, xray_region[start_idx:end_idx])))
+            start_idx = xray_sequence.find(query_sequence, start_idx + 1)
     return matches
+
+
+def _split_xray_ca_residues_at_hetatm(
+    xray_residues: Sequence[CAResidueRecord],
+) -> list[list[CAResidueRecord]]:
+    """Split an X-ray chain into regions containing no HETATM CA positions."""
+    regions: list[list[CAResidueRecord]] = []
+    current_region: list[CAResidueRecord] = []
+    for record in xray_residues:
+        if _ca_residue_has_hetatm(record):
+            if current_region:
+                regions.append(current_region)
+                current_region = []
+            continue
+        current_region.append(record)
+    if current_region:
+        regions.append(current_region)
+    return regions
+
+
+def _ca_residue_has_hetatm(record: CAResidueRecord) -> bool:
+    """Return whether a modeled CA position includes a HETATM record."""
+    return record.has_hetatm_ca or not record.is_standard_atom
 
 
 def _find_gapped_modeled_ca_core_identity_match(
@@ -2614,6 +2934,418 @@ def parse_models_ca_coords_with_stats(
     return models, raw_ca_counts_per_model
 
 
+def _first_model_ca_cache_path(pdb_path: Path) -> Path:
+    """Return the versioned durable first-model CA cache path."""
+    return pdb_path.with_name(
+        f"{pdb_path.name}.first_model_ca.v{XRAY_CA_CACHE_SCHEMA_VERSION}.npz"
+    )
+
+
+@contextmanager
+def _first_model_ca_cache_lock(cache_path: Path) -> Iterator[None]:
+    """Serialize a parsed-CA cache transaction across threads and processes."""
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    key = str(cache_path.resolve())
+    with _FIRST_MODEL_CA_CACHE_LOCKS_GUARD:
+        state = _FIRST_MODEL_CA_CACHE_LOCKS.get(key)
+        if state is None:
+            thread_lock = Lock()
+            waiter_count = 0
+        else:
+            thread_lock, waiter_count = state
+        _FIRST_MODEL_CA_CACHE_LOCKS[key] = (thread_lock, waiter_count + 1)
+
+    thread_lock.acquire()
+    lock_handle: Any | None = None
+    try:
+        lock_dir = cache_path.parent / ".locks"
+        lock_dir.mkdir(parents=True, exist_ok=True)
+        lock_handle = (lock_dir / f"{cache_path.name}.lock").open("a+b")
+        if fcntl is not None:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            if lock_handle is not None and fcntl is not None:
+                fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            if lock_handle is not None:
+                lock_handle.close()
+            thread_lock.release()
+            with _FIRST_MODEL_CA_CACHE_LOCKS_GUARD:
+                current_lock, current_count = _FIRST_MODEL_CA_CACHE_LOCKS[key]
+                if current_count <= 1:
+                    del _FIRST_MODEL_CA_CACHE_LOCKS[key]
+                else:
+                    _FIRST_MODEL_CA_CACHE_LOCKS[key] = (
+                        current_lock,
+                        current_count - 1,
+                    )
+
+
+def _sha256_file(path: Path) -> str:
+    """Hash one file without loading it wholly into memory."""
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while True:
+            chunk = handle.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _coordinate_source_sha256(pdb_path: Path) -> str:
+    """Return a trusted coordinate SHA, hashing local fixtures when necessary."""
+    metadata = _load_pdb_cache_metadata(pdb_path)
+    if metadata is not None and _cached_pdb_matches_metadata(pdb_path, metadata):
+        value = metadata.get("sha256")
+        if isinstance(value, str) and len(value) == 64:
+            return value
+    return _sha256_file(pdb_path)
+
+
+def _parse_first_model_ca_data_by_chain(
+    pdb_path: Path,
+) -> dict[str, PreparedXrayCAData]:
+    """Parse residue identities, HETATM evidence, and coordinates in one pass."""
+    residue_order_by_chain: dict[str, list[int]] = {}
+    residue_candidates_by_chain: dict[
+        str, dict[int, tuple[str, float, str, CAResidueRecord]]
+    ] = {}
+    coordinate_candidates_by_chain: dict[
+        str, dict[int, tuple[str, float, str, bool, np.ndarray]]
+    ] = {}
+    hetatm_ca_resids_by_chain: dict[str, set[int]] = {}
+    modres_identity_by_key = _parse_pdb_modres_identity_map(pdb_path)
+    has_model_records = False
+    in_model = False
+
+    with pdb_path.open("r", encoding="utf-8", errors="ignore") as handle:
+        for line in handle:
+            record_type = line[:6]
+            if record_type.startswith("MODEL"):
+                if has_model_records:
+                    break
+                has_model_records = True
+                in_model = True
+                continue
+            if record_type.startswith("ENDMDL"):
+                if in_model:
+                    break
+                continue
+            if has_model_records and not in_model:
+                continue
+            is_standard_atom = record_type.startswith("ATOM")
+            is_hetero_atom = record_type.startswith("HETATM")
+            if not is_standard_atom and not is_hetero_atom:
+                continue
+            parsed_fields = _parse_first_model_ca_line_fields(line)
+            if parsed_fields is None:
+                continue
+            (
+                chain_id,
+                resid,
+                insertion_code,
+                alt_loc,
+                occupancy,
+                resname,
+            ) = parsed_fields
+            if occupancy <= 0.0:
+                continue
+
+            if is_hetero_atom:
+                hetatm_ca_resids_by_chain.setdefault(chain_id, set()).add(resid)
+            if is_standard_atom:
+                identity = seq1(resname, custom_map={"MSE": "M"}, undef_code="X")
+            else:
+                identity = modres_identity_by_key.get(
+                    (chain_id, resid, insertion_code, resname),
+                    modres_identity_by_key.get(
+                        (chain_id, resid, "", resname),
+                        f"HET:{resname}",
+                    ),
+                )
+            ca_record = CAResidueRecord(
+                resid=resid,
+                identity=identity,
+                is_standard_atom=is_standard_atom,
+                has_hetatm_ca=is_hetero_atom,
+            )
+            residue_candidates = residue_candidates_by_chain.setdefault(chain_id, {})
+            existing_residue = residue_candidates.get(resid)
+            if existing_residue is None:
+                residue_order_by_chain.setdefault(chain_id, []).append(resid)
+                residue_candidates[resid] = (
+                    insertion_code,
+                    occupancy,
+                    alt_loc,
+                    ca_record,
+                )
+            else:
+                (
+                    existing_insertion_code,
+                    existing_occupancy,
+                    existing_alt_loc,
+                    existing_record,
+                ) = existing_residue
+                should_replace = False
+                if ca_record.is_standard_atom != existing_record.is_standard_atom:
+                    should_replace = ca_record.is_standard_atom
+                else:
+                    should_replace = _is_better_ca_candidate(
+                        new_insertion_code=insertion_code,
+                        new_occupancy=occupancy,
+                        new_alt_loc=alt_loc,
+                        current_insertion_code=existing_insertion_code,
+                        current_occupancy=existing_occupancy,
+                        current_alt_loc=existing_alt_loc,
+                    )
+                if should_replace:
+                    residue_candidates[resid] = (
+                        insertion_code,
+                        occupancy,
+                        alt_loc,
+                        ca_record,
+                    )
+
+            try:
+                x = float(line[30:38].strip())
+                y = float(line[38:46].strip())
+                z = float(line[46:54].strip())
+            except ValueError:
+                parts = line.split()
+                if len(parts) < 9:
+                    continue
+                try:
+                    x, y, z = (float(value) for value in parts[6:9])
+                except ValueError:
+                    continue
+            coords = np.asarray([x, y, z], dtype=float)
+            coordinate_candidates = coordinate_candidates_by_chain.setdefault(
+                chain_id, {}
+            )
+            existing_coordinate = coordinate_candidates.get(resid)
+            if existing_coordinate is None:
+                coordinate_candidates[resid] = (
+                    insertion_code,
+                    occupancy,
+                    alt_loc,
+                    is_standard_atom,
+                    coords,
+                )
+                continue
+            (
+                existing_insertion_code,
+                existing_occupancy,
+                existing_alt_loc,
+                existing_is_standard_atom,
+                _,
+            ) = existing_coordinate
+            should_replace_coordinate = False
+            if is_standard_atom != existing_is_standard_atom:
+                should_replace_coordinate = is_standard_atom
+            else:
+                should_replace_coordinate = _is_better_ca_candidate(
+                    new_insertion_code=insertion_code,
+                    new_occupancy=occupancy,
+                    new_alt_loc=alt_loc,
+                    current_insertion_code=existing_insertion_code,
+                    current_occupancy=existing_occupancy,
+                    current_alt_loc=existing_alt_loc,
+                )
+            if should_replace_coordinate:
+                coordinate_candidates[resid] = (
+                    insertion_code,
+                    occupancy,
+                    alt_loc,
+                    is_standard_atom,
+                    coords,
+                )
+
+    parsed_by_chain: dict[str, PreparedXrayCAData] = {}
+    for chain_id, residue_order in residue_order_by_chain.items():
+        residue_candidates = residue_candidates_by_chain[chain_id]
+        hetatm_resids = hetatm_ca_resids_by_chain.get(chain_id, set())
+        records = tuple(
+            CAResidueRecord(
+                resid=residue_candidates[resid][3].resid,
+                identity=residue_candidates[resid][3].identity,
+                is_standard_atom=residue_candidates[resid][3].is_standard_atom,
+                has_hetatm_ca=resid in hetatm_resids,
+            )
+            for resid in residue_order
+        )
+        coords = {
+            resid: candidate[4]
+            for resid, candidate in coordinate_candidates_by_chain.get(
+                chain_id, {}
+            ).items()
+        }
+        parsed_by_chain[chain_id] = records, coords
+    return parsed_by_chain
+
+
+def _write_first_model_ca_cache(
+    cache_path: Path,
+    source_sha256: str,
+    parsed_by_chain: dict[str, PreparedXrayCAData],
+) -> None:
+    """Atomically write a pickle-free, flattened NPZ CA cache."""
+    chain_ids = list(parsed_by_chain)
+    offsets = [0]
+    resids: list[int] = []
+    identities: list[str] = []
+    flags: list[int] = []
+    coordinates: list[np.ndarray] = []
+    coordinate_present: list[bool] = []
+    for chain_id in chain_ids:
+        records, coords_by_resid = parsed_by_chain[chain_id]
+        for record in records:
+            resids.append(record.resid)
+            identities.append(record.identity)
+            flags.append(
+                int(record.is_standard_atom) | (int(record.has_hetatm_ca) << 1)
+            )
+            coords = coords_by_resid.get(record.resid)
+            coordinate_present.append(coords is not None)
+            coordinates.append(
+                np.asarray(coords, dtype=np.float64)
+                if coords is not None
+                else np.full(3, np.nan, dtype=np.float64)
+            )
+        offsets.append(len(resids))
+
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "wb",
+            suffix=".npz.tmp",
+            prefix=f".{cache_path.name}.",
+            dir=str(cache_path.parent),
+            delete=False,
+        ) as handle:
+            temp_path = Path(handle.name)
+            np.savez_compressed(
+                handle,
+                schema_version=np.asarray(XRAY_CA_CACHE_SCHEMA_VERSION, dtype=np.int64),
+                parser_revision=np.asarray(XRAY_CA_PARSER_REVISION, dtype=np.int64),
+                source_sha256=np.asarray(source_sha256),
+                chain_ids=np.asarray(chain_ids, dtype=np.str_),
+                chain_offsets=np.asarray(offsets, dtype=np.int64),
+                resids=np.asarray(resids, dtype=np.int64),
+                identities=np.asarray(identities, dtype=np.str_),
+                flags=np.asarray(flags, dtype=np.uint8),
+                coords=(
+                    np.asarray(coordinates, dtype=np.float64).reshape((-1, 3))
+                    if coordinates
+                    else np.empty((0, 3), dtype=np.float64)
+                ),
+                coord_present=np.asarray(coordinate_present, dtype=np.bool_),
+            )
+            handle.flush()
+            os.fsync(handle.fileno())
+        temp_path.replace(cache_path)
+    finally:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
+
+
+def _read_first_model_ca_cache(
+    cache_path: Path,
+    source_sha256: str,
+) -> dict[str, PreparedXrayCAData] | None:
+    """Read and fully validate a first-model CA cache payload."""
+    if not cache_path.is_file():
+        return None
+    try:
+        with np.load(cache_path, allow_pickle=False) as payload:
+            if int(payload["schema_version"].item()) != XRAY_CA_CACHE_SCHEMA_VERSION:
+                return None
+            if int(payload["parser_revision"].item()) != XRAY_CA_PARSER_REVISION:
+                return None
+            if str(payload["source_sha256"].item()) != source_sha256:
+                return None
+            chain_ids = np.asarray(payload["chain_ids"]).astype(str).tolist()
+            offsets = np.asarray(payload["chain_offsets"], dtype=np.int64)
+            resids = np.asarray(payload["resids"], dtype=np.int64)
+            identities = np.asarray(payload["identities"]).astype(str)
+            flags = np.asarray(payload["flags"], dtype=np.uint8)
+            coordinates = np.asarray(payload["coords"], dtype=np.float64)
+            coordinate_present = np.asarray(payload["coord_present"], dtype=np.bool_)
+    except (OSError, ValueError, KeyError, EOFError):
+        return None
+
+    item_count = len(resids)
+    if len(set(chain_ids)) != len(chain_ids):
+        return None
+    if offsets.shape != (len(chain_ids) + 1,):
+        return None
+    if len(offsets) == 0 or offsets[0] != 0 or offsets[-1] != item_count:
+        return None
+    if np.any(offsets[1:] < offsets[:-1]):
+        return None
+    if (
+        identities.shape != (item_count,)
+        or flags.shape != (item_count,)
+        or coordinates.shape != (item_count, 3)
+        or coordinate_present.shape != (item_count,)
+        or np.any(flags & np.uint8(~0b11 & 0xFF))
+    ):
+        return None
+
+    parsed_by_chain: dict[str, PreparedXrayCAData] = {}
+    for chain_index, chain_id in enumerate(chain_ids):
+        start = int(offsets[chain_index])
+        end = int(offsets[chain_index + 1])
+        chain_records = tuple(
+            CAResidueRecord(
+                resid=int(resids[index]),
+                identity=str(identities[index]),
+                is_standard_atom=bool(flags[index] & 0b01),
+                has_hetatm_ca=bool(flags[index] & 0b10),
+            )
+            for index in range(start, end)
+        )
+        if len({record.resid for record in chain_records}) != len(chain_records):
+            return None
+        chain_coords = {
+            int(resids[index]): np.asarray(coordinates[index], dtype=float).copy()
+            for index in range(start, end)
+            if coordinate_present[index]
+        }
+        if any(not np.all(np.isfinite(coords)) for coords in chain_coords.values()):
+            return None
+        parsed_by_chain[chain_id] = chain_records, chain_coords
+    return parsed_by_chain
+
+
+def load_cached_first_model_ca_data(
+    pdb_path: Path,
+    chain_id: str,
+) -> PreparedXrayCAData:
+    """Load versioned first-model X-ray CA data, rebuilding safe cache misses."""
+    pdb_path = Path(pdb_path)
+    cache_path = _first_model_ca_cache_path(pdb_path)
+    with _first_model_ca_cache_lock(cache_path):
+        source_sha256 = _coordinate_source_sha256(pdb_path)
+        parsed_by_chain = _read_first_model_ca_cache(cache_path, source_sha256)
+        if parsed_by_chain is None:
+            parsed_by_chain = _parse_first_model_ca_data_by_chain(pdb_path)
+            final_source_sha256 = _coordinate_source_sha256(pdb_path)
+            if final_source_sha256 != source_sha256:
+                source_sha256 = final_source_sha256
+                parsed_by_chain = _parse_first_model_ca_data_by_chain(pdb_path)
+            _write_first_model_ca_cache(
+                cache_path=cache_path,
+                source_sha256=source_sha256,
+                parsed_by_chain=parsed_by_chain,
+            )
+        records, coords = parsed_by_chain.get(chain_id, (tuple(), {}))
+        return records, {resid: value.copy() for resid, value in coords.items()}
+
+
 def _superposed_rmsd(a: np.ndarray, b: np.ndarray) -> float:
     """Compute RMSD after optimal rigid-body superposition."""
     return float(mda_rmsd(a, b, center=True, superposition=True))
@@ -2655,6 +3387,32 @@ def _ca_rmsd_to_mean_structure(coords: np.ndarray) -> float:
 MEMBRANE_ANNOTATION_TYPES: tuple[str, ...] = ("OPM", "PDBTM", "MemProtMD", "mpstruc")
 
 
+class ThreadLocalRequestsSession:
+    """Provide one requests.Session per worker thread without serializing I/O."""
+
+    def __init__(self, user_agent: str) -> None:
+        """Store immutable session defaults and initialize thread-local state."""
+        self.user_agent = user_agent
+        self._local = local()
+
+    def _session(self) -> requests.Session:
+        """Create or reuse the calling thread's HTTP connection pool."""
+        session = getattr(self._local, "session", None)
+        if session is None:
+            session = requests.Session()
+            session.headers.update({"User-Agent": self.user_agent})
+            self._local.session = session
+        return session
+
+    def get(self, url: str, **kwargs: Any) -> requests.Response:
+        """Issue GET through the calling thread's session."""
+        return self._session().get(url, **kwargs)
+
+    def post(self, url: str, **kwargs: Any) -> requests.Response:
+        """Issue POST through the calling thread's session."""
+        return self._session().post(url, **kwargs)
+
+
 class RCSBClient:
     """Query RCSB services and retrieve cached coordinate files."""
 
@@ -2670,8 +3428,7 @@ class RCSBClient:
             if solution_nmr_monomer_cache_dir is not None
             else Path("data/pdb_cache")
         )
-        self.session = requests.Session()
-        self.session.headers.update({"User-Agent": "pdb-extensible-builder/1.0"})
+        self.session = ThreadLocalRequestsSession("pdb-extensible-builder/1.0")
 
     @staticmethod
     def _normalize_similarity_cutoff(raw_cutoff: Any) -> int | None:
@@ -3117,8 +3874,7 @@ class RCSBClient:
                     continue
                 actual_methods = ", ".join(sorted(unique_methods)) or "none"
                 expected_methods = " or ".join(
-                    f"[{', '.join(method_set)}]"
-                    for method_set in allowed_method_sets
+                    f"[{', '.join(method_set)}]" for method_set in allowed_method_sets
                 )
                 _record_filtered_structure(
                     normalized_entry_id,
@@ -3200,15 +3956,16 @@ class RCSBClient:
         for entry in entries:
             if not entry or not entry.get("rcsb_id"):
                 continue
-            if extract_year(
-                (entry.get("rcsb_accession_info") or {}).get("deposit_date")
-            ) is None:
+            if (
+                extract_year(
+                    (entry.get("rcsb_accession_info") or {}).get("deposit_date")
+                )
+                is None
+            ):
                 _record_filtered_structure(
                     entry["rcsb_id"],
                     "deposit year is missing or invalid",
-                    year=(entry.get("rcsb_accession_info") or {}).get(
-                        "deposit_date"
-                    ),
+                    year=(entry.get("rcsb_accession_info") or {}).get("deposit_date"),
                 )
         return [
             entry.get("rcsb_accession_info", {}).get("deposit_date")
@@ -4173,13 +4930,11 @@ class SolutionNMRProgramYearlyBuilder:
         client: RCSBClient,
         config: DatasetBuildConfig,
         cache_dir: Path,
-        download_missing: bool = True,
     ) -> None:
         """Initialize the SOLUTION NMR refinement-program trend builder."""
         self.client = client
         self.config = config
         self.cache_dir = cache_dir
-        self.download_missing = download_missing
         self.cache_dir.mkdir(parents=True, exist_ok=True)
 
     def _fetch_entry_years(self, entry_ids: list[str]) -> dict[str, int]:
@@ -4196,12 +4951,7 @@ class SolutionNMRProgramYearlyBuilder:
         return entry_year_by_id
 
     def _load_programs_for_entry(self, entry_id: str) -> set[str] | None:
-        """Load refinement program labels from one cached PDB file."""
-        cached_pdb_path = self.cache_dir / f"{entry_id}.pdb"
-        if not self.download_missing:
-            if cached_pdb_path.exists() and cached_pdb_path.stat().st_size > 0:
-                return extract_refinement_programs_from_pdb(cached_pdb_path)
-            return None
+        """Load refinement program labels from a cached or downloaded PDB file."""
         try:
             downloaded_pdb_path = download_pdb_if_needed(
                 session=self.client.session,
@@ -4226,7 +4976,6 @@ class SolutionNMRProgramYearlyBuilder:
         entry_year_by_id = self._fetch_entry_years(entry_ids)
         missing_year_count = 0
         missing_program_count = 0
-        skipped_uncached_count = 0
         yearly_program_counter: Counter[tuple[int, str]] = Counter()
 
         entry_year_pairs = [
@@ -4254,22 +5003,10 @@ class SolutionNMRProgramYearlyBuilder:
                 entry_id, year = future_map[future]
                 programs = future.result()
                 if programs is None:
-                    cached_pdb_path = self.cache_dir / f"{entry_id}.pdb"
-                    if not self.download_missing and (
-                        not cached_pdb_path.exists()
-                        or cached_pdb_path.stat().st_size <= 0
-                    ):
-                        skipped_uncached_count += 1
-                        _record_filtered_structure(
-                            entry_id,
-                            "PDB file is absent from cache in cache-only mode",
-                            year=year,
-                        )
-                    else:
-                        missing_program_count += 1
-                        _record_filtered_structure(
-                            entry_id, "PDB file could not be loaded", year=year
-                        )
+                    missing_program_count += 1
+                    _record_filtered_structure(
+                        entry_id, "PDB file could not be loaded", year=year
+                    )
                 elif not programs:
                     missing_program_count += 1
                     _record_filtered_structure(
@@ -4290,12 +5027,11 @@ class SolutionNMRProgramYearlyBuilder:
         LOGGER.info(
             (
                 "SOLUTION NMR programs: entries=%d, missing_year=%d, "
-                "without_program=%d, skipped_uncached=%d, unique_programs=%d"
+                "without_program=%d, unique_programs=%d"
             ),
             len(entry_ids),
             missing_year_count,
             missing_program_count,
-            skipped_uncached_count,
             len({program for _, program in yearly_program_counter.keys()}),
         )
         return sorted(
@@ -4548,7 +5284,9 @@ class MembraneProteinYearlyBuilder:
             excluded_entry_ids = sorted(set(method_entry_ids) - membrane_entry_ids)
             year_by_entry_id: dict[str, int] = {}
             for batch_years in collect_batch_results(
-                batches=list(chunked(excluded_entry_ids, self.config.graphql_batch_size)),
+                batches=list(
+                    chunked(excluded_entry_ids, self.config.graphql_batch_size)
+                ),
                 max_workers=self.config.max_workers,
                 fetch_fn=self.client.fetch_deposit_year_by_entry_id_for_ids,
                 progress_label=f"Non-membrane {method.label} deposit years",
@@ -4918,7 +5656,6 @@ class SolutionNMRMonomerPrecisionStrideModeledFirstModelBuilder(
 
     def build(
         self,
-        max_entries: int | None = None,
         skip_entry_ids: set[str] | None = None,
         on_record: Callable[[SolutionNMRMonomerPrecisionRecord], None] | None = None,
     ) -> list[SolutionNMRMonomerPrecisionRecord]:
@@ -4945,8 +5682,6 @@ class SolutionNMRMonomerPrecisionStrideModeledFirstModelBuilder(
             record for record in seed_records if record.entry_id not in skip_entry_ids
         ]
         filtered_seeds = sorted(filtered_seeds, key=lambda r: (r.year, r.entry_id))
-        if max_entries is not None:
-            filtered_seeds = filtered_seeds[: max(0, max_entries)]
         LOGGER.info(
             "SOLUTION NMR precision STRIDE modeled-first-model: entries to process after filters: %d",
             len(filtered_seeds),
@@ -5079,7 +5814,7 @@ class SolutionNMRMonomerXrayHomologBuilder:
             end_seq_id=core_end,
             include_hetatm=True,
         )
-        if any(not record.is_standard_atom for record in nmr_core_residues):
+        if any(_ca_residue_has_hetatm(record) for record in nmr_core_residues):
             raise NMRCoreContainsHetatmError(seed.entry_id)
         if len(nmr_core_residues) <= 10:
             raise NMRHomologyQueryIneligibleError(
@@ -5103,33 +5838,46 @@ class SolutionNMRMonomerXrayHomologBuilder:
         nmr_core_residues: list[CAResidueRecord],
         candidate: XrayPolymerEntityCandidateRecord,
         sequence_identity_percent: int,
+        chain_residue_cache: (
+            dict[tuple[str, str], tuple[CAResidueRecord, ...]] | None
+        ) = None,
     ) -> bool:
         """Check whether an X-ray candidate models the NMR core sequence."""
         chain_errors: list[tuple[str, Exception]] = []
         for xray_chain_id in candidate.chain_ids:
-            try:
-                (
-                    xray_pdb_path,
-                    xray_chain_map,
-                ) = download_pdb_chain_subset_if_needed(
-                    session=self.client.session,
-                    config=self.config,
-                    cache_dir=self.cache_dir,
-                    entry_id=candidate.entry_id,
-                    chain_ids=(xray_chain_id,),
-                )
-            except Exception as exc:
-                chain_errors.append((xray_chain_id, exc))
-                continue
-            parsed_xray_chain_id = xray_chain_map.get(xray_chain_id, xray_chain_id)
-            xray_residues = parse_first_model_ca_residues(
-                pdb_path=xray_pdb_path,
-                chain_id=parsed_xray_chain_id,
-                include_hetatm=True,
+            cache_key = (candidate.entry_id, xray_chain_id)
+            cached_residues = (
+                chain_residue_cache.get(cache_key)
+                if chain_residue_cache is not None
+                else None
             )
+            if cached_residues is None:
+                try:
+                    (
+                        xray_pdb_path,
+                        xray_chain_map,
+                    ) = download_pdb_chain_subset_if_needed(
+                        session=self.client.session,
+                        config=self.config,
+                        cache_dir=self.cache_dir,
+                        entry_id=candidate.entry_id,
+                        chain_ids=(xray_chain_id,),
+                    )
+                    parsed_xray_chain_id = xray_chain_map.get(
+                        xray_chain_id, xray_chain_id
+                    )
+                    cached_residues, _ = load_cached_first_model_ca_data(
+                        pdb_path=xray_pdb_path,
+                        chain_id=parsed_xray_chain_id,
+                    )
+                except Exception as exc:
+                    chain_errors.append((xray_chain_id, exc))
+                    continue
+                if chain_residue_cache is not None:
+                    chain_residue_cache[cache_key] = cached_residues
             if find_modeled_ca_core_identity_matches(
                 nmr_residues=nmr_core_residues,
-                xray_residues=xray_residues,
+                xray_residues=list(cached_residues),
                 sequence_identity_percent=sequence_identity_percent,
             ):
                 return True
@@ -5147,23 +5895,33 @@ class SolutionNMRMonomerXrayHomologBuilder:
         xray_entity_ids: tuple[str, ...],
         nmr_core_residues: list[CAResidueRecord],
         sequence_identity_percent: int,
+        candidate_cache: (dict[str, XrayPolymerEntityCandidateRecord] | None) = None,
+        chain_residue_cache: (
+            dict[tuple[str, str], tuple[CAResidueRecord, ...]] | None
+        ) = None,
     ) -> tuple[str, ...]:
         """Filter homolog candidates to those modeling the required core."""
         if not xray_entity_ids:
             return tuple()
 
+        candidate_by_entity_id = candidate_cache if candidate_cache is not None else {}
+        uncached_entity_ids = [
+            entity_id
+            for entity_id in xray_entity_ids
+            if entity_id not in candidate_by_entity_id
+        ]
         candidates: list[XrayPolymerEntityCandidateRecord] = []
         for entity_id_batch in chunked(
-            list(xray_entity_ids), self.config.graphql_batch_size
+            uncached_entity_ids, self.config.graphql_batch_size
         ):
             candidates.extend(
                 self.client.fetch_xray_polymer_entity_candidates_for_ids(
                     entity_id_batch,
                 )
             )
-        candidate_by_entity_id = {
-            candidate.polymer_entity_id: candidate for candidate in candidates
-        }
+        candidate_by_entity_id.update(
+            {candidate.polymer_entity_id: candidate for candidate in candidates}
+        )
         missing_entity_ids = [
             entity_id
             for entity_id in xray_entity_ids
@@ -5171,8 +5929,7 @@ class SolutionNMRMonomerXrayHomologBuilder:
         ]
         if missing_entity_ids:
             raise XrayHomologEvaluationError(
-                "Missing X-ray candidate metadata for: "
-                + ", ".join(missing_entity_ids)
+                "Missing X-ray candidate metadata for: " + ", ".join(missing_entity_ids)
             )
 
         filtered_entity_ids: list[str] = []
@@ -5184,6 +5941,7 @@ class SolutionNMRMonomerXrayHomologBuilder:
                 nmr_core_residues=nmr_core_residues,
                 candidate=candidate,
                 sequence_identity_percent=sequence_identity_percent,
+                chain_residue_cache=chain_residue_cache,
             ):
                 filtered_entity_ids.append(entity_id)
         return tuple(filtered_entity_ids)
@@ -5192,9 +5950,11 @@ class SolutionNMRMonomerXrayHomologBuilder:
         self,
         seed: SolutionNMRMonomerXrayHomologSeedRecord,
         sequence_identity_percent: int,
-        core_query: (
-            tuple[str, int, int, list[CAResidueRecord]] | object
-        ) = _MISSING,
+        core_query: (tuple[str, int, int, list[CAResidueRecord]] | object) = _MISSING,
+        candidate_cache: (dict[str, XrayPolymerEntityCandidateRecord] | None) = None,
+        chain_residue_cache: (
+            dict[tuple[str, str], tuple[CAResidueRecord, ...]] | None
+        ) = None,
     ) -> SolutionNMRMonomerXrayHomologRecord:
         """Build one X-ray homolog summary record from a seed."""
         if core_query is _MISSING:
@@ -5211,6 +5971,8 @@ class SolutionNMRMonomerXrayHomologBuilder:
             xray_entity_ids=raw_xray_entity_ids,
             nmr_core_residues=nmr_core_residues,
             sequence_identity_percent=sequence_identity_percent,
+            candidate_cache=candidate_cache,
+            chain_residue_cache=chain_residue_cache,
         )
         xray_entry_ids = self._entry_ids_from_polymer_entity_ids(xray_entity_ids)
         return SolutionNMRMonomerXrayHomologRecord(
@@ -5233,12 +5995,22 @@ class SolutionNMRMonomerXrayHomologBuilder:
     ]:
         """Build current and historical homolog records for one seed."""
         core_query = self._build_stride_core_query_sequence(seed)
+        candidate_cache: dict[str, XrayPolymerEntityCandidateRecord] = {}
+        chain_residue_cache: dict[tuple[str, str], tuple[CAResidueRecord, ...]] = {}
         return (
             self._build_record(
-                seed, sequence_identity_percent=95, core_query=core_query
+                seed,
+                sequence_identity_percent=95,
+                core_query=core_query,
+                candidate_cache=candidate_cache,
+                chain_residue_cache=chain_residue_cache,
             ),
             self._build_record(
-                seed, sequence_identity_percent=100, core_query=core_query
+                seed,
+                sequence_identity_percent=100,
+                core_query=core_query,
+                candidate_cache=candidate_cache,
+                chain_residue_cache=chain_residue_cache,
             ),
         )
 
@@ -5334,7 +6106,10 @@ class SolutionNMRMonomerXrayHomologBuilder:
                     except Exception as exc:
                         attempt = attempt_by_entry_id[seed.entry_id]
                         is_server_error = _is_http_server_error(exc)
-                        if is_server_error and attempt < XRAY_HOMOLOG_SEARCH_MAX_ATTEMPTS:
+                        if (
+                            is_server_error
+                            and attempt < XRAY_HOMOLOG_SEARCH_MAX_ATTEMPTS
+                        ):
                             next_attempt = attempt + 1
                             attempt_by_entry_id[seed.entry_id] = next_attempt
                             retry_future = executor.submit(
@@ -5425,6 +6200,104 @@ class SolutionNMRMonomerXrayHomologBuilder:
         return sorted(records_95, key=key_fn), sorted(records_100, key=key_fn)
 
 
+def _xray_rmsd_records_for_homolog_view(
+    homolog: SolutionNMRMonomerXrayHomologRecord,
+    candidate_records: Sequence[SolutionNMRMonomerXrayRmsdRecord],
+) -> tuple[SolutionNMRMonomerXrayRmsdRecord, ...]:
+    """Filter shared successful calculations to one current/historical view."""
+    allowed_entity_ids = set(homolog.xray_homolog_entity_ids)
+    return tuple(
+        record
+        for record in candidate_records
+        if record.xray_homolog_entity_id in allowed_entity_ids
+    )
+
+
+def _select_ordinary_xray_rmsd_record(
+    *,
+    homolog: SolutionNMRMonomerXrayHomologRecord,
+    candidate_records: Sequence[SolutionNMRMonomerXrayRmsdRecord],
+) -> SolutionNMRMonomerXrayRmsdRecord | None:
+    """Project the first resolution-ordered successful pair to one view."""
+    eligible_records = _xray_rmsd_records_for_homolog_view(homolog, candidate_records)
+    if not eligible_records:
+        return None
+    return replace(
+        eligible_records[0],
+        year=homolog.year,
+        sequence_identity_percent=homolog.sequence_identity_percent,
+        nmr_core_start_seq_id=homolog.nmr_core_start_seq_id,
+        nmr_core_end_seq_id=homolog.nmr_core_end_seq_id,
+        nmr_query_sequence_length=homolog.nmr_query_sequence_length,
+        xray_homolog_count=len(homolog.xray_homolog_entity_ids),
+    )
+
+
+def _build_xray_rmsd_extremes_record_from_candidates(
+    *,
+    homolog: SolutionNMRMonomerXrayHomologRecord,
+    candidate_records: Sequence[SolutionNMRMonomerXrayRmsdRecord],
+) -> SolutionNMRMonomerXrayRmsdExtremesRecord | None:
+    """Project minimum and maximum shared candidate RMSDs to one view."""
+    eligible_records = _xray_rmsd_records_for_homolog_view(homolog, candidate_records)
+    if not eligible_records:
+        return None
+    best = min(
+        eligible_records,
+        key=lambda record: (
+            record.rmsd_ca_angstrom,
+            -record.n_common_ca,
+            np.isnan(record.xray_resolution_angstrom),
+            record.xray_resolution_angstrom,
+            record.xray_entry_id,
+            record.xray_homolog_entity_id,
+        ),
+    )
+    worst = max(
+        eligible_records,
+        key=lambda record: (
+            record.rmsd_ca_angstrom,
+            record.n_common_ca,
+            not np.isnan(record.xray_resolution_angstrom),
+            (
+                -record.xray_resolution_angstrom
+                if not np.isnan(record.xray_resolution_angstrom)
+                else 0.0
+            ),
+            record.xray_entry_id,
+            record.xray_homolog_entity_id,
+        ),
+    )
+    return SolutionNMRMonomerXrayRmsdExtremesRecord(
+        entry_id=homolog.entry_id,
+        year=homolog.year,
+        sequence_identity_percent=homolog.sequence_identity_percent,
+        nmr_chain_id=best.nmr_chain_id,
+        nmr_core_start_seq_id=homolog.nmr_core_start_seq_id,
+        nmr_core_end_seq_id=homolog.nmr_core_end_seq_id,
+        nmr_query_sequence_length=homolog.nmr_query_sequence_length,
+        xray_homolog_count=len(homolog.xray_homolog_entity_ids),
+        successful_xray_homolog_count=len(eligible_records),
+        best_xray_homolog_entity_id=best.xray_homolog_entity_id,
+        best_xray_entry_id=best.xray_entry_id,
+        best_xray_chain_id=best.xray_chain_id,
+        best_xray_resolution_angstrom=best.xray_resolution_angstrom,
+        best_xray_core_start_seq_id=best.xray_core_start_seq_id,
+        best_xray_core_end_seq_id=best.xray_core_end_seq_id,
+        best_n_common_ca=best.n_common_ca,
+        best_rmsd_ca_angstrom=best.rmsd_ca_angstrom,
+        worst_xray_homolog_entity_id=worst.xray_homolog_entity_id,
+        worst_xray_entry_id=worst.xray_entry_id,
+        worst_xray_chain_id=worst.xray_chain_id,
+        worst_xray_resolution_angstrom=worst.xray_resolution_angstrom,
+        worst_xray_core_start_seq_id=worst.xray_core_start_seq_id,
+        worst_xray_core_end_seq_id=worst.xray_core_end_seq_id,
+        worst_n_common_ca=worst.n_common_ca,
+        worst_rmsd_ca_angstrom=worst.rmsd_ca_angstrom,
+        rmsd_delta_angstrom=worst.rmsd_ca_angstrom - best.rmsd_ca_angstrom,
+    )
+
+
 class SolutionNMRMonomerXrayRmsdBuilder:
     """Compute alpha-carbon RMSDs between NMR entries and X-ray homologs."""
 
@@ -5463,6 +6336,7 @@ class SolutionNMRMonomerXrayRmsdBuilder:
         nmr_chain_id: str,
         nmr_pdb_path: Path,
         parsed_nmr_chain_id: str,
+        prepared_nmr_core: PreparedNMRCoreData,
         candidate: XrayPolymerEntityCandidateRecord,
     ) -> SolutionNMRMonomerXrayRmsdRecord | None:
         """Compute RMSD metrics for one NMR and X-ray candidate pair."""
@@ -5501,6 +6375,7 @@ class SolutionNMRMonomerXrayRmsdBuilder:
                     xray_pdb_path=xray_pdb_path,
                     xray_chain_id=parsed_xray_chain_id,
                     sequence_identity_percent=self.sequence_identity_percent,
+                    prepared_nmr_core=prepared_nmr_core,
                 )
             except Exception as exc:
                 LOGGER.debug(
@@ -5571,17 +6446,13 @@ class SolutionNMRMonomerXrayRmsdBuilder:
         )
 
     @staticmethod
-    def _compute_ca_rmsd_to_xray(
+    def _prepare_nmr_core_data(
         nmr_pdb_path: Path,
         nmr_chain_id: str,
         nmr_core_start_seq_id: int,
         nmr_core_end_seq_id: int,
-        xray_pdb_path: Path,
-        xray_chain_id: str,
-        sequence_identity_percent: int,
-    ) -> tuple[int, float, int, int, int, int] | None:
-        """Compute CA RMSD after aligning an NMR model core to an X-ray chain."""
-        _ = sequence_identity_percent
+    ) -> PreparedNMRCoreData | None:
+        """Parse invariant NMR core inputs once for all X-ray candidates."""
         nmr_residues = parse_first_model_ca_residues(
             nmr_pdb_path,
             nmr_chain_id,
@@ -5591,20 +6462,7 @@ class SolutionNMRMonomerXrayRmsdBuilder:
         )
         if len(nmr_residues) <= 10:
             return None
-        if any(not record.is_standard_atom for record in nmr_residues):
-            return None
-
-        xray_residues = parse_first_model_ca_residues(
-            xray_pdb_path,
-            xray_chain_id,
-            include_hetatm=True,
-        )
-        matched_pair_sets = find_modeled_ca_core_identity_matches(
-            nmr_residues=nmr_residues,
-            xray_residues=xray_residues,
-            sequence_identity_percent=100,
-        )
-        if not matched_pair_sets:
+        if any(_ca_residue_has_hetatm(record) for record in nmr_residues):
             return None
 
         nmr_model_maps = parse_models_ca_coords(
@@ -5615,11 +6473,49 @@ class SolutionNMRMonomerXrayRmsdBuilder:
         )
         if not nmr_model_maps:
             return None
-        nmr_first_model_map = nmr_model_maps[0]
-        xray_models = parse_models_ca_coords(xray_pdb_path, xray_chain_id)
-        if not xray_models:
+        return tuple(nmr_residues), nmr_model_maps[0]
+
+    @staticmethod
+    def _compute_ca_rmsd_to_xray(
+        nmr_pdb_path: Path,
+        nmr_chain_id: str,
+        nmr_core_start_seq_id: int,
+        nmr_core_end_seq_id: int,
+        xray_pdb_path: Path,
+        xray_chain_id: str,
+        sequence_identity_percent: int,
+        prepared_nmr_core: PreparedNMRCoreData | None = None,
+    ) -> tuple[int, float, int, int, int, int] | None:
+        """Compute CA RMSD after aligning an NMR model core to an X-ray chain."""
+        _ = sequence_identity_percent
+        if prepared_nmr_core is None:
+            prepared_nmr_core = (
+                SolutionNMRMonomerXrayRmsdBuilder._prepare_nmr_core_data(
+                    nmr_pdb_path=nmr_pdb_path,
+                    nmr_chain_id=nmr_chain_id,
+                    nmr_core_start_seq_id=nmr_core_start_seq_id,
+                    nmr_core_end_seq_id=nmr_core_end_seq_id,
+                )
+            )
+        if prepared_nmr_core is None:
             return None
-        xray_first_model_map = xray_models[0]
+        cached_nmr_residues, nmr_first_model_map = prepared_nmr_core
+        nmr_residues = list(cached_nmr_residues)
+
+        cached_xray_residues, xray_first_model_map = load_cached_first_model_ca_data(
+            pdb_path=xray_pdb_path,
+            chain_id=xray_chain_id,
+        )
+        xray_residues = list(cached_xray_residues)
+        matched_pair_sets = find_modeled_ca_core_identity_matches(
+            nmr_residues=nmr_residues,
+            xray_residues=xray_residues,
+            sequence_identity_percent=100,
+        )
+        if not matched_pair_sets:
+            return None
+        if not xray_first_model_map:
+            return None
 
         best_result: tuple[int, float, int, int, int, int] | None = None
         for matched_pairs in matched_pair_sets:
@@ -5663,88 +6559,43 @@ class SolutionNMRMonomerXrayRmsdBuilder:
 
         return best_result
 
-    def _compute_record(
+    def _compute_candidate_records(
         self,
         homolog: SolutionNMRMonomerXrayHomologRecord,
         nmr_chain_id: str,
         candidates: tuple[XrayPolymerEntityCandidateRecord, ...],
-    ) -> SolutionNMRMonomerXrayRmsdRecord | None:
-        """Compute the best X-ray RMSD record for one NMR seed."""
-        if (
-            homolog.nmr_core_start_seq_id is None
-            or homolog.nmr_core_end_seq_id is None
-        ):
+    ) -> tuple[SolutionNMRMonomerXrayRmsdRecord, ...]:
+        """Compute every successful pair once in candidate sort order."""
+        if homolog.nmr_core_start_seq_id is None or homolog.nmr_core_end_seq_id is None:
             _record_filtered_structure(
                 homolog.entry_id, "NMR core range is missing", year=homolog.year
             )
-            return None
+            return tuple()
         if not candidates:
             _record_filtered_structure(
                 homolog.entry_id,
                 "no usable X-ray homolog candidates",
                 year=homolog.year,
             )
-            return None
+            return tuple()
 
         try:
             nmr_pdb_path = self._download_pdb_if_needed(homolog.entry_id)
             nmr_chain_map = load_cached_chain_id_map(self.cache_dir, homolog.entry_id)
             parsed_nmr_chain_id = nmr_chain_map.get(nmr_chain_id, nmr_chain_id)
-
-            for candidate in candidates:
-                record = self._compute_candidate_record(
-                    homolog=homolog,
-                    nmr_chain_id=nmr_chain_id,
-                    nmr_pdb_path=nmr_pdb_path,
-                    parsed_nmr_chain_id=parsed_nmr_chain_id,
-                    candidate=candidate,
+            prepared_nmr_core = self._prepare_nmr_core_data(
+                nmr_pdb_path=nmr_pdb_path,
+                nmr_chain_id=parsed_nmr_chain_id,
+                nmr_core_start_seq_id=homolog.nmr_core_start_seq_id,
+                nmr_core_end_seq_id=homolog.nmr_core_end_seq_id,
+            )
+            if prepared_nmr_core is None:
+                _record_filtered_structure(
+                    homolog.entry_id,
+                    "NMR core cannot be prepared for X-ray RMSD",
+                    year=homolog.year,
                 )
-                if record is not None:
-                    return record
-            _record_filtered_structure(
-                homolog.entry_id,
-                "no X-ray homolog candidate produced a usable CA RMSD",
-                year=homolog.year,
-            )
-            return None
-        except Exception as exc:
-            LOGGER.warning(
-                "X-ray RMSD calculation failed for %s: %s", homolog.entry_id, exc
-            )
-            _record_filtered_structure(
-                homolog.entry_id,
-                f"X-ray RMSD calculation failed: {exc}",
-                year=homolog.year,
-            )
-            return None
-
-    def _compute_extremes_record(
-        self,
-        homolog: SolutionNMRMonomerXrayHomologRecord,
-        nmr_chain_id: str,
-        candidates: tuple[XrayPolymerEntityCandidateRecord, ...],
-    ) -> SolutionNMRMonomerXrayRmsdExtremesRecord | None:
-        """Compute minimum and maximum X-ray RMSD records for one NMR seed."""
-        if (
-            homolog.nmr_core_start_seq_id is None
-            or homolog.nmr_core_end_seq_id is None
-        ):
-            _record_filtered_structure(
-                homolog.entry_id, "NMR core range is missing", year=homolog.year
-            )
-            return None
-        if not candidates:
-            _record_filtered_structure(
-                homolog.entry_id,
-                "no usable X-ray homolog candidates",
-                year=homolog.year,
-            )
-            return None
-
-        try:
-            nmr_pdb_path = self._download_pdb_if_needed(homolog.entry_id)
-            nmr_chain_map = load_cached_chain_id_map(self.cache_dir, homolog.entry_id)
-            parsed_nmr_chain_id = nmr_chain_map.get(nmr_chain_id, nmr_chain_id)
+                return tuple()
 
             candidate_records: list[SolutionNMRMonomerXrayRmsdRecord] = []
             for candidate in candidates:
@@ -5753,6 +6604,7 @@ class SolutionNMRMonomerXrayRmsdBuilder:
                     nmr_chain_id=nmr_chain_id,
                     nmr_pdb_path=nmr_pdb_path,
                     parsed_nmr_chain_id=parsed_nmr_chain_id,
+                    prepared_nmr_core=prepared_nmr_core,
                     candidate=candidate,
                 )
                 if record is not None:
@@ -5763,78 +6615,54 @@ class SolutionNMRMonomerXrayRmsdBuilder:
                     "no X-ray homolog candidate produced a usable CA RMSD",
                     year=homolog.year,
                 )
-                return None
-
-            best = min(
-                candidate_records,
-                key=lambda record: (
-                    record.rmsd_ca_angstrom,
-                    -record.n_common_ca,
-                    np.isnan(record.xray_resolution_angstrom),
-                    record.xray_resolution_angstrom,
-                    record.xray_entry_id,
-                    record.xray_homolog_entity_id,
-                ),
-            )
-            worst = max(
-                candidate_records,
-                key=lambda record: (
-                    record.rmsd_ca_angstrom,
-                    record.n_common_ca,
-                    not np.isnan(record.xray_resolution_angstrom),
-                    (
-                        -record.xray_resolution_angstrom
-                        if not np.isnan(record.xray_resolution_angstrom)
-                        else 0.0
-                    ),
-                    record.xray_entry_id,
-                    record.xray_homolog_entity_id,
-                ),
-            )
-            return SolutionNMRMonomerXrayRmsdExtremesRecord(
-                entry_id=homolog.entry_id,
-                year=homolog.year,
-                sequence_identity_percent=self.sequence_identity_percent,
-                nmr_chain_id=nmr_chain_id,
-                nmr_core_start_seq_id=homolog.nmr_core_start_seq_id,
-                nmr_core_end_seq_id=homolog.nmr_core_end_seq_id,
-                nmr_query_sequence_length=homolog.nmr_query_sequence_length,
-                xray_homolog_count=len(homolog.xray_homolog_entity_ids),
-                successful_xray_homolog_count=len(candidate_records),
-                best_xray_homolog_entity_id=best.xray_homolog_entity_id,
-                best_xray_entry_id=best.xray_entry_id,
-                best_xray_chain_id=best.xray_chain_id,
-                best_xray_resolution_angstrom=best.xray_resolution_angstrom,
-                best_xray_core_start_seq_id=best.xray_core_start_seq_id,
-                best_xray_core_end_seq_id=best.xray_core_end_seq_id,
-                best_n_common_ca=best.n_common_ca,
-                best_rmsd_ca_angstrom=best.rmsd_ca_angstrom,
-                worst_xray_homolog_entity_id=worst.xray_homolog_entity_id,
-                worst_xray_entry_id=worst.xray_entry_id,
-                worst_xray_chain_id=worst.xray_chain_id,
-                worst_xray_resolution_angstrom=worst.xray_resolution_angstrom,
-                worst_xray_core_start_seq_id=worst.xray_core_start_seq_id,
-                worst_xray_core_end_seq_id=worst.xray_core_end_seq_id,
-                worst_n_common_ca=worst.n_common_ca,
-                worst_rmsd_ca_angstrom=worst.rmsd_ca_angstrom,
-                rmsd_delta_angstrom=(worst.rmsd_ca_angstrom - best.rmsd_ca_angstrom),
-            )
+            return tuple(candidate_records)
         except Exception as exc:
             LOGGER.warning(
-                "X-ray RMSD extremes calculation failed for %s: %s",
-                homolog.entry_id,
-                exc,
+                "X-ray RMSD calculation failed for %s: %s", homolog.entry_id, exc
             )
             _record_filtered_structure(
                 homolog.entry_id,
-                f"X-ray RMSD extremes calculation failed: {exc}",
+                f"X-ray RMSD calculation failed: {exc}",
                 year=homolog.year,
             )
-            return None
+            return tuple()
+
+    def _compute_record(
+        self,
+        homolog: SolutionNMRMonomerXrayHomologRecord,
+        nmr_chain_id: str,
+        candidates: tuple[XrayPolymerEntityCandidateRecord, ...],
+    ) -> SolutionNMRMonomerXrayRmsdRecord | None:
+        """Compute and project the ordinary X-ray RMSD record for one seed."""
+        candidate_records = self._compute_candidate_records(
+            homolog=homolog,
+            nmr_chain_id=nmr_chain_id,
+            candidates=candidates,
+        )
+        return _select_ordinary_xray_rmsd_record(
+            homolog=homolog,
+            candidate_records=candidate_records,
+        )
+
+    def _compute_extremes_record(
+        self,
+        homolog: SolutionNMRMonomerXrayHomologRecord,
+        nmr_chain_id: str,
+        candidates: tuple[XrayPolymerEntityCandidateRecord, ...],
+    ) -> SolutionNMRMonomerXrayRmsdExtremesRecord | None:
+        """Compute and project X-ray RMSD extremes for one NMR seed."""
+        candidate_records = self._compute_candidate_records(
+            homolog=homolog,
+            nmr_chain_id=nmr_chain_id,
+            candidates=candidates,
+        )
+        return _build_xray_rmsd_extremes_record_from_candidates(
+            homolog=homolog,
+            candidate_records=candidate_records,
+        )
 
     def _prepare_work_items(
         self,
-        max_entries: int | None,
         skip_entry_ids: set[str],
         progress_prefix: str,
     ) -> list[
@@ -5870,8 +6698,6 @@ class SolutionNMRMonomerXrayRmsdBuilder:
         filtered_homologs = sorted(
             filtered_homologs, key=lambda r: (r.year, r.entry_id)
         )
-        if max_entries is not None:
-            filtered_homologs = filtered_homologs[: max(0, max_entries)]
 
         entry_ids = sorted({record.entry_id for record in filtered_homologs})
         chain_by_entry_id: dict[str, str] = {}
@@ -5952,14 +6778,12 @@ class SolutionNMRMonomerXrayRmsdBuilder:
 
     def build(
         self,
-        max_entries: int | None = None,
         skip_entry_ids: set[str] | None = None,
         on_record: Callable[[SolutionNMRMonomerXrayRmsdRecord], None] | None = None,
     ) -> list[SolutionNMRMonomerXrayRmsdRecord]:
         """Collect best-match NMR-to-X-ray RMSD records."""
         skip_entry_ids = skip_entry_ids or set()
         work_items = self._prepare_work_items(
-            max_entries=max_entries,
             skip_entry_ids=skip_entry_ids,
             progress_prefix="SOLUTION NMR X-ray RMSD",
         )
@@ -5998,7 +6822,6 @@ class SolutionNMRMonomerXrayRmsdBuilder:
 
     def build_extremes(
         self,
-        max_entries: int | None = None,
         skip_entry_ids: set[str] | None = None,
         on_record: (
             Callable[[SolutionNMRMonomerXrayRmsdExtremesRecord], None] | None
@@ -6007,7 +6830,6 @@ class SolutionNMRMonomerXrayRmsdBuilder:
         """Collect minimum and maximum NMR-to-X-ray RMSD records."""
         skip_entry_ids = skip_entry_ids or set()
         work_items = self._prepare_work_items(
-            max_entries=max_entries,
             skip_entry_ids=skip_entry_ids,
             progress_prefix="SOLUTION NMR X-ray RMSD extremes",
         )
@@ -6043,6 +6865,62 @@ class SolutionNMRMonomerXrayRmsdBuilder:
                     )
 
         return sorted(records, key=lambda r: (r.year, r.entry_id))
+
+    def build_candidate_sets(
+        self,
+        skip_entry_ids: set[str] | None = None,
+        on_candidate_set: (
+            Callable[
+                [
+                    SolutionNMRMonomerXrayHomologRecord,
+                    tuple[SolutionNMRMonomerXrayRmsdRecord, ...],
+                ],
+                None,
+            ]
+            | None
+        ) = None,
+    ) -> list[
+        tuple[
+            SolutionNMRMonomerXrayHomologRecord,
+            tuple[SolutionNMRMonomerXrayRmsdRecord, ...],
+        ]
+    ]:
+        """Compute shared candidate pairs once for all requested RMSD views."""
+        work_items = self._prepare_work_items(
+            skip_entry_ids=skip_entry_ids or set(),
+            progress_prefix="SOLUTION NMR unified X-ray RMSD",
+        )
+        results: list[
+            tuple[
+                SolutionNMRMonomerXrayHomologRecord,
+                tuple[SolutionNMRMonomerXrayRmsdRecord, ...],
+            ]
+        ] = []
+        with ThreadPoolExecutor(max_workers=self.rmsd_workers) as executor:
+            future_map = {
+                executor.submit(
+                    self._compute_candidate_records,
+                    homolog=homolog,
+                    nmr_chain_id=nmr_chain_id,
+                    candidates=candidates,
+                ): homolog
+                for homolog, nmr_chain_id, candidates in work_items
+            }
+            total = len(future_map)
+            for completed, future in enumerate(as_completed(future_map), start=1):
+                homolog = future_map[future]
+                candidate_records = future.result()
+                results.append((homolog, candidate_records))
+                if on_candidate_set is not None:
+                    on_candidate_set(homolog, candidate_records)
+                if total > 0 and (completed % 50 == 0 or completed == total):
+                    LOGGER.info(
+                        "SOLUTION NMR unified X-ray RMSD %d%%: processed %d/%d entries",
+                        self.sequence_identity_percent,
+                        completed,
+                        total,
+                    )
+        return sorted(results, key=lambda item: (item[0].year, item[0].entry_id))
 
 
 def write_method_counts_csv(
@@ -6744,10 +7622,7 @@ def filter_xray_homolog_records_by_deposit_date(
                 year=record.year,
             )
             continue
-        if (
-            record.nmr_core_start_seq_id is None
-            or record.nmr_core_end_seq_id is None
-        ):
+        if record.nmr_core_start_seq_id is None or record.nmr_core_end_seq_id is None:
             _record_filtered_structure(
                 record.entry_id, "NMR core range is missing", year=record.year
             )
@@ -7181,8 +8056,7 @@ def build_solution_nmr_monomer_xray_rmsd_to_csv(
     cache_dir: Path,
     rmsd_workers: int,
     sequence_identity_percent: int,
-    max_entries: int | None,
-    overwrite: bool,
+    resume: bool,
     log_label: str,
 ) -> None:
     """Collect best-match NMR-to-X-ray RMSD records and stream them to CSV."""
@@ -7203,7 +8077,7 @@ def build_solution_nmr_monomer_xray_rmsd_to_csv(
         len(homolog_records),
         homolog_input_path,
     )
-    if not overwrite and output_path.exists():
+    if resume and output_path.exists():
         existing_records = read_solution_nmr_monomer_xray_rmsd_csv(output_path)
         existing_records = [
             record
@@ -7254,7 +8128,6 @@ def build_solution_nmr_monomer_xray_rmsd_to_csv(
             csvfile.flush()
 
         new_records = rmsd_builder.build(
-            max_entries=max_entries,
             skip_entry_ids=skip_entry_ids,
             on_record=_on_xray_rmsd_record,
         )
@@ -7276,8 +8149,7 @@ def build_solution_nmr_monomer_xray_rmsd_extremes_to_csv(
     cache_dir: Path,
     rmsd_workers: int,
     sequence_identity_percent: int,
-    max_entries: int | None,
-    overwrite: bool,
+    resume: bool,
     log_label: str,
 ) -> None:
     """Collect NMR-to-X-ray RMSD extremes and stream them to CSV."""
@@ -7298,7 +8170,7 @@ def build_solution_nmr_monomer_xray_rmsd_extremes_to_csv(
         len(homolog_records),
         homolog_input_path,
     )
-    if not overwrite and output_path.exists():
+    if resume and output_path.exists():
         existing_records = read_solution_nmr_monomer_xray_rmsd_extremes_csv(output_path)
         existing_records = [
             record
@@ -7348,7 +8220,6 @@ def build_solution_nmr_monomer_xray_rmsd_extremes_to_csv(
             csvfile.flush()
 
         new_records = rmsd_builder.build_extremes(
-            max_entries=max_entries,
             skip_entry_ids=skip_entry_ids,
             on_record=_on_xray_rmsd_extremes_record,
         )
@@ -7360,6 +8231,296 @@ def build_solution_nmr_monomer_xray_rmsd_extremes_to_csv(
         len(new_records),
         sequence_identity_percent,
     )
+
+
+def build_solution_nmr_monomer_xray_rmsd_outputs_to_csv(
+    *,
+    client: RCSBClient,
+    config: DatasetBuildConfig,
+    current_homolog_input_path: Path | None,
+    historical_homolog_input_path: Path | None,
+    ordinary_output_path: Path | None,
+    historical_ordinary_output_path: Path | None,
+    extremes_output_path: Path | None,
+    historical_extremes_output_path: Path | None,
+    cache_dir: Path,
+    rmsd_workers: int,
+    sequence_identity_percent: int,
+    resume: bool = False,
+) -> None:
+    """Build selected ordinary/extremes/current/historical CSVs in one pass."""
+    output_specs: dict[str, tuple[Path, str, bool]] = {}
+    if ordinary_output_path is not None:
+        output_specs["ordinary_current"] = (
+            Path(ordinary_output_path),
+            "current",
+            False,
+        )
+    if historical_ordinary_output_path is not None:
+        output_specs["ordinary_historical"] = (
+            Path(historical_ordinary_output_path),
+            "historical",
+            False,
+        )
+    if extremes_output_path is not None:
+        output_specs["extremes_current"] = (
+            Path(extremes_output_path),
+            "current",
+            True,
+        )
+    if historical_extremes_output_path is not None:
+        output_specs["extremes_historical"] = (
+            Path(historical_extremes_output_path),
+            "historical",
+            True,
+        )
+    if not output_specs:
+        return
+
+    output_paths_by_view = {
+        view: tuple(
+            path for path, spec_view, _ in output_specs.values() if spec_view == view
+        )
+        for view in ("current", "historical")
+    }
+    homolog_maps: dict[str, dict[str, SolutionNMRMonomerXrayHomologRecord]] = {}
+    for view, input_path in (
+        ("current", current_homolog_input_path),
+        ("historical", historical_homolog_input_path),
+    ):
+        if not output_paths_by_view[view]:
+            continue
+        if input_path is None:
+            raise SystemExit(f"Missing {view} X-ray homolog CSV for RMSD outputs")
+        _set_active_dataset_filtered_csvs(output_paths_by_view[view])
+        _import_filtered_structures(input_path)
+        records = [
+            record
+            for record in read_solution_nmr_monomer_xray_homolog_csv(input_path)
+            if record.sequence_identity_percent == sequence_identity_percent
+        ]
+        if not records:
+            raise SystemExit(
+                f"No {view} X-ray homolog records at {sequence_identity_percent}% "
+                f"identity in {input_path}. Regenerate the homolog CSV first."
+            )
+        homolog_maps[view] = {record.entry_id: record for record in records}
+        LOGGER.info(
+            "SOLUTION NMR unified X-ray RMSD %s %d%%: loaded %d homolog records from %s",
+            view,
+            sequence_identity_percent,
+            len(records),
+            input_path,
+        )
+
+    if "current" in homolog_maps and "historical" in homolog_maps:
+        current_by_entry_id = homolog_maps["current"]
+        historical_by_entry_id = homolog_maps["historical"]
+        unexpected_historical_ids = set(historical_by_entry_id) - set(
+            current_by_entry_id
+        )
+        if unexpected_historical_ids:
+            first_entry_id = min(unexpected_historical_ids)
+            raise SystemExit(
+                "Historical homolog CSV is inconsistent with the current CSV: "
+                f"{first_entry_id} is absent from current records. Regenerate both "
+                "homolog CSVs together."
+            )
+        for entry_id, historical in historical_by_entry_id.items():
+            current = current_by_entry_id[entry_id]
+            current_metadata = (
+                current.year,
+                current.sequence_identity_percent,
+                current.nmr_core_start_seq_id,
+                current.nmr_core_end_seq_id,
+                current.nmr_query_sequence_length,
+            )
+            historical_metadata = (
+                historical.year,
+                historical.sequence_identity_percent,
+                historical.nmr_core_start_seq_id,
+                historical.nmr_core_end_seq_id,
+                historical.nmr_query_sequence_length,
+            )
+            if current_metadata != historical_metadata or not set(
+                historical.xray_homolog_entity_ids
+            ).issubset(current.xray_homolog_entity_ids):
+                raise SystemExit(
+                    "Historical homolog CSV is stale or inconsistent for "
+                    f"{entry_id}. Regenerate current and historical homolog CSVs "
+                    "together before RMSD calculation."
+                )
+
+    existing_records_by_output: dict[str, list[Any]] = {}
+    target_entry_ids_by_output: dict[str, set[str]] = {}
+    for output_name, (output_path, view, is_extremes) in output_specs.items():
+        existing: list[Any] = []
+        if resume and output_path.exists():
+            loaded: list[Any]
+            if is_extremes:
+                loaded = read_solution_nmr_monomer_xray_rmsd_extremes_csv(output_path)
+                existing = [
+                    record
+                    for record in loaded
+                    if record.sequence_identity_percent == sequence_identity_percent
+                    and record.best_xray_homolog_entity_id
+                    and record.worst_xray_homolog_entity_id
+                ]
+            else:
+                loaded = read_solution_nmr_monomer_xray_rmsd_csv(output_path)
+                existing = [
+                    record
+                    for record in loaded
+                    if record.sequence_identity_percent == sequence_identity_percent
+                    and record.nmr_core_start_seq_id is not None
+                    and record.nmr_core_end_seq_id is not None
+                    and record.xray_core_start_seq_id is not None
+                    and record.xray_core_end_seq_id is not None
+                    and record.xray_homolog_entity_id
+                ]
+        existing_by_entry_id = {record.entry_id: record for record in existing}
+        existing = sorted(
+            existing_by_entry_id.values(),
+            key=lambda record: (record.year, record.entry_id),
+        )
+        existing_records_by_output[output_name] = existing
+        existing_entry_ids = set(existing_by_entry_id)
+        eligible_missing = sorted(
+            (
+                record
+                for record in homolog_maps[view].values()
+                if record.entry_id not in existing_entry_ids
+                and record.nmr_core_start_seq_id is not None
+                and record.nmr_core_end_seq_id is not None
+                and record.xray_homolog_entity_ids
+            ),
+            key=lambda record: (record.year, record.entry_id),
+        )
+        target_entry_ids_by_output[output_name] = {
+            record.entry_id for record in eligible_missing
+        }
+        LOGGER.info(
+            "SOLUTION NMR unified X-ray RMSD %s: mode=%s, retained rows=%d, entries to process=%d",
+            output_name,
+            "resume" if resume else "rebuild",
+            len(existing),
+            len(eligible_missing),
+        )
+
+    work_entry_ids = set().union(*target_entry_ids_by_output.values())
+    merged_homolog_records: list[SolutionNMRMonomerXrayHomologRecord] = []
+    for entry_id in sorted(work_entry_ids):
+        needed_views = {
+            output_specs[output_name][1]
+            for output_name, target_ids in target_entry_ids_by_output.items()
+            if entry_id in target_ids
+        }
+        base_view = "current" if "current" in needed_views else "historical"
+        base_record = homolog_maps[base_view][entry_id]
+        entity_ids = tuple(
+            dict.fromkeys(
+                entity_id
+                for view in ("current", "historical")
+                if view in needed_views
+                for entity_id in homolog_maps[view][entry_id].xray_homolog_entity_ids
+            )
+        )
+        merged_homolog_records.append(
+            replace(
+                base_record,
+                xray_homolog_entry_ids=(
+                    SolutionNMRMonomerXrayHomologBuilder._entry_ids_from_polymer_entity_ids(
+                        entity_ids
+                    )
+                ),
+                xray_homolog_entity_ids=entity_ids,
+                has_xray_homolog=bool(entity_ids),
+            )
+        )
+
+    _set_active_dataset_filtered_csvs(
+        tuple(path for path, _, _ in output_specs.values())
+    )
+    new_record_counts = {output_name: 0 for output_name in output_specs}
+    with ExitStack() as stack:
+        csvfiles: dict[str, Any] = {}
+        writers: dict[str, Any] = {}
+        for output_name, (output_path, _, is_extremes) in output_specs.items():
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            csvfile = stack.enter_context(
+                output_path.open("w", newline="", encoding="utf-8")
+            )
+            writer = csv.writer(csvfile)
+            writer.writerow(
+                SOLUTION_NMR_MONOMER_XRAY_RMSD_EXTREMES_HEADER
+                if is_extremes
+                else SOLUTION_NMR_MONOMER_XRAY_RMSD_HEADER
+            )
+            for record in existing_records_by_output[output_name]:
+                writer.writerow(
+                    _solution_nmr_monomer_xray_rmsd_extremes_csv_row(record)
+                    if is_extremes
+                    else _solution_nmr_monomer_xray_rmsd_csv_row(record)
+                )
+            csvfile.flush()
+            csvfiles[output_name] = csvfile
+            writers[output_name] = writer
+
+        def _on_candidate_set(
+            computed_homolog: SolutionNMRMonomerXrayHomologRecord,
+            candidate_records: tuple[SolutionNMRMonomerXrayRmsdRecord, ...],
+        ) -> None:
+            """Project one shared pair set and checkpoint every missing output."""
+            entry_id = computed_homolog.entry_id
+            for output_name, (_, view, is_extremes) in output_specs.items():
+                if entry_id not in target_entry_ids_by_output[output_name]:
+                    continue
+                view_homolog = homolog_maps[view][entry_id]
+                if is_extremes:
+                    record = _build_xray_rmsd_extremes_record_from_candidates(
+                        homolog=view_homolog,
+                        candidate_records=candidate_records,
+                    )
+                else:
+                    record = _select_ordinary_xray_rmsd_record(
+                        homolog=view_homolog,
+                        candidate_records=candidate_records,
+                    )
+                if record is None:
+                    _record_filtered_structure(
+                        entry_id,
+                        f"no successful X-ray RMSD candidate in the {view} homolog view",
+                        year=view_homolog.year,
+                    )
+                    continue
+                writers[output_name].writerow(
+                    _solution_nmr_monomer_xray_rmsd_extremes_csv_row(record)
+                    if is_extremes
+                    else _solution_nmr_monomer_xray_rmsd_csv_row(record)
+                )
+                csvfiles[output_name].flush()
+                new_record_counts[output_name] += 1
+
+        if merged_homolog_records:
+            rmsd_builder = SolutionNMRMonomerXrayRmsdBuilder(
+                client=client,
+                config=config,
+                cache_dir=cache_dir,
+                rmsd_workers=rmsd_workers,
+                homolog_records=merged_homolog_records,
+                sequence_identity_percent=sequence_identity_percent,
+            )
+            rmsd_builder.build_candidate_sets(on_candidate_set=_on_candidate_set)
+
+    for output_name, (output_path, _, _) in output_specs.items():
+        LOGGER.info(
+            "Saved %d records to %s (new: %d, unified identity=%d%%)",
+            len(existing_records_by_output[output_name])
+            + new_record_counts[output_name],
+            output_path,
+            new_record_counts[output_name],
+            sequence_identity_percent,
+        )
 
 
 def parse_dataset_kinds(raw_value: str) -> list[DatasetKind]:
@@ -7417,6 +8578,14 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--resume",
+        action="store_true",
+        help=(
+            "Resume homolog, precision, and X-ray RMSD calculations from "
+            "existing results instead of rebuilding them from scratch."
+        ),
+    )
+    parser.add_argument(
         "--counts-output",
         type=Path,
         default=Path("data/pdb_method_counts_by_year.csv"),
@@ -7433,8 +8602,7 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("data/membrane_protein_method_counts_by_year.csv"),
         help=(
-            "Output CSV path for membrane protein counts split by experimental "
-            "method."
+            "Output CSV path for membrane protein counts split by experimental method."
         ),
     )
     parser.add_argument(
@@ -7462,14 +8630,6 @@ def parse_args() -> argparse.Namespace:
         help="Directory to cache downloaded PDB files for solution_nmr_program_counts dataset.",
     )
     parser.add_argument(
-        "--solution-nmr-program-cache-only",
-        action="store_true",
-        help=(
-            "Use only already cached PDB files for solution_nmr_program_counts "
-            "(skip downloading missing files)."
-        ),
-    )
-    parser.add_argument(
         "--pdb-cache-validation-hours",
         type=float,
         default=DEFAULT_PDB_CACHE_VALIDATION_HOURS,
@@ -7489,8 +8649,6 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--solution-nmr-monomer-cache-dir",
-        "--solution-nmr-monomer-stride-cache-dir",
-        dest="solution_nmr_monomer_cache_dir",
         type=Path,
         default=Path("data/pdb_cache"),
         help=(
@@ -7617,14 +8775,6 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--xray-homolog-resume",
-        action="store_true",
-        help=(
-            "Resume X-ray homolog collection from matching 95%%/100%% CSV rows "
-            "and the completion checkpoint; retry only unfinished or failed entries."
-        ),
-    )
-    parser.add_argument(
         "--solution-nmr-monomer-xray-rmsd-output",
         type=Path,
         default=Path("data/solution_nmr_monomer_xray_rmsd.csv"),
@@ -7643,9 +8793,7 @@ def parse_args() -> argparse.Namespace:
         "--solution-nmr-monomer-xray-rmsd-extremes-output",
         type=Path,
         default=Path("data/solution_nmr_monomer_xray_rmsd_extremes.csv"),
-        help=(
-            "Output CSV path for solution_nmr_monomer_xray_rmsd_extremes " "dataset."
-        ),
+        help=("Output CSV path for solution_nmr_monomer_xray_rmsd_extremes dataset."),
     )
     parser.add_argument(
         "--solution-nmr-monomer-xray-rmsd-extremes-historical-output",
@@ -7663,21 +8811,10 @@ def parse_args() -> argparse.Namespace:
         help="Directory to cache downloaded PDB files for precision calculation.",
     )
     parser.add_argument(
-        "--precision-max-entries",
-        type=int,
-        default=None,
-        help="Optional limit of entries to process for precision dataset.",
-    )
-    parser.add_argument(
         "--precision-workers",
         type=int,
         default=DEFAULT_MAX_WORKERS,
         help="Parallel workers for RMSD precision computation.",
-    )
-    parser.add_argument(
-        "--precision-overwrite",
-        action="store_true",
-        help="Recompute precision CSV from scratch (ignore existing rows).",
     )
     parser.add_argument(
         "--xray-rmsd-cache-dir",
@@ -7686,21 +8823,10 @@ def parse_args() -> argparse.Namespace:
         help="Directory to cache downloaded PDB files for X-ray RMSD calculation.",
     )
     parser.add_argument(
-        "--xray-rmsd-max-entries",
-        type=int,
-        default=None,
-        help="Optional limit of entries to process for X-ray RMSD dataset.",
-    )
-    parser.add_argument(
         "--xray-rmsd-workers",
         type=int,
         default=DEFAULT_MAX_WORKERS,
         help="Parallel workers for X-ray RMSD computation.",
-    )
-    parser.add_argument(
-        "--xray-rmsd-overwrite",
-        action="store_true",
-        help="Recompute X-ray RMSD CSV from scratch (ignore existing rows).",
     )
     parser.add_argument(
         "--xray-rmsd-sequence-identity",
@@ -7754,9 +8880,7 @@ def _selected_dataset_output_paths(
             Path(args.solution_nmr_monomer_stride_modeled_first_model_output),
         ),
         DatasetKind.SOLUTION_NMR_MONOMER_PRECISION_STRIDE_MODELED_FIRST_MODEL: (
-            Path(
-                args.solution_nmr_monomer_precision_stride_modeled_first_model_output
-            ),
+            Path(args.solution_nmr_monomer_precision_stride_modeled_first_model_output),
         ),
         DatasetKind.SOLUTION_NMR_MONOMER_QUALITY: (
             Path(args.solution_nmr_monomer_quality_output),
@@ -7796,15 +8920,21 @@ def main() -> None:
         format="%(asctime)s | %(levelname)s | %(message)s",
     )
     output_paths_by_dataset = _selected_dataset_output_paths(args)
+    rmsd_dataset_kinds = {
+        DatasetKind.SOLUTION_NMR_MONOMER_XRAY_RMSD,
+        DatasetKind.SOLUTION_NMR_MONOMER_XRAY_RMSD_HISTORICAL,
+        DatasetKind.SOLUTION_NMR_MONOMER_XRAY_RMSD_EXTREMES,
+        DatasetKind.SOLUTION_NMR_MONOMER_XRAY_RMSD_EXTREMES_HISTORICAL,
+    }
     _configure_dataset_warning_logs(output_paths_by_dataset)
-    preserved_filter_outputs: tuple[Path, ...] = ()
+    preserved_filter_outputs: list[Path] = []
     if (
-        args.xray_homolog_resume
+        args.resume
         and DatasetKind.SOLUTION_NMR_MONOMER_XRAY_HOMOLOGS in args.datasets
     ):
-        preserved_filter_outputs = output_paths_by_dataset[
-            DatasetKind.SOLUTION_NMR_MONOMER_XRAY_HOMOLOGS
-        ]
+        preserved_filter_outputs.extend(
+            output_paths_by_dataset[DatasetKind.SOLUTION_NMR_MONOMER_XRAY_HOMOLOGS]
+        )
     _configure_dataset_filtered_csvs(
         output_paths_by_dataset,
         preserve_existing_output_paths=preserved_filter_outputs,
@@ -7845,9 +8975,7 @@ def main() -> None:
         write_membrane_counts_csv(
             records=membrane_records, output_path=args.membrane_counts_output
         )
-        _set_active_dataset_filtered_csvs(
-            (Path(args.membrane_method_counts_output),)
-        )
+        _set_active_dataset_filtered_csvs((Path(args.membrane_method_counts_output),))
         membrane_method_records = membrane_builder.build_by_method(
             [
                 ExperimentalMethod.X_RAY,
@@ -7878,7 +9006,6 @@ def main() -> None:
             client=client,
             config=config,
             cache_dir=Path(args.solution_nmr_program_cache_dir),
-            download_missing=not args.solution_nmr_program_cache_only,
         )
         nmr_program_records = nmr_program_builder.build()
         write_solution_nmr_program_counts_csv(
@@ -7996,7 +9123,7 @@ def main() -> None:
         precision_stride_output_path = Path(
             args.solution_nmr_monomer_precision_stride_modeled_first_model_output
         )
-        if not args.precision_overwrite and precision_stride_output_path.exists():
+        if args.resume and precision_stride_output_path.exists():
             existing_records = read_solution_nmr_monomer_precision_csv(
                 precision_stride_output_path
             )
@@ -8035,7 +9162,6 @@ def main() -> None:
                 csvfile.flush()
 
             new_records = precision_stride_builder.build(
-                max_entries=args.precision_max_entries,
                 skip_entry_ids=skip_entry_ids,
                 on_record=_on_precision_stride_record,
             )
@@ -8065,9 +9191,7 @@ def main() -> None:
 
     if DatasetKind.SOLUTION_NMR_MONOMER_PROGRAM_CLUSTERS in args.datasets:
         _set_active_dataset_warning_logs(
-            output_paths_by_dataset[
-                DatasetKind.SOLUTION_NMR_MONOMER_PROGRAM_CLUSTERS
-            ]
+            output_paths_by_dataset[DatasetKind.SOLUTION_NMR_MONOMER_PROGRAM_CLUSTERS]
         )
         quality_input_path = Path(args.solution_nmr_monomer_program_cluster_input)
         _import_filtered_structures(quality_input_path)
@@ -8169,11 +9293,9 @@ def main() -> None:
         existing_records_95: list[SolutionNMRMonomerXrayHomologRecord] = []
         existing_records_100: list[SolutionNMRMonomerXrayHomologRecord] = []
         skip_homolog_entry_ids: set[str] = set()
-        checkpoint_path = _xray_homolog_resume_checkpoint_path(
-            homolog_95_output_path
-        )
+        checkpoint_path = _xray_homolog_resume_checkpoint_path(homolog_95_output_path)
         checkpoint_mode = "w"
-        if args.xray_homolog_resume:
+        if args.resume:
             records_95_by_entry_id = {
                 record.entry_id: record
                 for record in read_solution_nmr_monomer_xray_homolog_csv(
@@ -8205,17 +9327,13 @@ def main() -> None:
                 (records_100_by_entry_id[entry_id] for entry_id in paired_entry_ids),
                 key=lambda record: (record.year, record.entry_id),
             )
-            checkpoint_statuses = _read_xray_homolog_resume_checkpoint(
-                checkpoint_path
-            )
+            checkpoint_statuses = _read_xray_homolog_resume_checkpoint(checkpoint_path)
             completed_ineligible_entry_ids = {
                 entry_id
                 for entry_id, status in checkpoint_statuses.items()
                 if status == "ineligible"
             }
-            skip_homolog_entry_ids = (
-                paired_entry_ids | completed_ineligible_entry_ids
-            )
+            skip_homolog_entry_ids = paired_entry_ids | completed_ineligible_entry_ids
             checkpoint_mode = "a"
             LOGGER.info(
                 "SOLUTION NMR monomer X-ray homolog resume: keeping %d completed record pairs and %d ineligible entries; retrying all other seeds",
@@ -8235,9 +9353,7 @@ def main() -> None:
             for record in existing_records_95:
                 writer_95.writerow(_solution_nmr_monomer_xray_homolog_csv_row(record))
             for record in existing_records_100:
-                writer_100.writerow(
-                    _solution_nmr_monomer_xray_homolog_csv_row(record)
-                )
+                writer_100.writerow(_solution_nmr_monomer_xray_homolog_csv_row(record))
             file_95.flush()
             file_100.flush()
 
@@ -8333,100 +9449,78 @@ def main() -> None:
             homolog_100_historical_output_path,
         )
 
-    if DatasetKind.SOLUTION_NMR_MONOMER_XRAY_RMSD in args.datasets:
-        _set_active_dataset_warning_logs(
-            output_paths_by_dataset[DatasetKind.SOLUTION_NMR_MONOMER_XRAY_RMSD]
+    selected_rmsd_kinds = rmsd_dataset_kinds.intersection(args.datasets)
+    if selected_rmsd_kinds:
+        current_selected = bool(
+            selected_rmsd_kinds
+            & {
+                DatasetKind.SOLUTION_NMR_MONOMER_XRAY_RMSD,
+                DatasetKind.SOLUTION_NMR_MONOMER_XRAY_RMSD_EXTREMES,
+            }
         )
-        homolog_input_path = (
-            Path(args.solution_nmr_monomer_xray_homolog_95_output)
-            if args.xray_rmsd_sequence_identity == 95
-            else Path(args.solution_nmr_monomer_xray_homolog_100_output)
+        historical_selected = bool(
+            selected_rmsd_kinds
+            & {
+                DatasetKind.SOLUTION_NMR_MONOMER_XRAY_RMSD_HISTORICAL,
+                DatasetKind.SOLUTION_NMR_MONOMER_XRAY_RMSD_EXTREMES_HISTORICAL,
+            }
         )
-        build_solution_nmr_monomer_xray_rmsd_to_csv(
+        selected_rmsd_output_paths = tuple(
+            path
+            for dataset_kind in selected_rmsd_kinds
+            for path in output_paths_by_dataset[dataset_kind]
+        )
+        _set_active_dataset_warning_logs(selected_rmsd_output_paths)
+        current_homolog_input_path = (
+            (
+                Path(args.solution_nmr_monomer_xray_homolog_95_output)
+                if args.xray_rmsd_sequence_identity == 95
+                else Path(args.solution_nmr_monomer_xray_homolog_100_output)
+            )
+            if current_selected
+            else None
+        )
+        historical_homolog_input_path = (
+            (
+                Path(args.solution_nmr_monomer_xray_homolog_95_historical_output)
+                if args.xray_rmsd_sequence_identity == 95
+                else Path(args.solution_nmr_monomer_xray_homolog_100_historical_output)
+            )
+            if historical_selected
+            else None
+        )
+        build_solution_nmr_monomer_xray_rmsd_outputs_to_csv(
             client=client,
             config=config,
-            homolog_input_path=homolog_input_path,
-            output_path=Path(args.solution_nmr_monomer_xray_rmsd_output),
-            cache_dir=Path(args.xray_rmsd_cache_dir),
-            rmsd_workers=args.xray_rmsd_workers,
-            sequence_identity_percent=args.xray_rmsd_sequence_identity,
-            max_entries=args.xray_rmsd_max_entries,
-            overwrite=args.xray_rmsd_overwrite,
-            log_label="SOLUTION NMR X-ray RMSD",
-        )
-
-    if DatasetKind.SOLUTION_NMR_MONOMER_XRAY_RMSD_HISTORICAL in args.datasets:
-        _set_active_dataset_warning_logs(
-            output_paths_by_dataset[
-                DatasetKind.SOLUTION_NMR_MONOMER_XRAY_RMSD_HISTORICAL
-            ]
-        )
-        homolog_input_path = (
-            Path(args.solution_nmr_monomer_xray_homolog_95_historical_output)
-            if args.xray_rmsd_sequence_identity == 95
-            else Path(args.solution_nmr_monomer_xray_homolog_100_historical_output)
-        )
-        build_solution_nmr_monomer_xray_rmsd_to_csv(
-            client=client,
-            config=config,
-            homolog_input_path=homolog_input_path,
-            output_path=Path(args.solution_nmr_monomer_xray_rmsd_historical_output),
-            cache_dir=Path(args.xray_rmsd_cache_dir),
-            rmsd_workers=args.xray_rmsd_workers,
-            sequence_identity_percent=args.xray_rmsd_sequence_identity,
-            max_entries=args.xray_rmsd_max_entries,
-            overwrite=args.xray_rmsd_overwrite,
-            log_label="SOLUTION NMR historical X-ray RMSD",
-        )
-
-    if DatasetKind.SOLUTION_NMR_MONOMER_XRAY_RMSD_EXTREMES in args.datasets:
-        _set_active_dataset_warning_logs(
-            output_paths_by_dataset[
-                DatasetKind.SOLUTION_NMR_MONOMER_XRAY_RMSD_EXTREMES
-            ]
-        )
-        homolog_input_path = (
-            Path(args.solution_nmr_monomer_xray_homolog_95_output)
-            if args.xray_rmsd_sequence_identity == 95
-            else Path(args.solution_nmr_monomer_xray_homolog_100_output)
-        )
-        build_solution_nmr_monomer_xray_rmsd_extremes_to_csv(
-            client=client,
-            config=config,
-            homolog_input_path=homolog_input_path,
-            output_path=Path(args.solution_nmr_monomer_xray_rmsd_extremes_output),
-            cache_dir=Path(args.xray_rmsd_cache_dir),
-            rmsd_workers=args.xray_rmsd_workers,
-            sequence_identity_percent=args.xray_rmsd_sequence_identity,
-            max_entries=args.xray_rmsd_max_entries,
-            overwrite=args.xray_rmsd_overwrite,
-            log_label="SOLUTION NMR X-ray RMSD extremes",
-        )
-
-    if DatasetKind.SOLUTION_NMR_MONOMER_XRAY_RMSD_EXTREMES_HISTORICAL in args.datasets:
-        _set_active_dataset_warning_logs(
-            output_paths_by_dataset[
-                DatasetKind.SOLUTION_NMR_MONOMER_XRAY_RMSD_EXTREMES_HISTORICAL
-            ]
-        )
-        homolog_input_path = (
-            Path(args.solution_nmr_monomer_xray_homolog_95_historical_output)
-            if args.xray_rmsd_sequence_identity == 95
-            else Path(args.solution_nmr_monomer_xray_homolog_100_historical_output)
-        )
-        build_solution_nmr_monomer_xray_rmsd_extremes_to_csv(
-            client=client,
-            config=config,
-            homolog_input_path=homolog_input_path,
-            output_path=Path(
-                args.solution_nmr_monomer_xray_rmsd_extremes_historical_output
+            current_homolog_input_path=current_homolog_input_path,
+            historical_homolog_input_path=historical_homolog_input_path,
+            ordinary_output_path=(
+                Path(args.solution_nmr_monomer_xray_rmsd_output)
+                if DatasetKind.SOLUTION_NMR_MONOMER_XRAY_RMSD in selected_rmsd_kinds
+                else None
+            ),
+            historical_ordinary_output_path=(
+                Path(args.solution_nmr_monomer_xray_rmsd_historical_output)
+                if DatasetKind.SOLUTION_NMR_MONOMER_XRAY_RMSD_HISTORICAL
+                in selected_rmsd_kinds
+                else None
+            ),
+            extremes_output_path=(
+                Path(args.solution_nmr_monomer_xray_rmsd_extremes_output)
+                if DatasetKind.SOLUTION_NMR_MONOMER_XRAY_RMSD_EXTREMES
+                in selected_rmsd_kinds
+                else None
+            ),
+            historical_extremes_output_path=(
+                Path(args.solution_nmr_monomer_xray_rmsd_extremes_historical_output)
+                if DatasetKind.SOLUTION_NMR_MONOMER_XRAY_RMSD_EXTREMES_HISTORICAL
+                in selected_rmsd_kinds
+                else None
             ),
             cache_dir=Path(args.xray_rmsd_cache_dir),
             rmsd_workers=args.xray_rmsd_workers,
             sequence_identity_percent=args.xray_rmsd_sequence_identity,
-            max_entries=args.xray_rmsd_max_entries,
-            overwrite=args.xray_rmsd_overwrite,
-            log_label="SOLUTION NMR historical X-ray RMSD extremes",
+            resume=args.resume,
         )
 
 
