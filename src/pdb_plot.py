@@ -364,7 +364,7 @@ def parse_positive_float(raw_value: str) -> float:
         raise argparse.ArgumentTypeError(
             f"Expected a positive number, got '{raw_value}'."
         ) from exc
-    if value <= 0.0:
+    if not np.isfinite(value) or value <= 0.0:
         raise argparse.ArgumentTypeError(
             f"Expected a positive number, got {value}."
         )
@@ -481,7 +481,7 @@ class PDBScientificPlotter:
             return False
         try:
             for label in nonempty:
-                float(label)
+                float(label.replace("\N{MINUS SIGN}", "-"))
         except ValueError:
             return True
         return False
@@ -1093,12 +1093,13 @@ class PDBScientificPlotter:
     @staticmethod
     def _prepare_method_count_table(df: pd.DataFrame) -> pd.DataFrame:
         """Validate and pivot raw experimental-method counts by year."""
-        PDBScientificPlotter._validate_required_columns(
+        prepared = PDBScientificPlotter._prepare_typed_table(
             df=df,
             required_columns={"year", "method", "count"},
+            column_types={"year": int, "method": str, "count": int},
             dataset_name="Method count CSV",
         )
-        limited = PDBScientificPlotter._limit_year_column(df)
+        limited = PDBScientificPlotter._limit_year_column(prepared)
         return (
             limited.pivot(index="year", columns="method", values="count")
             .fillna(0)

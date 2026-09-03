@@ -239,16 +239,41 @@ The following datasets require a STRIDE executable:
 - `solution_nmr_monomer_precision_stride_modeled_first_model`
 - `solution_nmr_monomer_xray_homologs`
 
-If `stride` is available in `PATH`, the builder finds it automatically. It also
-checks `/tmp/stride_src/src/stride`. The upstream source and build instructions
-are available in the [STRIDE repository][stride-repository]. To pass an explicit
-executable path:
+The builder resolves STRIDE in this order:
+
+1. the path passed with `--solution-nmr-monomer-stride-executable`;
+2. an executable named `stride` in `PATH`;
+3. the versioned, platform-specific managed build under `data/stride/`;
+4. the legacy local build at `/tmp/stride_src/src/stride`;
+5. a new automatic managed installation.
+
+The automatic path is used only when no explicit value was supplied. A bad
+explicit path fails instead of silently selecting or downloading another
+binary. To pass an explicit executable path:
 
 ```bash
 python src/pdb_dataset_builder.py \
   --datasets solution_nmr_monomer_stride_modeled_first_model \
   --solution-nmr-monomer-stride-executable /path/to/stride
 ```
+
+For a first-time managed installation on macOS or Linux, the builder clones the
+[STRIDE repository][stride-repository], checks out the fixed revision
+`867a5eb0f2479cb16615512a53ee472c54649505`, runs
+`make -C <checkout>/src stride`, validates the resulting executable, and
+publishes the completed checkout at
+`data/stride/867a5eb0f2479cb16615512a53ee472c54649505/<system>-<architecture>/`.
+Clone/build commands use argument lists rather than a shell, each have a
+five-minute timeout, and are serialized across threads and POSIX processes. A
+failed first installation is not published; the next run can retry cleanly. If
+an existing versioned checkout has lost its binary, its Git revision and tracked
+files are verified before its Makefile is run again.
+
+Automatic setup requires Git, GNU Make, a C compiler (`gcc`, `cc`, or `clang`),
+and GitHub access. Use `--stride-install-dir` to change the managed installation
+root. Native Windows users should use WSL or pass a prebuilt executable. The
+versioned directory means that changing the pinned revision creates a separate
+installation rather than silently replacing an older one.
 
 First-model STRIDE state maps are cached by structure in `data/stride_cache/` by
 default and reused across STRIDE-based datasets. A cache entry is accepted only
@@ -267,6 +292,10 @@ changing STRIDE. Use `--stride-cache-dir` to change the cache location.
   model-length filter and coordinate-level monomer datasets.
 - `--pdb-cache-validation-hours`: remote PDB/mmCIF validation interval; `0`
   validates every access.
+- `--stride-install-dir`: root for the pinned, automatically built STRIDE
+  checkout (default: `data/stride`).
+- `--stride-cache-dir`: cache for per-structure STRIDE assignments; this is
+  separate from the managed source and executable.
 
 Long-running calculations:
 
@@ -728,7 +757,10 @@ Run `python src/pdb_plot.py --help` to see all plot groups and path options.
 
 No open-source license is granted for this repository. See
 [`../LICENSE`](../LICENSE) for the applicable terms. STRIDE and all Python
-dependencies remain subject to their own licenses.
+dependencies remain subject to their own licenses. The [STRIDE
+license][stride-license] permits academic use under its stated conditions and
+requires separate written permission for commercial use.
 
 [rcsb-apis]: https://www.rcsb.org/docs/programmatic-access/web-apis-overview
 [stride-repository]: https://github.com/MDAnalysis/stride
+[stride-license]: https://github.com/MDAnalysis/stride/blob/867a5eb0f2479cb16615512a53ee472c54649505/LICENSE

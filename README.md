@@ -28,7 +28,9 @@ This README contains the steps required to reproduce those results.
 - Network access and at least 80 GiB of free disk space for a full build. The
   current coordinate cache occupies approximately 65 GiB; 100 GiB is recommended
   for temporary files and future updates.
-- [STRIDE][stride-repository], GNU Make, and a C compiler for Figures 3–7.
+- Git, GNU Make, and a C compiler (`gcc`, `cc`, or `clang`) for the first
+  automatic STRIDE build used by Figures 3–7. These tools are not needed when a
+  working STRIDE executable is already installed or supplied explicitly.
 
 Run every command below from the repository root.
 
@@ -50,20 +52,25 @@ source .venv/bin/activate
 python -m pip install -r requirements.txt
 ```
 
-Figures 3–7 also require STRIDE. On macOS or Linux, it can be built at the
-location detected automatically by the dataset builder:
+Figures 3–7 also require STRIDE. On macOS and Linux no separate STRIDE setup is
+needed: the first STRIDE-dependent dataset command checks `PATH` and existing
+local builds, then downloads the pinned [upstream source][stride-repository]
+and builds it under
+`data/stride/867a5eb0f2479cb16615512a53ee472c54649505/<system>-<architecture>/`.
+Later commands on the same platform reuse that executable. The first build
+therefore needs access to GitHub plus Git, GNU Make, and a C compiler.
 
-```bash
-git clone https://github.com/MDAnalysis/stride.git /tmp/stride_src
-make -C /tmp/stride_src/src
-```
-
-If STRIDE is installed elsewhere, add the following option to dataset commands
-that require it:
+If STRIDE is installed elsewhere, pass its executable explicitly. An invalid
+explicit path is reported as an error and does not trigger an automatic
+download:
 
 ```text
 --solution-nmr-monomer-stride-executable /path/to/stride
 ```
+
+Use `--stride-install-dir /another/directory` to change the root of the managed
+installation. Native Windows users should run the builder in WSL or provide a
+prebuilt executable explicitly.
 
 ## Reproduce All Article Figures
 
@@ -74,7 +81,8 @@ python src/pdb_dataset_builder.py --datasets all
 ```
 
 This is a long-running operation. It downloads coordinate files, queries RCSB
-PDB, runs STRIDE, searches for X-ray homologs, and calculates RMSD values.
+PDB, installs and runs STRIDE when necessary, searches for X-ray homologs, and
+calculates RMSD values.
 
 After the datasets have been created in `data/`, render all figures:
 
@@ -225,8 +233,8 @@ Outputs:
 
 ## Long-Running Builds
 
-- Downloaded coordinates and STRIDE results are cached in `data/`. Rerunning a
-  command reuses available cache files.
+- Downloaded coordinates, the managed STRIDE source/binary, and STRIDE results
+  are cached in `data/`. Rerunning a command reuses available files.
 - Coordinate downloads and conversions are single-flight per PDB ID. Threads
   and concurrent POSIX builder processes cannot publish mixed PDB/mmCIF,
   chain-map, or metadata cache bundles; different PDB IDs still run in parallel.
@@ -253,7 +261,11 @@ and RMSD formulas are documented in [`src/README.md`](src/README.md).
 
 No open-source license is granted for this repository. See [`LICENSE`](LICENSE)
 for the applicable terms. STRIDE and all Python dependencies remain subject to
-their own licenses.
+their own licenses. In particular, the [STRIDE license][stride-license] permits
+academic use subject to its notice, citation, and bug-reporting conditions;
+commercial use requires a separate written license. Automatic installation does
+not change those terms.
 
 [stride-repository]: https://github.com/MDAnalysis/stride
+[stride-license]: https://github.com/MDAnalysis/stride/blob/867a5eb0f2479cb16615512a53ee472c54649505/LICENSE
 [repository]: https://github.com/akabynda/RCSB_PDB_Data_Visualizer

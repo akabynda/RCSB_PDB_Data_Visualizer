@@ -9,6 +9,7 @@ import hashlib
 import json
 import logging
 import os
+import platform
 import re
 import shutil
 import subprocess
@@ -263,13 +264,18 @@ PROTEIN_POLYMER_TYPE = "Protein"
 SEQUENCE_IDENTITY_AGGREGATION_METHOD = "sequence_identity"
 DEFAULT_PDB_CACHE_DIR = Path("data/pdb_cache")
 DEFAULT_STRIDE_CACHE_DIR = Path("data/stride_cache")
+DEFAULT_STRIDE_INSTALL_DIR = Path("data/stride")
 DEFAULT_PDB_CACHE_VALIDATION_HOURS = 24.0
 PDB_CACHE_METADATA_SCHEMA_VERSION = 1
 XRAY_CA_CACHE_SCHEMA_VERSION = 1
 XRAY_CA_PARSER_REVISION = 1
+STRIDE_REPOSITORY_URL = "https://github.com/MDAnalysis/stride.git"
+STRIDE_SOURCE_REVISION = "867a5eb0f2479cb16615512a53ee472c54649505"
+STRIDE_SETUP_TIMEOUT_SECONDS = 300.0
 LOCAL_STRIDE_CANDIDATE = Path("/tmp/stride_src/src/stride")
 STRIDE_STATE_CODES: tuple[str, ...] = ("H", "G", "I", "E", "B", "T", "C")
 STRIDE_CORE_STATE_CODES: frozenset[str] = frozenset({"H", "G", "I", "E", "B"})
+_STRIDE_INSTALL_THREAD_LOCK = Lock()
 DEFAULT_MAX_WORKERS = max(1, os.cpu_count() or 1)
 print(f"Using up to {DEFAULT_MAX_WORKERS} worker threads for concurrent tasks")
 
@@ -699,12 +705,260 @@ def contains_noesy_experiment(experiments: Iterable[str]) -> bool:
     return any("NOESY" in experiment.upper() for experiment in experiments)
 
 
-def resolve_stride_executable(explicit_value: str) -> str | None:
-    """Resolve the STRIDE executable path from arguments, PATH, or local builds."""
+def _is_usable_stride_executable(path: Path) -> bool:
+    """Return whether ``path`` is a regular executable file."""
+    try:
+        return path.is_file() and os.access(path, os.X_OK)
+    except OSError:
+        return False
+
+
+def _managed_stride_checkout_dir(install_dir: Path) -> Path:
+    """Return the versioned checkout directory for the pinned STRIDE source."""
+    system = platform.system().lower() or "unknown-os"
+    architecture = platform.machine().lower() or "unknown-architecture"
+    platform_tag = re.sub(r"[^a-z0-9_.-]+", "_", f"{system}-{architecture}")
+    return Path(install_dir).expanduser() / STRIDE_SOURCE_REVISION / platform_tag
+
+
+def _managed_stride_executable_path(install_dir: Path) -> Path:
+    """Return the expected executable path inside the managed checkout."""
+    return _managed_stride_checkout_dir(install_dir) / "src" / "stride"
+
+
+@contextmanager
+def _stride_install_lock(install_dir: Path) -> Iterator[None]:
+    """Serialize a managed STRIDE installation across threads and processes."""
+    install_dir.mkdir(parents=True, exist_ok=True)
+    with _STRIDE_INSTALL_THREAD_LOCK:
+        lock_handle = (install_dir / ".install.lock").open("a+b")
+        try:
+            if fcntl is not None:
+                fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+            yield
+        finally:
+            try:
+                if fcntl is not None:
+                    fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+            finally:
+                lock_handle.close()
+
+
+def _run_stride_setup_command(
+    command: Sequence[str],
+    *,
+    action: str,
+) -> subprocess.CompletedProcess[str]:
+    """Run one bounded STRIDE setup command and raise an actionable error."""
+    try:
+        return subprocess.run(
+            list(command),
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=STRIDE_SETUP_TIMEOUT_SECONDS,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            f"Cannot {action}: required command {command[0]!r} was not found. "
+            "Automatic STRIDE setup requires Git, GNU Make, and a C compiler."
+        ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"Timed out while trying to {action} after "
+            f"{STRIDE_SETUP_TIMEOUT_SECONDS:g} seconds."
+        ) from exc
+    except subprocess.CalledProcessError as exc:
+        output = str(exc.stderr or exc.stdout or "").strip()
+        detail = f" Tool output: {output[-2000:]}" if output else ""
+        raise RuntimeError(
+            f"Failed to {action} (exit status {exc.returncode}).{detail}"
+        ) from exc
+
+
+def _build_stride_checkout(checkout_dir: Path) -> Path:
+    """Build and validate STRIDE in an existing pinned source checkout."""
+    make_executable = shutil.which("make")
+    compiler_executable = (
+        shutil.which("gcc") or shutil.which("cc") or shutil.which("clang")
+    )
+    missing_tools = []
+    if make_executable is None:
+        missing_tools.append("GNU Make")
+    if compiler_executable is None:
+        missing_tools.append("a C compiler (gcc, cc, or clang)")
+    if missing_tools:
+        missing = " and ".join(missing_tools)
+        raise RuntimeError(
+            f"Cannot build STRIDE because {missing} is not available in PATH."
+        )
+
+    source_dir = checkout_dir / "src"
+    if not (source_dir / "Makefile").is_file():
+        raise RuntimeError(
+            f"Cannot build STRIDE: expected source Makefile is missing at "
+            f"{source_dir / 'Makefile'}."
+        )
+    LOGGER.info("Building STRIDE in %s", source_dir)
+    _run_stride_setup_command(
+        [
+            str(make_executable),
+            "-C",
+            str(source_dir),
+            f"CC={compiler_executable} -O2",
+            "stride",
+        ],
+        action="build STRIDE",
+    )
+    executable = source_dir / "stride"
+    if not _is_usable_stride_executable(executable):
+        raise RuntimeError(
+            "STRIDE build completed without creating an executable at "
+            f"{executable}."
+        )
+    return executable
+
+
+def _verify_existing_stride_checkout(checkout_dir: Path) -> None:
+    """Verify an existing managed checkout before executing its Makefile."""
+    git_executable = shutil.which("git")
+    if git_executable is None:
+        raise RuntimeError(
+            "Cannot verify the existing STRIDE source because Git is not "
+            "available in PATH."
+        )
+    revision = _run_stride_setup_command(
+        [str(git_executable), "-C", str(checkout_dir), "rev-parse", "HEAD"],
+        action="verify the existing STRIDE source revision",
+    ).stdout.strip()
+    if revision != STRIDE_SOURCE_REVISION:
+        raise RuntimeError(
+            f"Existing STRIDE checkout at {checkout_dir} has revision "
+            f"{revision or '<empty>'}; expected {STRIDE_SOURCE_REVISION}."
+        )
+    status = _run_stride_setup_command(
+        [
+            str(git_executable),
+            "-C",
+            str(checkout_dir),
+            "status",
+            "--porcelain",
+            "--untracked-files=no",
+        ],
+        action="verify the existing STRIDE source files",
+    ).stdout.strip()
+    if status:
+        raise RuntimeError(
+            f"Existing STRIDE checkout at {checkout_dir} has modified tracked "
+            "files and will not be built automatically."
+        )
+
+
+def download_and_build_stride(install_dir: Path) -> Path:
+    """Download the pinned STRIDE source, build it, and return its executable."""
+    install_root = Path(install_dir).expanduser().resolve()
+    checkout_dir = _managed_stride_checkout_dir(install_root)
+    executable = _managed_stride_executable_path(install_root)
+
+    with _stride_install_lock(install_root):
+        if _is_usable_stride_executable(executable):
+            return executable.resolve()
+        if os.name == "nt":
+            raise RuntimeError(
+                "Automatic STRIDE builds are supported on macOS and Linux. "
+                "On native Windows, use WSL or pass a built executable with "
+                "--solution-nmr-monomer-stride-executable."
+            )
+
+        if checkout_dir.exists() or checkout_dir.is_symlink():
+            if not checkout_dir.is_dir():
+                raise RuntimeError(
+                    f"Cannot install STRIDE: {checkout_dir} is not a directory."
+                )
+            _verify_existing_stride_checkout(checkout_dir)
+            return _build_stride_checkout(checkout_dir).resolve()
+
+        git_executable = shutil.which("git")
+        if git_executable is None:
+            raise RuntimeError(
+                "Cannot download STRIDE because Git is not available in PATH."
+            )
+
+        LOGGER.info(
+            "Downloading STRIDE revision %s into %s",
+            STRIDE_SOURCE_REVISION,
+            checkout_dir,
+        )
+        with tempfile.TemporaryDirectory(
+            prefix=f".{STRIDE_SOURCE_REVISION[:12]}.",
+            dir=str(install_root),
+        ) as temporary_dir:
+            staged_checkout = Path(temporary_dir) / "checkout"
+            _run_stride_setup_command(
+                [
+                    str(git_executable),
+                    "clone",
+                    "--no-tags",
+                    STRIDE_REPOSITORY_URL,
+                    str(staged_checkout),
+                ],
+                action="download STRIDE sources",
+            )
+            _run_stride_setup_command(
+                [
+                    str(git_executable),
+                    "-C",
+                    str(staged_checkout),
+                    "checkout",
+                    "--detach",
+                    STRIDE_SOURCE_REVISION,
+                ],
+                action="check out the pinned STRIDE revision",
+            )
+            revision = _run_stride_setup_command(
+                [
+                    str(git_executable),
+                    "-C",
+                    str(staged_checkout),
+                    "rev-parse",
+                    "HEAD",
+                ],
+                action="verify the STRIDE source revision",
+            ).stdout.strip()
+            if revision != STRIDE_SOURCE_REVISION:
+                raise RuntimeError(
+                    "Downloaded STRIDE source has unexpected revision "
+                    f"{revision or '<empty>'}; expected {STRIDE_SOURCE_REVISION}."
+                )
+
+            staged_executable = _build_stride_checkout(staged_checkout)
+            if not _is_usable_stride_executable(staged_executable):
+                raise RuntimeError(
+                    f"STRIDE executable validation failed at {staged_executable}."
+                )
+            checkout_dir.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                staged_checkout.replace(checkout_dir)
+            except OSError as exc:
+                if _is_usable_stride_executable(executable):
+                    return executable.resolve()
+                raise RuntimeError(
+                    f"Could not publish the STRIDE installation to {checkout_dir}."
+                ) from exc
+
+        LOGGER.info("Installed STRIDE executable at %s", executable)
+        return executable.resolve()
+
+
+def resolve_stride_executable(
+    explicit_value: str,
+    install_dir: Path | None = None,
+) -> str | None:
+    """Resolve STRIDE from an argument, PATH, or an existing local build."""
     explicit_path = explicit_value.strip()
     if explicit_path:
         path = Path(explicit_path).expanduser()
-        if path.exists():
+        if _is_usable_stride_executable(path):
             return str(path)
         return None
 
@@ -712,10 +966,27 @@ def resolve_stride_executable(explicit_value: str) -> str | None:
     if resolved:
         return resolved
 
-    if LOCAL_STRIDE_CANDIDATE.exists():
+    managed_install_dir = install_dir or DEFAULT_STRIDE_INSTALL_DIR
+    managed_candidate = _managed_stride_executable_path(managed_install_dir)
+    if _is_usable_stride_executable(managed_candidate):
+        return str(managed_candidate.resolve())
+
+    if _is_usable_stride_executable(LOCAL_STRIDE_CANDIDATE):
         return str(LOCAL_STRIDE_CANDIDATE.resolve())
 
     return None
+
+
+def ensure_stride_executable(
+    explicit_value: str,
+    install_dir: Path | None = None,
+) -> str | None:
+    """Resolve STRIDE, automatically installing it only when none was specified."""
+    managed_install_dir = install_dir or DEFAULT_STRIDE_INSTALL_DIR
+    resolved = resolve_stride_executable(explicit_value, managed_install_dir)
+    if resolved is not None or explicit_value.strip():
+        return resolved
+    return str(download_and_build_stride(managed_install_dir))
 
 
 def _pdb_cache_metadata_path(pdb_path: Path) -> Path:
@@ -2149,6 +2420,8 @@ def _load_cached_stride_state_by_chain(
         payload = json.loads(cache_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
+    if not isinstance(payload, dict):
+        return None
     if payload.get("first_model_sha1") != first_model_sha1:
         return None
     raw_state_by_chain = payload.get("state_by_chain")
@@ -2410,7 +2683,9 @@ def _parse_first_model_ca_line_fields(
         resid = int(resid_text)
     except ValueError:
         resid = None
-    if resid is not None and occupancy != float("-inf"):
+    if resid is not None:
+        if occupancy == float("-inf"):
+            return None
         return atom_chain, resid, insertion_code, alt_loc, occupancy, resname
 
     parts = line.split()
@@ -2578,11 +2853,12 @@ def _parse_pdb_modres_identity_map(
         for line in handle:
             if not line.startswith("MODRES"):
                 continue
-            resname = line[12:15].strip()
-            chain_id = line[16].strip()
-            seq_num_text = line[18:22].strip()
-            insertion_code = line[22].strip()
-            standard_resname = line[24:27].strip()
+            fixed_line = line.rstrip("\r\n").ljust(27)
+            resname = fixed_line[12:15].strip()
+            chain_id = fixed_line[16].strip()
+            seq_num_text = fixed_line[18:22].strip()
+            insertion_code = fixed_line[22].strip()
+            standard_resname = fixed_line[24:27].strip()
             if not (resname and chain_id and seq_num_text and standard_resname):
                 parts = line.split()
                 if len(parts) < 6:
@@ -3435,7 +3711,7 @@ class RCSBClient:
         """Normalize raw sequence-identity cutoff values to integer percentages."""
         try:
             return int(round(float(raw_cutoff)))
-        except (TypeError, ValueError):
+        except (OverflowError, TypeError, ValueError):
             return None
 
     @classmethod
@@ -3474,9 +3750,13 @@ class RCSBClient:
         if not entry_id:
             return None
         entry_id = str(entry_id)
-        year = extract_year(entry.get("rcsb_accession_info", {}).get("deposit_date"))
+        year = extract_year(
+            (entry.get("rcsb_accession_info") or {}).get("deposit_date")
+        )
 
-        model_count_raw = entry.get("rcsb_entry_info", {}).get("deposited_model_count")
+        model_count_raw = (entry.get("rcsb_entry_info") or {}).get(
+            "deposited_model_count"
+        )
         if model_count_raw is None:
             _record_filtered_structure(
                 entry_id, "deposited model count is missing", year=year
@@ -3968,9 +4248,10 @@ class RCSBClient:
                     year=(entry.get("rcsb_accession_info") or {}).get("deposit_date"),
                 )
         return [
-            entry.get("rcsb_accession_info", {}).get("deposit_date")
+            (entry.get("rcsb_accession_info") or {}).get("deposit_date")
             for entry in entries
-            if entry and entry.get("rcsb_accession_info", {}).get("deposit_date")
+            if entry
+            and (entry.get("rcsb_accession_info") or {}).get("deposit_date")
         ]
 
     def fetch_deposit_year_by_entry_id_for_ids(
@@ -4000,7 +4281,7 @@ class RCSBClient:
             if not entry_id:
                 continue
             year = extract_year(
-                entry.get("rcsb_accession_info", {}).get("deposit_date")
+                (entry.get("rcsb_accession_info") or {}).get("deposit_date")
             )
             if year is None:
                 continue
@@ -4095,7 +4376,9 @@ class RCSBClient:
             entry_id = entry.get("rcsb_id")
             if not entry_id:
                 continue
-            combined = entry.get("rcsb_entry_info", {}).get("resolution_combined")
+            combined = (entry.get("rcsb_entry_info") or {}).get(
+                "resolution_combined"
+            )
             if not combined:
                 continue
             try:
@@ -4451,7 +4734,7 @@ class RCSBClient:
                 continue
             entry_id = entry.get("rcsb_id")
             year = extract_year(
-                entry.get("rcsb_accession_info", {}).get("deposit_date")
+                (entry.get("rcsb_accession_info") or {}).get("deposit_date")
             )
             if not entry_id:
                 continue
@@ -8663,12 +8946,23 @@ def parse_args() -> argparse.Namespace:
         help="Directory to cache first-model STRIDE state maps by structure.",
     )
     parser.add_argument(
+        "--stride-install-dir",
+        type=Path,
+        default=DEFAULT_STRIDE_INSTALL_DIR,
+        help=(
+            "Root directory under which the automatically downloaded and built "
+            "STRIDE source is stored by revision and platform (default: "
+            "data/stride)."
+        ),
+    )
+    parser.add_argument(
         "--solution-nmr-monomer-stride-executable",
         type=str,
         default="",
         help=(
-            "Path to STRIDE executable for monomer-stride dataset. "
-            "If omitted, script tries stride and /tmp/stride_src/src/stride."
+            "Explicit STRIDE executable for STRIDE-based datasets. If omitted, "
+            "the builder checks PATH and local builds, then downloads and builds "
+            "the pinned STRIDE source automatically."
         ),
     )
     parser.add_argument(
@@ -9063,13 +9357,14 @@ def main() -> None:
                 DatasetKind.SOLUTION_NMR_MONOMER_STRIDE_MODELED_FIRST_MODEL
             ]
         )
-        modeled_first_stride_executable = resolve_stride_executable(
-            args.solution_nmr_monomer_stride_executable
+        modeled_first_stride_executable = ensure_stride_executable(
+            args.solution_nmr_monomer_stride_executable,
+            Path(args.stride_install_dir),
         )
         if modeled_first_stride_executable is None:
             raise RuntimeError(
                 "STRIDE executable not found for solution_nmr_monomer_stride_modeled_first_model. "
-                "Provide --solution-nmr-monomer-stride-executable or install stride."
+                "Provide a valid --solution-nmr-monomer-stride-executable path."
             )
         LOGGER.info(
             (
@@ -9108,14 +9403,15 @@ def main() -> None:
                 DatasetKind.SOLUTION_NMR_MONOMER_PRECISION_STRIDE_MODELED_FIRST_MODEL
             ]
         )
-        precision_stride_executable = resolve_stride_executable(
-            args.solution_nmr_monomer_stride_executable
+        precision_stride_executable = ensure_stride_executable(
+            args.solution_nmr_monomer_stride_executable,
+            Path(args.stride_install_dir),
         )
         if precision_stride_executable is None:
             raise RuntimeError(
                 "STRIDE executable not found for "
                 "solution_nmr_monomer_precision_stride_modeled_first_model. "
-                "Provide --solution-nmr-monomer-stride-executable or install stride."
+                "Provide a valid --solution-nmr-monomer-stride-executable path."
             )
 
         existing_records = []
@@ -9264,13 +9560,14 @@ def main() -> None:
         _set_active_dataset_warning_logs(
             output_paths_by_dataset[DatasetKind.SOLUTION_NMR_MONOMER_XRAY_HOMOLOGS]
         )
-        homolog_stride_executable = resolve_stride_executable(
-            args.solution_nmr_monomer_stride_executable
+        homolog_stride_executable = ensure_stride_executable(
+            args.solution_nmr_monomer_stride_executable,
+            Path(args.stride_install_dir),
         )
         if homolog_stride_executable is None:
             raise SystemExit(
                 "STRIDE executable not found for solution_nmr_monomer_xray_homologs. "
-                "Provide --solution-nmr-monomer-stride-executable or install stride."
+                "Provide a valid --solution-nmr-monomer-stride-executable path."
             )
         LOGGER.info(
             "SOLUTION NMR monomer X-ray homologs: using STRIDE executable %s",

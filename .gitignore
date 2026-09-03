@@ -3,4 +3,6 @@ figures*
 __pycache__
 .venv
 helpers
+.coverage
+htmlcov/
 history
