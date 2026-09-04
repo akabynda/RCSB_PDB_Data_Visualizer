@@ -324,6 +324,46 @@ class RCSBClientMetadataTests(unittest.TestCase):
             {"VALID": 1.5},
         )
 
+    def test_entry_experimental_methods_parse_pure_hybrid_empty_and_null(self) -> None:
+        """Preserve every reported method while tolerating absent experiment data."""
+        self.client._post_json = Mock(
+            return_value={
+                "data": {
+                    "entries": [
+                        {
+                            "rcsb_id": "PURE",
+                            "exptl": [{"method": "X-RAY DIFFRACTION"}],
+                        },
+                        {
+                            "rcsb_id": "HYBRID",
+                            "exptl": [
+                                {"method": "X-RAY DIFFRACTION"},
+                                {"method": "NEUTRON DIFFRACTION"},
+                            ],
+                        },
+                        {"rcsb_id": "EMPTY", "exptl": []},
+                        {"rcsb_id": "NULL", "exptl": None},
+                        None,
+                    ]
+                }
+            }
+        )
+
+        methods = self.client.fetch_entry_experimental_methods_for_ids(
+            ["PURE", "HYBRID", "EMPTY", "NULL"]
+        )
+
+        self.assertEqual(
+            methods,
+            {
+                "PURE": ("X-RAY DIFFRACTION",),
+                "HYBRID": ("X-RAY DIFFRACTION", "NEUTRON DIFFRACTION"),
+                "EMPTY": (),
+                "NULL": (),
+            },
+        )
+        self.assertEqual(self.client.fetch_entry_experimental_methods_for_ids([]), {})
+
     def test_group_mapping_and_candidate_metadata(self) -> None:
         entities = [
             {
@@ -371,17 +411,33 @@ class RCSBClientMetadataTests(unittest.TestCase):
             ],
         )
 
-        with patch.object(
-            self.client,
-            "fetch_entry_resolution_for_ids",
-            return_value={"1ABC": 1.8},
-        ) as resolutions:
+        with (
+            patch.object(
+                self.client,
+                "fetch_entry_resolution_for_ids",
+                return_value={"1ABC": 1.8},
+            ) as resolutions,
+            patch.object(
+                self.client,
+                "fetch_entry_experimental_methods_for_ids",
+                return_value={
+                    "1ABC": ("X-RAY DIFFRACTION",),
+                    "2DEF": ("X-RAY DIFFRACTION", "NEUTRON DIFFRACTION"),
+                },
+            ) as methods,
+        ):
             candidates = self.client.fetch_xray_polymer_entity_candidates_for_ids(
                 ["1ABC_1", "2DEF_1"]
             )
         self.assertEqual(resolutions.call_count, 1)
+        self.assertEqual(methods.call_count, 1)
         self.assertEqual(candidates[0].resolution_angstrom, 1.8)
+        self.assertEqual(candidates[0].experimental_methods, ("X-RAY DIFFRACTION",))
         self.assertTrue(math.isnan(candidates[1].resolution_angstrom))
+        self.assertEqual(
+            candidates[1].experimental_methods,
+            ("X-RAY DIFFRACTION", "NEUTRON DIFFRACTION"),
+        )
         self.assertEqual(
             self.client.fetch_xray_polymer_entity_candidates_for_ids([]), []
         )
@@ -422,14 +478,7 @@ class RCSBClientMetadataTests(unittest.TestCase):
             ],
         }
         self.client.session.post.side_effect = [throttled, successful]
-        with (
-            patch.object(builder.time, "sleep") as sleep,
-            patch.object(
-                self.client,
-                "_filter_entry_ids_by_exact_single_method",
-                return_value=["1ABC", "2DEF"],
-            ),
-        ):
+        with patch.object(builder.time, "sleep") as sleep:
             result = self.client.fetch_xray_polymer_entity_ids_by_sequence(
                 " acdefghikL ", 95
             )
@@ -437,8 +486,8 @@ class RCSBClientMetadataTests(unittest.TestCase):
         sleep.assert_called_once_with(self.client.config.backoff_seconds)
         successful.raise_for_status.assert_called_once_with()
 
-    def test_sequence_search_keeps_only_exact_single_method_xray_hits(self) -> None:
-        """Discard hybrid entries while preserving sequence-hit entity order."""
+    def test_sequence_search_returns_raw_xray_condition_hits_in_order(self) -> None:
+        """Leave exact-method filtering to the homolog candidate evaluator."""
         response = Mock(status_code=200, text="")
         response.json.return_value = {
             "total_count": 3,
@@ -454,21 +503,16 @@ class RCSBClientMetadataTests(unittest.TestCase):
         with patch.object(
             self.client,
             "_filter_entry_ids_by_exact_single_method",
-            return_value=["1PURE"],
         ) as exact_method_filter:
             result = self.client.fetch_xray_polymer_entity_ids_by_sequence(
                 "ACDEFGHIKL", 100
             )
 
-        self.assertEqual(result, ["1PURE_2", "1PURE_1"])
-        exact_method_filter.assert_called_once()
-        call = exact_method_filter.call_args
-        entry_ids = call.kwargs.get("entry_ids", call.args[0] if call.args else None)
-        method_value = call.kwargs.get(
-            "method_value", call.args[1] if len(call.args) > 1 else None
+        self.assertEqual(
+            result,
+            ["2HYB_1", "1PURE_2", "1PURE_1"],
         )
-        self.assertCountEqual(entry_ids, ["2HYB", "1PURE"])
-        self.assertEqual(method_value, "X-RAY DIFFRACTION")
+        exact_method_filter.assert_not_called()
 
     def test_sequence_search_handles_empty_http_outcomes_and_transport_failure(
         self,

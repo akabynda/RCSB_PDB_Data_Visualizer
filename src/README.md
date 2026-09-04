@@ -117,15 +117,8 @@ report.
 
 The 95% and 100% X-ray homolog outputs additionally receive sibling
 `*_rejected.csv` reports. These are candidate-level audit files, distinct from
-the NMR-structure-level `*_filtered.csv` reports. Each row identifies the NMR
-entry and core, the sequence-identity cutoff, and one X-ray polymer entity (and
-its chains) returned by RCSB Search but rejected because no eligible
-HETATM-free modeled-core match was found. Header-only files mean no candidates
-were rejected. Fresh runs recreate the reports; `--resume` retains rows for
-completed homolog record pairs, removes rows left by incomplete pairs, and
-deduplicates new rows by NMR entry, cutoff, and X-ray entity. If either report
-is missing or malformed, previously completed homolog pairs are recomputed so
-their rejected candidates are not silently lost.
+the NMR-structure-level `*_filtered.csv` reports. Their schema and rejection
+rules are described in the dataset reference below.
 
 Build one dataset:
 
@@ -575,8 +568,8 @@ complete experimental-method list, and only entries whose sole method is
 `X-RAY DIFFRACTION` are retained. X-ray hybrids with any additional method are
 excluded before coordinate evaluation.
 
-Every chain of each candidate polymer entity is then checked against its
-first-model coordinates.
+For candidates that pass the method check, every polymer-entity chain is tested
+against its first-model coordinates.
 
 - The 95% coordinate check runs a local gapped alignment independently in each
   HETATM-free X-ray region and requires at least
@@ -590,14 +583,12 @@ first-model coordinates.
 - Missing resolution does not exclude a candidate. Resolution is not stored in
   the homolog CSV; downstream RMSD outputs write a missing value as `nan`.
 
-Every exact single-method X-ray sequence hit for which no chain has an eligible
-modeled-core match is written to the cutoff-specific `*_rejected.csv` report.
-The report has one row per NMR/X-ray polymer-entity pair and records the NMR
-chain and core, X-ray entry/entity and chains, cutoff, and rejection reason. A
-candidate is not reported as rejected when any of its chains contains a clean
-matching region. Metadata or coordinate errors make the evaluation
-inconclusive and continue to fail/retry the complete NMR entry instead of being
-recorded as a normal rejection.
+Every hit rejected by the method or modeled-core check is written to the
+cutoff-specific `*_rejected.csv` report. Each row records the NMR chain and core,
+X-ray entry/entity and chains, cutoff, and reason. Rows are deduplicated by NMR
+entry, cutoff, and X-ray entity. Metadata or coordinate errors remain
+inconclusive and fail/retry the complete NMR entry rather than creating a normal
+rejection row.
 
 Within one NMR seed, the 95% and 100% passes share fetched candidate metadata
 and use the same durable, versioned first-model X-ray CA cache. This avoids

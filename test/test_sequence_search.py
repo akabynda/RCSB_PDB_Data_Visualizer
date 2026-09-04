@@ -19,6 +19,7 @@ from src.pdb_dataset_builder import (
     SolutionNMRMonomerXrayHomologBuilder,
     SolutionNMRMonomerXrayHomologSeedRecord,
     XrayPolymerEntityCandidateRecord,
+    XRAY_HOMOLOG_METHOD_REJECTION_REASON,
     _read_xray_homolog_resume_checkpoint,
     find_modeled_ca_core_identity_matches,
     read_rejected_xray_homolog_csv,
@@ -366,8 +367,22 @@ class SequenceSearchTests(unittest.TestCase):
             }
         }
         empty_resolution_response = {"data": {"entries": []}}
+        method_response = {
+            "data": {
+                "entries": [
+                    {
+                        "rcsb_id": "1MCD",
+                        "exptl": [{"method": "X-RAY DIFFRACTION"}],
+                    }
+                ]
+            }
+        }
         client._post_json = Mock(
-            side_effect=[entity_response, empty_resolution_response]
+            side_effect=[
+                entity_response,
+                empty_resolution_response,
+                method_response,
+            ]
         )
 
         result = client.fetch_xray_polymer_entity_candidates_for_ids(["1MCD_1"])
@@ -375,6 +390,7 @@ class SequenceSearchTests(unittest.TestCase):
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0].polymer_entity_id, "1MCD_1")
         self.assertTrue(math.isnan(result[0].resolution_angstrom))
+        self.assertEqual(result[0].experimental_methods, ("X-RAY DIFFRACTION",))
 
     def test_excludes_nmr_entry_when_stride_core_contains_hetatm(self) -> None:
         """Exclude an NMR query whose STRIDE core includes a HETATM residue."""
@@ -605,6 +621,7 @@ class SequenceSearchTests(unittest.TestCase):
                         entry_id=entity_id.split("_", 1)[0],
                         chain_ids=("A",),
                         resolution_angstrom=2.0,
+                        experimental_methods=("X-RAY DIFFRACTION",),
                     )
                     for entity_id in entity_ids
                 ]
@@ -656,12 +673,14 @@ class SequenceSearchTests(unittest.TestCase):
                         entry_id="1KEEP",
                         chain_ids=("A",),
                         resolution_angstrom=1.5,
+                        experimental_methods=("X-RAY DIFFRACTION",),
                     ),
                     XrayPolymerEntityCandidateRecord(
                         polymer_entity_id="2DROP_2",
                         entry_id="2DROP",
                         chain_ids=("B", "C"),
                         resolution_angstrom=2.5,
+                        experimental_methods=("X-RAY DIFFRACTION",),
                     ),
                 ]
             )
@@ -708,6 +727,79 @@ class SequenceSearchTests(unittest.TestCase):
             self.assertEqual(rejected.xray_entity_id, "2DROP_2")
             self.assertEqual(rejected.xray_chain_ids, ("B", "C"))
             self.assertIn("modeled core", rejected.reason.lower())
+
+    def test_build_record_reports_hybrid_hit_as_method_rejection(self) -> None:
+        """Audit a hybrid sequence hit without evaluating its coordinates."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config = DatasetBuildConfig()
+            client = RCSBClient(config)
+            client.fetch_xray_polymer_entity_ids_by_sequence = Mock(
+                return_value=["2HYB_1", "1PURE_1"]
+            )
+            client.fetch_xray_polymer_entity_candidates_for_ids = Mock(
+                return_value=[
+                    XrayPolymerEntityCandidateRecord(
+                        polymer_entity_id="2HYB_1",
+                        entry_id="2HYB",
+                        chain_ids=("B", "C"),
+                        resolution_angstrom=2.5,
+                        experimental_methods=(
+                            "X-RAY DIFFRACTION",
+                            "NEUTRON DIFFRACTION",
+                        ),
+                    ),
+                    XrayPolymerEntityCandidateRecord(
+                        polymer_entity_id="1PURE_1",
+                        entry_id="1PURE",
+                        chain_ids=("A",),
+                        resolution_angstrom=1.5,
+                        experimental_methods=("X-RAY DIFFRACTION",),
+                    ),
+                ]
+            )
+            builder = SolutionNMRMonomerXrayHomologBuilder(
+                client=client,
+                config=config,
+                stride_executable="stride",
+                cache_dir=root,
+                stride_cache_dir=root / "stride_cache",
+            )
+            sequence = "ACDEFGHIKLM"
+            nmr_residues = [
+                CAResidueRecord(index, identity, True)
+                for index, identity in enumerate(sequence, start=7)
+            ]
+            seed = SolutionNMRMonomerXrayHomologSeedRecord("3NMR", 2003, "N")
+
+            with patch.object(
+                builder,
+                "_xray_candidate_has_modeled_core_match",
+                return_value=True,
+            ) as modeled_core_check:
+                record = builder._build_record(
+                    seed,
+                    sequence_identity_percent=100,
+                    core_query=(sequence, 7, 17, nmr_residues),
+                )
+
+            self.assertEqual(record.xray_homolog_entry_ids, ("1PURE",))
+            self.assertEqual(record.xray_homolog_entity_ids, ("1PURE_1",))
+            self.assertTrue(record.has_xray_homolog)
+            self.assertEqual(len(record.rejected_xray_homologs), 1)
+            rejected = record.rejected_xray_homologs[0]
+            self.assertEqual(rejected.xray_entry_id, "2HYB")
+            self.assertEqual(rejected.xray_entity_id, "2HYB_1")
+            self.assertEqual(rejected.xray_chain_ids, ("B", "C"))
+            self.assertEqual(
+                rejected.reason,
+                XRAY_HOMOLOG_METHOD_REJECTION_REASON,
+            )
+            modeled_core_check.assert_called_once()
+            self.assertEqual(
+                modeled_core_check.call_args.kwargs["candidate"].polymer_entity_id,
+                "1PURE_1",
+            )
 
     def test_rejected_xray_homolog_csv_path_round_trip_and_empty_header(
         self,
@@ -771,6 +863,7 @@ class SequenceSearchTests(unittest.TestCase):
                 entry_id="1XYZ",
                 chain_ids=("A",),
                 resolution_angstrom=2.0,
+                experimental_methods=("X-RAY DIFFRACTION",),
             )
             client.fetch_xray_polymer_entity_candidates_for_ids = Mock(
                 return_value=[candidate]

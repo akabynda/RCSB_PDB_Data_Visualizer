@@ -55,8 +55,11 @@ _PDB_CACHE_ENTRY_LOCK_DEPTH = local()
 _FIRST_MODEL_CA_CACHE_LOCKS_GUARD = Lock()
 _FIRST_MODEL_CA_CACHE_LOCKS: dict[str, tuple[Any, int]] = {}
 XRAY_HOMOLOG_SEARCH_MAX_ATTEMPTS = 3
-XRAY_HOMOLOG_REJECTION_REASON = (
+XRAY_HOMOLOG_HETATM_REJECTION_REASON = (
     "no eligible HETATM-free modeled core match at requested sequence identity"
+)
+XRAY_HOMOLOG_METHOD_REJECTION_REASON = (
+    "experimental method set is not exactly [X-RAY DIFFRACTION]"
 )
 
 
@@ -523,7 +526,7 @@ class SolutionNMRMonomerQualityRecord:
 
 @dataclass(frozen=True)
 class RejectedXrayHomologRecord:
-    """Describe one sequence-search hit rejected by the coordinate filter."""
+    """Describe one sequence-search hit rejected by an eligibility check."""
 
     nmr_entry_id: str
     nmr_year: int
@@ -629,12 +632,13 @@ class SolutionNMRMonomerXrayRmsdExtremesRecord:
 
 @dataclass(frozen=True)
 class XrayPolymerEntityCandidateRecord:
-    """Describe an X-ray polymer entity eligible for RMSD comparison."""
+    """Describe an X-ray search candidate and its eligibility metadata."""
 
     polymer_entity_id: str
     entry_id: str
     chain_ids: tuple[str, ...]
     resolution_angstrom: float
+    experimental_methods: tuple[str, ...] = ()
 
 
 def chunked(items: list[str], size: int) -> Iterator[list[str]]:
@@ -4409,6 +4413,42 @@ class RCSBClient:
             resolutions[str(entry_id)] = value
         return resolutions
 
+    def fetch_entry_experimental_methods_for_ids(
+        self, entry_ids: list[str]
+    ) -> dict[str, tuple[str, ...]]:
+        """Fetch reported experimental methods keyed by entry ID."""
+        if not entry_ids:
+            return {}
+        query = """
+        query($ids:[String!]!) {
+          entries(entry_ids:$ids) {
+            rcsb_id
+            exptl {
+              method
+            }
+          }
+        }
+        """
+        payload = {"query": query, "variables": {"ids": entry_ids}}
+        data = self._post_json(self.config.graphql_url, payload)
+        entries = data.get("data", {}).get("entries") or []
+        methods_by_entry_id: dict[str, tuple[str, ...]] = {}
+        for entry in entries:
+            if not entry:
+                continue
+            entry_id = entry.get("rcsb_id")
+            if not entry_id:
+                continue
+            methods: list[str] = []
+            for item in entry.get("exptl") or []:
+                if not item:
+                    continue
+                method = item.get("method")
+                if method:
+                    methods.append(str(method))
+            methods_by_entry_id[str(entry_id)] = tuple(methods)
+        return methods_by_entry_id
+
     def fetch_xray_polymer_entity_ids_for_group_ids(
         self, group_ids: list[str]
     ) -> list[str]:
@@ -4563,10 +4603,14 @@ class RCSBClient:
             entity_rows.append((str(polymer_entity_id), str(entry_id), chain_id_tuple))
 
         resolution_by_entry_id: dict[str, float] = {}
+        methods_by_entry_id: dict[str, tuple[str, ...]] = {}
         unknown_entries = sorted({entry_id for _, entry_id, _ in entity_rows})
         for entry_batch in chunked(unknown_entries, self.config.graphql_batch_size):
             resolution_by_entry_id.update(
                 self.fetch_entry_resolution_for_ids(entry_batch)
+            )
+            methods_by_entry_id.update(
+                self.fetch_entry_experimental_methods_for_ids(entry_batch)
             )
 
         records: list[XrayPolymerEntityCandidateRecord] = []
@@ -4580,6 +4624,7 @@ class RCSBClient:
                     resolution_angstrom=(
                         resolution if resolution is not None else float("nan")
                     ),
+                    experimental_methods=methods_by_entry_id.get(entry_id, ()),
                 )
             )
         return records
@@ -4621,7 +4666,7 @@ class RCSBClient:
         sequence: str,
         sequence_identity_percent: int,
     ) -> list[str]:
-        """Search RCSB for exact single-method X-ray sequence matches."""
+        """Search RCSB for X-ray polymer entities matching a query sequence."""
         if sequence_identity_percent not in {95, 100}:
             raise ValueError("sequence_identity_percent must be 95 or 100")
         sequence = "".join(sequence.split()).upper()
@@ -4725,27 +4770,7 @@ class RCSBClient:
             start += len(batch_ids)
             if not batch_ids:
                 break
-
-        entry_ids = list(
-            dict.fromkeys(
-                entity_id.split("_", 1)[0].strip()
-                for entity_id in entity_ids
-                if entity_id.split("_", 1)[0].strip()
-            )
-        )
-        exact_xray_entry_ids: set[str] = set()
-        for entry_id_batch in chunked(entry_ids, self.config.graphql_batch_size):
-            exact_xray_entry_ids.update(
-                self._filter_entry_ids_by_exact_single_method(
-                    entry_ids=entry_id_batch,
-                    method_value="X-RAY DIFFRACTION",
-                )
-            )
-        return [
-            entity_id
-            for entity_id in entity_ids
-            if entity_id.split("_", 1)[0].strip() in exact_xray_entry_ids
-        ]
+        return entity_ids
 
     def fetch_solution_nmr_weight_records_for_ids(
         self, entry_ids: list[str]
@@ -6223,8 +6248,9 @@ class SolutionNMRMonomerXrayHomologBuilder:
         chain_residue_cache: (
             dict[tuple[str, str], tuple[CAResidueRecord, ...]] | None
         ) = None,
+        rejection_reason_by_entity_id: dict[str, str] | None = None,
     ) -> tuple[str, ...]:
-        """Filter homolog candidates to those modeling the required core."""
+        """Filter candidates by exact X-ray method and modeled core."""
         if not xray_entity_ids:
             return tuple()
 
@@ -6261,6 +6287,14 @@ class SolutionNMRMonomerXrayHomologBuilder:
             candidate = candidate_by_entity_id.get(entity_id)
             if candidate is None:
                 continue
+            if frozenset(candidate.experimental_methods) != frozenset(
+                {"X-RAY DIFFRACTION"}
+            ):
+                if rejection_reason_by_entity_id is not None:
+                    rejection_reason_by_entity_id[entity_id] = (
+                        XRAY_HOMOLOG_METHOD_REJECTION_REASON
+                    )
+                continue
             if self._xray_candidate_has_modeled_core_match(
                 nmr_core_residues=nmr_core_residues,
                 candidate=candidate,
@@ -6268,6 +6302,10 @@ class SolutionNMRMonomerXrayHomologBuilder:
                 chain_residue_cache=chain_residue_cache,
             ):
                 filtered_entity_ids.append(entity_id)
+            elif rejection_reason_by_entity_id is not None:
+                rejection_reason_by_entity_id[entity_id] = (
+                    XRAY_HOMOLOG_HETATM_REJECTION_REASON
+                )
         return tuple(filtered_entity_ids)
 
     def _build_record(
@@ -6294,12 +6332,14 @@ class SolutionNMRMonomerXrayHomologBuilder:
         resolved_candidate_cache = (
             candidate_cache if candidate_cache is not None else {}
         )
+        rejection_reason_by_entity_id: dict[str, str] = {}
         xray_entity_ids = self._filter_modeled_xray_homolog_entity_ids(
             xray_entity_ids=raw_xray_entity_ids,
             nmr_core_residues=nmr_core_residues,
             sequence_identity_percent=sequence_identity_percent,
             candidate_cache=resolved_candidate_cache,
             chain_residue_cache=chain_residue_cache,
+            rejection_reason_by_entity_id=rejection_reason_by_entity_id,
         )
         kept_entity_ids = set(xray_entity_ids)
         rejected_xray_homologs: list[RejectedXrayHomologRecord] = []
@@ -6328,7 +6368,9 @@ class SolutionNMRMonomerXrayHomologBuilder:
                     xray_entry_id=candidate.entry_id,
                     xray_entity_id=candidate.polymer_entity_id,
                     xray_chain_ids=candidate.chain_ids,
-                    reason=XRAY_HOMOLOG_REJECTION_REASON,
+                    reason=rejection_reason_by_entity_id.get(
+                        entity_id, XRAY_HOMOLOG_HETATM_REJECTION_REASON
+                    ),
                 )
             )
         xray_entry_ids = self._entry_ids_from_polymer_entity_ids(xray_entity_ids)
@@ -6564,8 +6606,8 @@ class SolutionNMRMonomerXrayHomologBuilder:
             sum(exclusion_reason_counts.values()),
         )
         LOGGER.info(
-            "SOLUTION NMR monomer X-ray candidates rejected by the modeled-core "
-            "filter: %d%%=%d, %d%%=%d",
+            "SOLUTION NMR monomer X-ray candidates rejected by method or "
+            "modeled-core filters: %d%%=%d, %d%%=%d",
             95,
             rejected_candidate_count_95,
             100,
@@ -7937,7 +7979,7 @@ def _rejected_xray_homolog_csv_row(
 def write_rejected_xray_homolog_csv(
     records: Iterable[RejectedXrayHomologRecord], output_path: Path
 ) -> None:
-    """Write X-ray sequence hits rejected by the modeled-core filter."""
+    """Write X-ray sequence hits rejected by homolog eligibility checks."""
     _atomic_write_csv_rows(
         output_path=output_path,
         header=REJECTED_XRAY_HOMOLOG_HEADER,
@@ -8030,7 +8072,7 @@ def _read_rejected_xray_homolog_csv_with_status(
 def read_rejected_xray_homolog_csv(
     input_path: Path,
 ) -> list[RejectedXrayHomologRecord]:
-    """Read valid rows from a modeled-core rejection report when present."""
+    """Read valid rows from a homolog rejection report when present."""
     records, _ = _read_rejected_xray_homolog_csv_with_status(input_path)
     return records
 
