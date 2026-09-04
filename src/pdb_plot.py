@@ -2533,6 +2533,7 @@ class PDBScientificPlotter:
         slope, intercept = np.polyfit(x, y, 1) if len(table) >= 2 else (np.nan, np.nan)
         axis_limit = max(float(np.max(x)), float(np.max(y)))
         marker_area_points = 12.0
+        marker_linewidth_points = 1.0
 
         def draw_scatter(ax: plt.Axes) -> None:
             """Draw entry-level RMSDs, linear regression, and correlations."""
@@ -2543,7 +2544,9 @@ class PDBScientificPlotter:
                 alpha=1.0,
                 facecolors="none",
                 edgecolors="#4c78a8",
-                linewidths=1.0,
+                linewidths=marker_linewidth_points,
+                clip_on=False,
+                zorder=3,
             )
             if len(table) >= 2:
                 x_values = np.linspace(0.0, axis_limit, 100)
@@ -2552,25 +2555,26 @@ class PDBScientificPlotter:
                     slope * x_values + intercept,
                     color="#d62728",
                     linewidth=2.0,
+                    zorder=4,
                 )
-            # Convert the circular marker radius from points to data units.  Add
-            # it to the shared upper limit so structures on either maximum are
-            # not clipped by the axes border.
+            # Convert the marker radius plus one full outline width from points
+            # to data units. Add that padding to both upper limits so circles on
+            # either maximum remain fully visible beyond their outlines.
             ax.set_xlim(0.0, axis_limit)
             ax.set_ylim(0.0, axis_limit)
             ax.set_aspect("equal", adjustable="box")
             ax.figure.canvas.draw()
-            marker_radius_pixels = (
-                np.sqrt(marker_area_points) * ax.figure.dpi / (2.0 * 72.0)
-            )
+            marker_padding_pixels = (
+                np.sqrt(marker_area_points) / 2.0 + marker_linewidth_points
+            ) * ax.figure.dpi / 72.0
             axes_extent = ax.get_window_extent()
             axes_size_pixels = min(axes_extent.width, axes_extent.height)
-            marker_radius_data = (
+            marker_padding_data = (
                 axis_limit
-                * marker_radius_pixels
-                / (axes_size_pixels - marker_radius_pixels)
+                * marker_padding_pixels
+                / (axes_size_pixels - marker_padding_pixels)
             )
-            padded_axis_limit = axis_limit + marker_radius_data
+            padded_axis_limit = axis_limit + marker_padding_data
             ax.set_xlim(0.0, padded_axis_limit)
             ax.set_ylim(0.0, padded_axis_limit)
             ax.xaxis.set_major_locator(MultipleLocator(5.0))

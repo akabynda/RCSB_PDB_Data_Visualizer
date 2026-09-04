@@ -1679,6 +1679,28 @@ class PlotOrchestrationTests(unittest.TestCase):
         self.assertEqual(render.call_count, 3)
         self.assertEqual(len(drawn_axes[0].collections), 1)
         self.assertEqual(len(drawn_axes[0].lines), 1)
+        scatter = drawn_axes[0].collections[0]
+        regression = drawn_axes[0].lines[0]
+        self.assertFalse(scatter.get_clip_on())
+        self.assertGreater(
+            scatter.get_zorder(),
+            max(spine.get_zorder() for spine in drawn_axes[0].spines.values()),
+        )
+        self.assertGreater(regression.get_zorder(), scatter.get_zorder())
+        axes_size_pixels = min(
+            drawn_axes[0].get_window_extent().width,
+            drawn_axes[0].get_window_extent().height,
+        )
+        marker_padding_pixels = (
+            np.sqrt(scatter.get_sizes()[0]) / 2.0 + scatter.get_linewidths()[0]
+        ) * drawn_axes[0].figure.dpi / 72.0
+        expected_limit = 6.0 + (
+            6.0
+            * marker_padding_pixels
+            / (axes_size_pixels - marker_padding_pixels)
+        )
+        self.assertAlmostEqual(drawn_axes[0].get_xlim()[1], expected_limit)
+        self.assertAlmostEqual(drawn_axes[0].get_ylim()[1], expected_limit)
         self.assertEqual(len(drawn_axes[1].patches), 1)
         self.assertGreaterEqual(len(drawn_axes[2].patches), 1)
 
