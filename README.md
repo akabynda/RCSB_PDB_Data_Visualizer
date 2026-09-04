@@ -10,14 +10,6 @@ This README contains the steps required to reproduce those results.
 - [Setup](#setup)
 - [Reproduce All Article Figures](#reproduce-all-article-figures)
 - [Reproduce Individual Article Figures](#reproduce-individual-article-figures)
-  - [Figure 1](#figure-1)
-  - [Figure 2](#figure-2)
-  - [Figure 3](#figure-3)
-  - [Figure 4](#figure-4)
-  - [Figure 5](#figure-5)
-  - [Figure 6](#figure-6)
-  - [Figure 7](#figure-7)
-  - [Figure 8](#figure-8)
 - [Long-Running Builds](#long-running-builds)
 - [Technical Reference](#technical-reference)
 - [License](#license)
@@ -52,13 +44,11 @@ source .venv/bin/activate
 python -m pip install -r requirements.txt
 ```
 
-Figures 3–7 also require STRIDE. On macOS and Linux no separate STRIDE setup is
-needed: the first STRIDE-dependent dataset command checks `PATH` and existing
-local builds, then downloads the pinned [upstream source][stride-repository]
-and builds it under
-`data/stride/867a5eb0f2479cb16615512a53ee472c54649505/<system>-<architecture>/`.
-Later commands on the same platform reuse that executable. The first build
-therefore needs access to GitHub plus Git, GNU Make, and a C compiler.
+Figures 3–7 also require STRIDE. On macOS and Linux, the first dependent command
+uses an installed or managed executable when available; otherwise it downloads
+the pinned [upstream source][stride-repository] and builds it under `data/stride/`.
+Later commands on the same platform reuse that executable. The first automatic
+build also needs GitHub access.
 
 If STRIDE is installed elsewhere, pass its executable explicitly. An invalid
 explicit path is reported as an error and does not trigger an automatic
@@ -70,7 +60,8 @@ download:
 
 Use `--stride-install-dir /another/directory` to change the root of the managed
 installation. Native Windows users should run the builder in WSL or provide a
-prebuilt executable explicitly.
+prebuilt executable explicitly. See the [technical STRIDE
+reference](src/README.md#stride) for lookup order, versioning, and cache details.
 
 ## Reproduce All Article Figures
 
@@ -97,8 +88,24 @@ a title and/or with open top and right axes are generated alongside it.
 ## Reproduce Individual Article Figures
 
 Run only the commands for the required figure to avoid building unrelated
-datasets. Figures 3–7 require STRIDE. Figures 6 and 7 use X-ray homologs at 100%
-sequence identity.
+datasets. Figures 6 and 7 use X-ray homologs at 100% sequence identity.
+
+The main output stems are listed below.
+
+| Figure | Main output stem(s) |
+| --- | --- |
+| 1 | `pdb_method_trends` |
+| 2A | `solution_nmr_mean_weight_by_year` |
+| 2B | `solution_nmr_area_share_by_weight_category` |
+| 3 | `solution_nmr_monomer_stride_modeled_first_model_by_year` |
+| 4 | `solution_nmr_monomer_precision_stride_modeled_first_model_median_rmsd_by_year` |
+| 5 | `solution_nmr_monomer_xray_homologs_95_timing_share_by_year` |
+| 6 | `solution_nmr_monomer_xray_min_median_rmsd_by_year` |
+| 7 | `solution_nmr_monomer_xray_min_rmsd_precision_correlation` |
+| 8A | `solution_nmr_monomer_quality_clashscore_by_year` |
+| 8B | `solution_nmr_monomer_quality_ramachandran_outliers_by_year` |
+| 8C | `solution_nmr_monomer_quality_sidechain_outliers_by_year` |
+| 8D | `solution_nmr_monomer_program_cluster_share_by_year` |
 
 ### Figure 1
 
@@ -107,10 +114,6 @@ python src/pdb_dataset_builder.py --datasets method_counts
 python src/pdb_plot.py --plots method_counts
 ```
 
-Output:
-
-- `figures/pdb_method_trends/pdb_method_trends.png`
-
 ### Figure 2
 
 ```bash
@@ -118,13 +121,6 @@ python src/pdb_dataset_builder.py --datasets solution_nmr_weights
 python src/pdb_plot.py \
   --plots solution_nmr_weight_stats,solution_nmr_period_area_share
 ```
-
-Outputs:
-
-- Figure 2A:
-  `figures/solution_nmr_mean_weight_by_year/solution_nmr_mean_weight_by_year.png`
-- Figure 2B:
-  `figures/solution_nmr_area_share_by_weight_category/solution_nmr_area_share_by_weight_category.png`
 
 ### Figure 3
 
@@ -135,10 +131,6 @@ python src/pdb_plot.py \
   --plots solution_nmr_monomer_stride_modeled_first_model
 ```
 
-Output:
-
-- `figures/solution_nmr_monomer_stride_modeled_first_model_by_year/solution_nmr_monomer_stride_modeled_first_model_by_year.png`
-
 ### Figure 4
 
 ```bash
@@ -148,88 +140,44 @@ python src/pdb_plot.py \
   --plots solution_nmr_monomer_precision_stride_modeled_first_model_median
 ```
 
-Output:
-
-- `figures/solution_nmr_monomer_precision_stride_modeled_first_model_median_rmsd_by_year/solution_nmr_monomer_precision_stride_modeled_first_model_median_rmsd_by_year.png`
-
 ### Figure 5
 
 ```bash
 python src/pdb_dataset_builder.py \
-  --datasets solution_nmr_monomer_xray_homologs
-python src/pdb_dataset_builder.py \
-  --datasets solution_nmr_monomer_xray_homologs_historical
+  --datasets solution_nmr_monomer_xray_homologs,solution_nmr_monomer_xray_homologs_historical
 python src/pdb_plot.py --plots solution_nmr_monomer_xray_homolog_timing_share
 ```
-
-Output:
-
-- `figures/solution_nmr_monomer_xray_homologs_95_timing_share_by_year/solution_nmr_monomer_xray_homologs_95_timing_share_by_year.png`
 
 ### Figure 6
 
 ```bash
 python src/pdb_dataset_builder.py \
-  --datasets solution_nmr_monomer_xray_homologs
-
-python src/pdb_dataset_builder.py \
-  --datasets solution_nmr_monomer_xray_rmsd \
-  --xray-rmsd-sequence-identity 100
-python src/pdb_dataset_builder.py \
-  --datasets solution_nmr_monomer_xray_rmsd_extremes \
+  --datasets solution_nmr_monomer_xray_homologs,solution_nmr_monomer_xray_rmsd,solution_nmr_monomer_xray_rmsd_extremes \
   --xray-rmsd-sequence-identity 100
 
 python src/pdb_plot.py --plots solution_nmr_monomer_xray_rmsd
 ```
 
-Output:
-
-- `figures/solution_nmr_monomer_xray_min_median_rmsd_by_year/solution_nmr_monomer_xray_min_median_rmsd_by_year.png`
-
 ### Figure 7
 
 ```bash
 python src/pdb_dataset_builder.py \
-  --datasets solution_nmr_monomer_precision_stride_modeled_first_model
-
-python src/pdb_dataset_builder.py \
-  --datasets solution_nmr_monomer_xray_homologs
-
-python src/pdb_dataset_builder.py \
-  --datasets solution_nmr_monomer_xray_rmsd_extremes \
+  --datasets solution_nmr_monomer_precision_stride_modeled_first_model,solution_nmr_monomer_xray_homologs,solution_nmr_monomer_xray_rmsd_extremes \
   --xray-rmsd-sequence-identity 100
 
 python src/pdb_plot.py \
   --plots solution_nmr_monomer_xray_rmsd_precision_correlation
 ```
 
-Output:
-
-- `figures/solution_nmr_monomer_xray_min_rmsd_precision_correlation/solution_nmr_monomer_xray_min_rmsd_precision_correlation.png`
-
 ### Figure 8
 
 ```bash
 python src/pdb_dataset_builder.py \
-  --datasets solution_nmr_monomer_quality
-
-python src/pdb_dataset_builder.py \
-  --datasets solution_nmr_monomer_program_clusters
+  --datasets solution_nmr_monomer_quality,solution_nmr_monomer_program_clusters
 
 python src/pdb_plot.py \
   --plots solution_nmr_monomer_quality,solution_nmr_monomer_program_clusters
 ```
-
-Outputs:
-
-- Figure 8A:
-  `figures/solution_nmr_monomer_quality_clashscore_by_year/solution_nmr_monomer_quality_clashscore_by_year.png`
-- Figure 8B:
-  `figures/solution_nmr_monomer_quality_ramachandran_outliers_by_year/solution_nmr_monomer_quality_ramachandran_outliers_by_year.png`
-- Figure 8C:
-  `figures/solution_nmr_monomer_quality_sidechain_outliers_by_year/solution_nmr_monomer_quality_sidechain_outliers_by_year.png`
-- Figure 8D:
-  `figures/solution_nmr_monomer_program_cluster_share_by_year/solution_nmr_monomer_program_cluster_share_by_year.png`
 
 ## Long-Running Builds
 

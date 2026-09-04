@@ -32,9 +32,9 @@ python -m pytest -q \
   test/test_pdb_cache.py::SafePDBCacheTests::test_fresh_metadata_avoids_another_remote_request
 ```
 
-The tests use temporary files and mocked API responses; they do not modify the
-datasets or figures in the repository. STRIDE bootstrap tests also mock Git and
-GNU Make, so the test suite never downloads or compiles STRIDE.
+The tests use temporary files and mocked APIs, while STRIDE bootstrap tests also
+mock Git and GNU Make; no repository dataset or figure is modified, and STRIDE is
+never downloaded or compiled.
 
 ## License
 
