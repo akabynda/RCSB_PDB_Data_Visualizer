@@ -570,8 +570,10 @@ Output:
 Builds a query from every modeled first-model CA position between the STRIDE
 core endpoints. The query must contain at least 11 residues. RCSB Search uses a
 protein-sequence identity cutoff of 0.95 or 1.0, an E-value cutoff of 0.1, and an
-`X-RAY DIFFRACTION` condition. This search can therefore return X-ray hybrids;
-it is not an exact single-method filter.
+`X-RAY DIFFRACTION` condition. Every returned entry is then checked against its
+complete experimental-method list, and only entries whose sole method is
+`X-RAY DIFFRACTION` are retained. X-ray hybrids with any additional method are
+excluded before coordinate evaluation.
 
 Every chain of each candidate polymer entity is then checked against its
 first-model coordinates.
@@ -588,14 +590,14 @@ first-model coordinates.
 - Missing resolution does not exclude a candidate. Resolution is not stored in
   the homolog CSV; downstream RMSD outputs write a missing value as `nan`.
 
-Every RCSB sequence hit for which no chain has an eligible modeled-core match
-is written to the cutoff-specific `*_rejected.csv` report. The report has one
-row per NMR/X-ray polymer-entity pair and records the NMR chain and core, X-ray
-entry/entity and chains, cutoff, and rejection reason. A candidate is not
-reported as rejected when any of its chains contains a clean matching region.
-Metadata or coordinate errors make the evaluation inconclusive and continue to
-fail/retry the complete NMR entry instead of being recorded as a normal
-rejection.
+Every exact single-method X-ray sequence hit for which no chain has an eligible
+modeled-core match is written to the cutoff-specific `*_rejected.csv` report.
+The report has one row per NMR/X-ray polymer-entity pair and records the NMR
+chain and core, X-ray entry/entity and chains, cutoff, and rejection reason. A
+candidate is not reported as rejected when any of its chains contains a clean
+matching region. Metadata or coordinate errors make the evaluation
+inconclusive and continue to fail/retry the complete NMR entry instead of being
+recorded as a normal rejection.
 
 Within one NMR seed, the 95% and 100% passes share fetched candidate metadata
 and use the same durable, versioned first-model X-ray CA cache. This avoids

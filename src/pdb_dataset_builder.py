@@ -4621,7 +4621,7 @@ class RCSBClient:
         sequence: str,
         sequence_identity_percent: int,
     ) -> list[str]:
-        """Search RCSB for X-ray polymer entities matching a query sequence."""
+        """Search RCSB for exact single-method X-ray sequence matches."""
         if sequence_identity_percent not in {95, 100}:
             raise ValueError("sequence_identity_percent must be 95 or 100")
         sequence = "".join(sequence.split()).upper()
@@ -4725,7 +4725,27 @@ class RCSBClient:
             start += len(batch_ids)
             if not batch_ids:
                 break
-        return entity_ids
+
+        entry_ids = list(
+            dict.fromkeys(
+                entity_id.split("_", 1)[0].strip()
+                for entity_id in entity_ids
+                if entity_id.split("_", 1)[0].strip()
+            )
+        )
+        exact_xray_entry_ids: set[str] = set()
+        for entry_id_batch in chunked(entry_ids, self.config.graphql_batch_size):
+            exact_xray_entry_ids.update(
+                self._filter_entry_ids_by_exact_single_method(
+                    entry_ids=entry_id_batch,
+                    method_value="X-RAY DIFFRACTION",
+                )
+            )
+        return [
+            entity_id
+            for entity_id in entity_ids
+            if entity_id.split("_", 1)[0].strip() in exact_xray_entry_ids
+        ]
 
     def fetch_solution_nmr_weight_records_for_ids(
         self, entry_ids: list[str]

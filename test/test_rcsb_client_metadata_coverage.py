@@ -422,13 +422,53 @@ class RCSBClientMetadataTests(unittest.TestCase):
             ],
         }
         self.client.session.post.side_effect = [throttled, successful]
-        with patch.object(builder.time, "sleep") as sleep:
+        with (
+            patch.object(builder.time, "sleep") as sleep,
+            patch.object(
+                self.client,
+                "_filter_entry_ids_by_exact_single_method",
+                return_value=["1ABC", "2DEF"],
+            ),
+        ):
             result = self.client.fetch_xray_polymer_entity_ids_by_sequence(
                 " acdefghikL ", 95
             )
         self.assertEqual(result, ["1ABC_1", "2DEF_2"])
         sleep.assert_called_once_with(self.client.config.backoff_seconds)
         successful.raise_for_status.assert_called_once_with()
+
+    def test_sequence_search_keeps_only_exact_single_method_xray_hits(self) -> None:
+        """Discard hybrid entries while preserving sequence-hit entity order."""
+        response = Mock(status_code=200, text="")
+        response.json.return_value = {
+            "total_count": 3,
+            "result_set": [
+                {"identifier": "2HYB_1"},
+                {"identifier": "1PURE_2"},
+                {"identifier": "1PURE_1"},
+            ],
+        }
+        self.client.session = Mock()
+        self.client.session.post.return_value = response
+
+        with patch.object(
+            self.client,
+            "_filter_entry_ids_by_exact_single_method",
+            return_value=["1PURE"],
+        ) as exact_method_filter:
+            result = self.client.fetch_xray_polymer_entity_ids_by_sequence(
+                "ACDEFGHIKL", 100
+            )
+
+        self.assertEqual(result, ["1PURE_2", "1PURE_1"])
+        exact_method_filter.assert_called_once()
+        call = exact_method_filter.call_args
+        entry_ids = call.kwargs.get("entry_ids", call.args[0] if call.args else None)
+        method_value = call.kwargs.get(
+            "method_value", call.args[1] if len(call.args) > 1 else None
+        )
+        self.assertCountEqual(entry_ids, ["2HYB", "1PURE"])
+        self.assertEqual(method_value, "X-RAY DIFFRACTION")
 
     def test_sequence_search_handles_empty_http_outcomes_and_transport_failure(
         self,
