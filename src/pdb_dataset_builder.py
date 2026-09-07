@@ -274,7 +274,7 @@ DEFAULT_STRIDE_INSTALL_DIR = Path("data/stride")
 DEFAULT_PDB_CACHE_VALIDATION_HOURS = 24.0
 PDB_CACHE_METADATA_SCHEMA_VERSION = 1
 XRAY_CA_CACHE_SCHEMA_VERSION = 1
-XRAY_CA_PARSER_REVISION = 1
+XRAY_CA_PARSER_REVISION = 2
 STRIDE_REPOSITORY_URL = "https://github.com/MDAnalysis/stride.git"
 STRIDE_SOURCE_REVISION = "867a5eb0f2479cb16615512a53ee472c54649505"
 STRIDE_SETUP_TIMEOUT_SECONDS = 300.0
@@ -2693,7 +2693,7 @@ def parse_first_model_ca_residue_sequence(
 def _parse_first_model_ca_line_fields(
     line: str,
 ) -> tuple[str, int, str, str, float, str] | None:
-    """Parse CA fields, with a fallback for nonstandard long component IDs."""
+    """Parse carbon CA fields, including nonstandard long component IDs."""
     atom_name = line[12:16].strip()
     if atom_name != "CA":
         return None
@@ -2711,27 +2711,31 @@ def _parse_first_model_ca_line_fields(
     if resid is not None:
         if occupancy == float("-inf"):
             return None
-        return atom_chain, resid, insertion_code, alt_loc, occupancy, resname
+    else:
+        parts = line.split()
+        if len(parts) < 10 or parts[2] != "CA":
+            return None
+        match = re.fullmatch(r"(-?\d+)([A-Za-z]?)", parts[5])
+        if match is None:
+            return None
+        try:
+            resid = int(match.group(1))
+            occupancy = float(parts[9])
+        except ValueError:
+            return None
+        atom_chain = parts[4]
+        insertion_code = match.group(2)
+        alt_loc = ""
+        resname = parts[3]
 
-    parts = line.split()
-    if len(parts) < 10 or parts[2] != "CA":
+    # Long component IDs shift the element field along with the other columns.
+    # Keep carbon HETATM records (modified amino acids), but never calcium ions,
+    # including legacy records that omit the element field entirely.
+    element_column = 76 + max(0, len(resname) - 3)
+    element = line[element_column : element_column + 2].strip().upper()
+    if resname.upper() == "CA" or (element and element != "C"):
         return None
-    match = re.fullmatch(r"(-?\d+)([A-Za-z]?)", parts[5])
-    if match is None:
-        return None
-    try:
-        fallback_resid = int(match.group(1))
-        fallback_occupancy = float(parts[9])
-    except ValueError:
-        return None
-    return (
-        parts[4],
-        fallback_resid,
-        match.group(2),
-        "",
-        fallback_occupancy,
-        parts[3],
-    )
+    return atom_chain, resid, insertion_code, alt_loc, occupancy, resname
 
 
 def parse_first_model_ca_residues(

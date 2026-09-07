@@ -24,12 +24,13 @@ def _ca_line(
     y: float,
     z: float,
     occupancy: float = 1.0,
+    element: str = "C",
 ) -> str:
     """Return one fixed-column PDB alpha-carbon record."""
     return (
         f"{record:<6}{serial:5d}  CA  {resname:>3} {chain_id}{resid:4d}    "
         f"{x:8.3f}{y:8.3f}{z:8.3f}{occupancy:6.2f}{20.0:6.2f}"
-        "           C\n"
+        f"          {element:>2}\n"
     )
 
 
@@ -84,6 +85,84 @@ class XrayCaCacheTests(unittest.TestCase):
         np.testing.assert_allclose(second_coords[1], [1.0, 2.0, 3.0])
         np.testing.assert_allclose(second_coords[2], [4.0, 5.0, 6.0])
         self.assertEqual(set(first_coords), set(second_coords))
+
+    def test_calcium_is_excluded_from_all_chains_and_disk_cache(self) -> None:
+        """Keep protein and modified CA records without storing calcium ions."""
+        self.pdb_path.write_text(
+            _ca_line("ATOM", 1, "ALA", "A", 1, 1.0, 2.0, 3.0)
+            + _ca_line("HETATM", 2, "CA", "A", 1, 9.0, 9.0, 9.0, element="CA")
+            + _ca_line("HETATM", 3, "CA", "A", 2, 9.0, 9.0, 9.0, element="CA")
+            + _ca_line("HETATM", 4, "MSE", "A", 3, 4.0, 5.0, 6.0)
+            + _ca_line("ATOM", 5, "GLY", "B", 7, 7.0, 8.0, 9.0, element="")
+            + _ca_line("HETATM", 6, "CA", "B", 8, 9.0, 9.0, 9.0, element="")
+            + _ca_line("HETATM", 7, "CA", "C", 1, 9.0, 9.0, 9.0, element="CA"),
+            encoding="utf-8",
+        )
+        with patch.object(
+            builder,
+            "_parse_first_model_ca_data_by_chain",
+            wraps=builder._parse_first_model_ca_data_by_chain,
+        ) as parse_source:
+            initial = builder.load_cached_first_model_ca_data(self.pdb_path, "A")
+            cached = builder.load_cached_first_model_ca_data(self.pdb_path, "A")
+            records_b, coords_b = builder.load_cached_first_model_ca_data(
+                self.pdb_path, "B"
+            )
+            records_c, coords_c = builder.load_cached_first_model_ca_data(
+                self.pdb_path, "C"
+            )
+
+        self.assertEqual(parse_source.call_count, 1)
+        self.assertEqual(initial[0], cached[0])
+        for records_a, coords_a in (initial, cached):
+            self.assertEqual([record.resid for record in records_a], [1, 3])
+            self.assertEqual(
+                [record.has_hetatm_ca for record in records_a], [False, True]
+            )
+            self.assertEqual(set(coords_a), {1, 3})
+            np.testing.assert_allclose(coords_a[1], [1.0, 2.0, 3.0])
+        self.assertEqual([record.resid for record in records_b], [7])
+        self.assertFalse(records_b[0].has_hetatm_ca)
+        self.assertEqual(set(coords_b), {7})
+        self.assertEqual(records_c, ())
+        self.assertEqual(coords_c, {})
+
+    def test_cache_from_calcium_counting_parser_is_rebuilt(self) -> None:
+        """Invalidate revision 1 even when its source SHA still matches."""
+        self.pdb_path.write_text(
+            _ca_line("ATOM", 1, "ALA", "A", 1, 1.0, 2.0, 3.0)
+            + _ca_line("HETATM", 2, "CA", "A", 2, 9.0, 9.0, 9.0, element="CA"),
+            encoding="utf-8",
+        )
+        cache_path = builder._first_model_ca_cache_path(self.pdb_path)
+        contaminated_records = (
+            builder.CAResidueRecord(1, "A", True),
+            builder.CAResidueRecord(2, "HET:CA", False, has_hetatm_ca=True),
+        )
+        with patch.object(builder, "XRAY_CA_PARSER_REVISION", 1):
+            builder._write_first_model_ca_cache(
+                cache_path,
+                builder._coordinate_source_sha256(self.pdb_path),
+                {"A": (contaminated_records, {1: np.ones(3), 2: np.ones(3)})},
+            )
+
+        with patch.object(
+            builder,
+            "_parse_first_model_ca_data_by_chain",
+            wraps=builder._parse_first_model_ca_data_by_chain,
+        ) as parse_source:
+            records, coords = builder.load_cached_first_model_ca_data(
+                self.pdb_path, "A"
+            )
+
+        self.assertEqual(parse_source.call_count, 1)
+        self.assertEqual([record.resid for record in records], [1])
+        self.assertEqual(set(coords), {1})
+        np.testing.assert_allclose(coords[1], [1.0, 2.0, 3.0])
+        with np.load(cache_path, allow_pickle=False) as payload:
+            self.assertEqual(
+                payload["parser_revision"].item(), builder.XRAY_CA_PARSER_REVISION
+            )
 
     def test_second_chain_uses_same_whole_file_parse(self) -> None:
         """Parse all first-model chains once and serve each chain from one cache."""
