@@ -14,6 +14,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import textwrap
 import time
 import uuid
 import warnings
@@ -21,6 +22,7 @@ import requests
 import numpy as np
 from Bio import BiopythonWarning
 from Bio.PDB import MMCIFParser, PDBIO, PDBParser, Select
+from Bio.PDB.MMCIF2Dict import MMCIF2Dict
 from Bio.PDB.PDBExceptions import PDBConstructionWarning
 from Bio.SeqUtils import seq1
 from collections import Counter
@@ -1530,6 +1532,7 @@ def _download_pdb_if_needed_locked(
                     ) as pdb_handle:
                         temp_pdb_path = Path(pdb_handle.name)
                     io.save(str(temp_pdb_path))
+                    _prepend_mmcif_software_remarks(temp_pdb_path, cif_path)
                     temp_pdb_path.replace(path)
                 finally:
                     if temp_pdb_path is not None:
@@ -2019,6 +2022,7 @@ def _download_pdb_chain_subset_if_needed_locked(
             str(temp_subset_path),
             select=ChainSubsetSelect(selected_chain_object_ids),
         )
+        _prepend_mmcif_software_remarks(temp_subset_path, cif_path)
         temp_subset_path.replace(path)
     finally:
         if temp_subset_path is not None:
@@ -2200,8 +2204,73 @@ def _normalize_refinement_program_name(raw_value: str) -> str | None:
     return token
 
 
+def extract_raw_refinement_program_text_from_mmcif(cif_path: Path) -> str:
+    """Read NMR software names and versions, retaining their deposited order."""
+    try:
+        metadata = MMCIF2Dict(str(cif_path))
+    except (OSError, ValueError) as exc:
+        LOGGER.warning(
+            "Failed to read NMR software metadata from %s: %s", cif_path, exc
+        )
+        return ""
+
+    names = metadata.get("_pdbx_nmr_software.name", [])
+    versions = metadata.get("_pdbx_nmr_software.version", [])
+    values: list[str] = []
+    for index, raw_name in enumerate(names):
+        name = " ".join(raw_name.split())
+        if name == "." or name.upper() in PROGRAM_EMPTY_VALUES:
+            continue
+        version = " ".join(versions[index].split()) if index < len(versions) else ""
+        if version == "." or version.upper() in PROGRAM_EMPTY_VALUES:
+            version = ""
+        values.append(f"{name} {version}" if version else name)
+
+    # One program can have several roles (e.g. calculation and refinement).
+    return " || ".join(dict.fromkeys(values))
+
+
+def _prepend_mmcif_software_remarks(pdb_path: Path, cif_path: Path) -> None:
+    """Atomically add NMR software remarks while preserving coordinate bytes."""
+    if pdb_path.stat().st_size == 0:
+        return
+    if extract_raw_refinement_program_text_from_pdb(pdb_path):
+        return
+    program_text = extract_raw_refinement_program_text_from_mmcif(cif_path)
+    if not program_text:
+        return
+    prefix = "REMARK 210   SOFTWARE USED                 : "
+    remarks = textwrap.fill(
+        program_text,
+        width=80,
+        initial_indent=prefix,
+        subsequent_indent="REMARK 210".ljust(len(prefix)),
+        break_long_words=False,
+        break_on_hyphens=False,
+    )
+    temp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "wb",
+            prefix=f".{pdb_path.name}.",
+            suffix=".software.tmp",
+            dir=str(pdb_path.parent),
+            delete=False,
+        ) as handle:
+            temp_path = Path(handle.name)
+            handle.write((remarks + "\n").encode("utf-8"))
+            with pdb_path.open("rb") as source:
+                shutil.copyfileobj(source, handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        temp_path.replace(pdb_path)
+    finally:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
+
+
 def extract_raw_refinement_program_text_from_pdb(pdb_path: Path) -> str:
-    """Extract program text from REMARK 3 and REMARK 210 SOFTWARE USED."""
+    """Read software text stored directly in REMARK 3 and REMARK 210."""
     values: list[str] = []
     nmr_software_parts: list[str] = []
     collecting_nmr_software = False

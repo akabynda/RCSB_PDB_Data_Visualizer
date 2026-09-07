@@ -529,6 +529,189 @@ def test_pdb_404_routes_fall_back_to_mmcif_and_convert_real_structure(
     ]
 
 
+def test_converted_mmcif_keeps_software_available_to_cached_cluster_builder(
+    tmp_path: Path,
+) -> None:
+    """PDBIO conversion must not turn deposited NMR software into OTHER."""
+    not_found = [_Response(404) for _ in builder._pdb_download_sources("1ABC")]
+    cif_bytes = _minimal_mmcif() + (
+        "loop_\n"
+        "_pdbx_nmr_software.name\n"
+        "_pdbx_nmr_software.version\n"
+        "_pdbx_nmr_software.classification\n"
+        "CYANA 3.98 'structure calculation'\n"
+        "Rosetta ? refinement\n"
+        "#\n"
+    ).encode("utf-8")
+    session = _Session([*not_found, _Response(200, cif_bytes)])
+    config = builder.DatasetBuildConfig(retries=1)
+    path = builder.download_pdb_if_needed(
+        session=session,  # type: ignore[arg-type]
+        config=config,
+        cache_dir=tmp_path,
+        entry_id="1ABC",
+    )
+
+    pdb_text = path.read_text(encoding="utf-8")
+    assert "REMARK 210" in pdb_text
+    assert "SOFTWARE USED" in pdb_text
+    assert pdb_text.index("SOFTWARE USED") < pdb_text.index("ATOM")
+    # The converted PDB is a standalone artifact, including when its source
+    # mmCIF is no longer available to the program extractor's fallback.
+    (tmp_path / "1ABC.cif").unlink()
+    assert builder.extract_raw_refinement_program_text_from_pdb(path) == (
+        "CYANA 3.98 || Rosetta"
+    )
+    assert builder.extract_refinement_programs_from_pdb(path) == {"CYANA", "ROSETTA"}
+    quality = builder.SolutionNMRMonomerQualityRecord(
+        entry_id="1ABC",
+        year=2023,
+        clashscore=3.0,
+        ramachandran_outliers_percent=1.0,
+        sidechain_outliers_percent=2.0,
+    )
+    client = MagicMock(session=session)
+    request_count = len(session.calls)
+
+    assignments, _ = builder.SolutionNMRMonomerProgramClusterBuilder(
+        quality_records=[quality],
+        cache_dir=tmp_path,
+        max_workers=1,
+        client=client,
+        config=config,
+    ).build()
+
+    assert len(session.calls) == request_count
+    assert len(assignments) == 1
+    assert assignments[0].cluster_name == "CYANA"
+    assert assignments[0].cluster_score == 1.0
+    assert assignments[0].has_program_text
+    assert assignments[0].program_text == "CYANA 3.98 || Rosetta"
+
+
+@pytest.mark.parametrize("conversion", ["full", "subset"])
+def test_mmcif_conversion_embeds_wrapped_software_without_changing_coordinates(
+    tmp_path: Path,
+    conversion: str,
+) -> None:
+    """Both conversion routes retain software in a portable multi-model PDB."""
+    cif_bytes = _minimal_mmcif().replace(
+        b"ATOM 1 C CA . ALA LONG 1 1 ? 0 0 0 1.00 10 ? 1 ALA LONG CA 1\n",
+        (
+            "ATOM 1 C CA . ALA LONG 1 1 ? 1 2 3 1.00 10 ? 1 ALA LONG CA 1\n"
+            "ATOM 2 C CA . GLY OTHER 2 1 ? 4 5 6 1.00 10 ? 7 GLY OTHER CA 1\n"
+            "ATOM 3 C CA . ALA LONG 1 1 ? 7 8 9 1.00 10 ? 1 ALA LONG CA 2\n"
+            "ATOM 4 C CA . GLY OTHER 2 1 ? 10 11 12 1.00 10 ? 7 GLY OTHER CA 2\n"
+        ).encode("utf-8"),
+    ) + (
+        "loop_\n"
+        "_pdbx_nmr_software.name\n"
+        "_pdbx_nmr_software.version\n"
+        "_pdbx_nmr_software.classification\n"
+        "CYANA 3.98 'structure calculation'\n"
+        "'X-PLOR NIH' 2.9 refinement\n"
+        "ARIA 2.3 'structure calculation'\n"
+        "NMRFAM-SPARKY 1.414 processing\n"
+        "Rosetta 2026.17 refinement\n"
+        "#\n"
+    ).encode("utf-8")
+    expected_program_text = (
+        "CYANA 3.98 || X-PLOR NIH 2.9 || ARIA 2.3 || "
+        "NMRFAM-SPARKY 1.414 || Rosetta 2026.17"
+    )
+    config = builder.DatasetBuildConfig(retries=1)
+    if conversion == "full":
+        session = _Session(
+            [
+                *[_Response(404) for _ in builder._pdb_download_sources("1ABC")],
+                _Response(200, cif_bytes),
+            ]
+        )
+        path = builder.download_pdb_if_needed(
+            session=session,  # type: ignore[arg-type]
+            config=config,
+            cache_dir=tmp_path,
+            entry_id="1ABC",
+        )
+        expected_chain_map = {"LONG": "L", "OTHER": "O"}
+    else:
+        session = _Session([_Response(200, gzip.compress(cif_bytes))])
+        path, chain_map = builder.download_pdb_chain_subset_if_needed(
+            session=session,  # type: ignore[arg-type]
+            config=config,
+            cache_dir=tmp_path,
+            entry_id="1ABC",
+            chain_ids=["LONG"],
+        )
+        expected_chain_map = {"LONG": "L"}
+        assert chain_map == expected_chain_map
+
+    pdb_text = path.read_text(encoding="utf-8")
+    remarks = [line for line in pdb_text.splitlines() if line.startswith("REMARK")]
+    assert remarks
+    assert all(line.startswith("REMARK 210") and len(line) <= 80 for line in remarks)
+    assert any("SOFTWARE USED" in line for line in remarks)
+    assert any("SOFTWARE USED" not in line for line in remarks)
+    assert pdb_text.rindex("REMARK") < pdb_text.index("MODEL")
+
+    metadata = json.loads(
+        builder._pdb_cache_metadata_path(path).read_text(encoding="utf-8")
+    )
+    assert metadata["chain_id_map"] == expected_chain_map
+    assert metadata["sha256"] == hashlib.sha256(path.read_bytes()).hexdigest()
+    assert metadata["size_bytes"] == path.stat().st_size
+    assert metadata["mtime_ns"] == path.stat().st_mtime_ns
+
+    # Moving just the output rules out all sibling-mmCIF recovery paths.
+    portable_dir = tmp_path / "portable"
+    portable_dir.mkdir()
+    portable_pdb_path = portable_dir / "renamed.pdb"
+    portable_pdb_path.write_bytes(path.read_bytes())
+    (tmp_path / "1ABC.cif").unlink()
+    assert builder.extract_raw_refinement_program_text_from_pdb(portable_pdb_path) == (
+        expected_program_text
+    )
+    assert builder.extract_refinement_programs_from_pdb(portable_pdb_path) == {
+        "CYANA",
+        "X-PLOR NIH",
+        "ARIA",
+        "NMRFAM-SPARKY",
+        "ROSETTA",
+    }
+    assert builder.extract_solution_nmr_program_clusters(expected_program_text) == [
+        ("CLUSTER4", "CYANA"),
+        ("CLUSTER8", "XPLOR_NIH"),
+        ("CLUSTER2", "ARIA"),
+    ]
+    structure = builder.parse_pdb_structure("1ABC", portable_pdb_path)
+    atoms = [
+        (
+            model.serial_num,
+            chain.id,
+            residue.id[1],
+            atom.name,
+            atom.element,
+            tuple(atom.coord),
+        )
+        for model in structure
+        for chain in model
+        for residue in chain
+        for atom in residue
+    ]
+    expected_atoms = [
+        (1, "L", 1, "CA", "C", (1.0, 2.0, 3.0)),
+        (2, "L", 1, "CA", "C", (7.0, 8.0, 9.0)),
+    ]
+    if conversion == "full":
+        expected_atoms = [
+            expected_atoms[0],
+            (1, "O", 7, "CA", "C", (4.0, 5.0, 6.0)),
+            expected_atoms[1],
+            (2, "O", 7, "CA", "C", (10.0, 11.0, 12.0)),
+        ]
+    assert atoms == expected_atoms
+
+
 def test_pdb_fallback_without_chains_removes_obsolete_chain_map(
     tmp_path: Path,
 ) -> None:

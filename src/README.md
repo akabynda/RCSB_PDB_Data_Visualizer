@@ -72,6 +72,12 @@ converted to per-chain PDB subsets. The cache also stores the resulting chain-ID
 mapping. Per-chain subset PDBs and chain-ID mappings are installed through
 unique temporary files and atomic replacement.
 
+Both full mmCIF-to-PDB conversions and per-chain subsets write NMR software
+names and versions into `REMARK 210 SOFTWARE USED` before the coordinates.
+Software metadata can therefore be extracted from the resulting PDB without
+the source mmCIF. This applies to newly converted files; existing cache files
+are reused as-is.
+
 A per-chain subset is reused only when its requested chain set and source mmCIF
 SHA-256 still match. Its chain-ID mapping is also embedded in the metadata
 transaction, so an absent or truncated mapping cannot be combined with an
@@ -349,8 +355,13 @@ the cache, and extracts refinement program names from PDB remarks. The output
 shows refinement-program usage by year.
 
 Program names from `REMARK 3 PROGRAM` and wrapped `REMARK 210 SOFTWARE USED`
-fields are normalized before counting. Each entry contributes once to each
-distinct normalized name it reports.
+fields are normalized before counting. During mmCIF-to-PDB conversion,
+`_pdbx_nmr_software.name` and optional `.version` are transferred to
+`REMARK 210 SOFTWARE USED`. Missing mmCIF values (`?` and `.`) are ignored, and
+repeated name/version pairs are deduplicated. All reported NMR software roles
+are included, matching the scope of `SOFTWARE USED`. Long fields are wrapped
+at word boundaries into continuation lines. Each entry contributes once to
+each distinct normalized name it reports.
 
 Output:
 
@@ -363,9 +374,10 @@ Useful options:
 ### `solution_nmr_monomer_program_clusters`
 
 Assigns SOLUTION NMR protein monomers to refinement-program clusters using PDB
-`REMARK 3 PROGRAM` and `REMARK 210 SOFTWARE USED`. If a structure names `n`
-known clusters, each receives a score of `1/n`, so the total score remains `1`.
-`OTHER` is used only when no known cluster is found.
+`REMARK 3 PROGRAM` and `REMARK 210 SOFTWARE USED`, including software carried
+over during mmCIF conversion. If a structure names `n` known clusters, each
+receives a score of `1/n`, so the total score remains `1`. `OTHER` is used only
+when no known cluster is found.
 
 Wrapped `REMARK 210` fields are joined before matching. Program-aware boundaries
 prevent unrelated names such as `VARIAN` and `DISCOVERY STUDIO` from matching
