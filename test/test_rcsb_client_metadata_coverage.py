@@ -12,6 +12,10 @@ from unittest.mock import Mock, patch
 import requests
 
 from src import pdb_dataset_builder as builder
+from src.dataset.client import homology as homology_client
+from src.dataset.client import nmr as nmr_client
+from src.dataset.client import nmr_stride as stride_client
+from src.dataset.client import search as search_client
 
 
 class RCSBClientMetadataTests(unittest.TestCase):
@@ -247,7 +251,7 @@ class RCSBClientMetadataTests(unittest.TestCase):
                 }
             }
         )
-        with patch.object(builder, "_record_filtered_structure") as record:
+        with patch.object(search_client, "_record_filtered_structure") as record:
             result = self.client._filter_entry_ids_by_exact_single_method(
                 ["VALID", "BAD_PROTEIN", "MISSING"], "SOLUTION NMR"
             )
@@ -478,7 +482,7 @@ class RCSBClientMetadataTests(unittest.TestCase):
             ],
         }
         self.client.session.post.side_effect = [throttled, successful]
-        with patch.object(builder.time, "sleep") as sleep:
+        with patch.object(homology_client.time, "sleep") as sleep:
             result = self.client.fetch_xray_polymer_entity_ids_by_sequence(
                 " acdefghikL ", 95
             )
@@ -539,7 +543,7 @@ class RCSBClientMetadataTests(unittest.TestCase):
         failing.session = Mock()
         failing.session.post.side_effect = requests.Timeout("offline")
         with (
-            patch.object(builder.time, "sleep") as sleep,
+            patch.object(homology_client.time, "sleep") as sleep,
             self.assertRaisesRegex(RuntimeError, "failed after 2 attempts"),
         ):
             failing.fetch_xray_polymer_entity_ids_by_sequence("A" * 10, 95)
@@ -660,16 +664,16 @@ class RCSBClientMetadataTests(unittest.TestCase):
                 return_value=context,
             ),
             patch.object(
-                builder, "download_pdb_if_needed", return_value=Path(tmpdir) / "x.pdb"
+                stride_client, "download_pdb_if_needed", return_value=Path(tmpdir) / "x.pdb"
             ),
-            patch.object(builder, "load_cached_chain_id_map", return_value={"A": "Z"}),
+            patch.object(stride_client, "load_cached_chain_id_map", return_value={"A": "Z"}),
             patch.object(
-                builder,
+                stride_client,
                 "parse_first_model_modeled_ca_auth_seq_ids",
                 return_value={10, 11},
             ),
             patch.object(
-                builder,
+                stride_client,
                 "compute_stride_state_coverages_for_chain_modeled_first_model",
                 return_value=(coverages, 2, 1),
             ),
@@ -744,9 +748,9 @@ class RCSBClientMetadataTests(unittest.TestCase):
                 "_download_solution_nmr_monomer_pdb_if_needed",
                 return_value=Path("one.pdb"),
             ),
-            patch.object(builder, "load_cached_chain_id_map", return_value={}),
+            patch.object(nmr_client, "load_cached_chain_id_map", return_value={}),
             patch.object(
-                builder,
+                nmr_client,
                 "parse_models_ca_coords_with_stats",
                 return_value=([{1: Mock()}], [{1: 1}]),
             ),

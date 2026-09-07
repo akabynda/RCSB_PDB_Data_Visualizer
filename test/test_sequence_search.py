@@ -133,7 +133,7 @@ class SequenceSearchTests(unittest.TestCase):
             completed: list[tuple[str, str]] = []
             with (
                 patch(
-                    "src.pdb_dataset_builder.fetch_solution_nmr_entry_ids",
+                    "src.dataset.builders.homologs.fetch_solution_nmr_entry_ids",
                     return_value=["1AAA", "2BBB"],
                 ),
                 patch.object(builder, "_build_record_pair", side_effect=record_pair),
@@ -205,7 +205,7 @@ class SequenceSearchTests(unittest.TestCase):
             ] = []
             with (
                 patch(
-                    "src.pdb_dataset_builder.fetch_solution_nmr_entry_ids",
+                    "src.dataset.builders.homologs.fetch_solution_nmr_entry_ids",
                     return_value=[seed.entry_id],
                 ),
                 patch.object(builder, "_build_record_pair", return_value=built_pair),
@@ -274,7 +274,7 @@ class SequenceSearchTests(unittest.TestCase):
 
             with (
                 patch(
-                    "src.pdb_dataset_builder.fetch_solution_nmr_entry_ids",
+                    "src.dataset.builders.homologs.fetch_solution_nmr_entry_ids",
                     return_value=["1AAA", "2BBB"],
                 ),
                 patch.object(builder, "_build_record_pair", side_effect=record_pair),
@@ -315,7 +315,7 @@ class SequenceSearchTests(unittest.TestCase):
 
             with (
                 patch(
-                    "src.pdb_dataset_builder.fetch_solution_nmr_entry_ids",
+                    "src.dataset.builders.homologs.fetch_solution_nmr_entry_ids",
                     return_value=["1AAA"],
                 ),
                 patch.object(
@@ -429,11 +429,11 @@ class SequenceSearchTests(unittest.TestCase):
 
             with (
                 patch(
-                    "src.pdb_dataset_builder.download_pdb_if_needed",
+                    "src.dataset.builders.homologs.download_pdb_if_needed",
                     return_value=pdb_path,
                 ),
                 patch(
-                    "src.pdb_dataset_builder.compute_stride_core_range_for_modeled_auth_seq_ids_in_first_model",
+                    "src.dataset.builders.homologs.compute_stride_core_range_for_modeled_auth_seq_ids_in_first_model",
                     return_value=(1, 12),
                 ),
             ):
@@ -555,7 +555,7 @@ class SequenceSearchTests(unittest.TestCase):
             seed = SolutionNMRMonomerXrayHomologSeedRecord("1ABC", 2000, "A")
 
             with patch(
-                "src.pdb_dataset_builder.download_pdb_if_needed",
+                "src.dataset.builders.homologs.download_pdb_if_needed",
                 return_value=pdb_path,
             ):
                 with self.assertRaisesRegex(
@@ -590,11 +590,11 @@ class SequenceSearchTests(unittest.TestCase):
 
             with (
                 patch(
-                    "src.pdb_dataset_builder.download_pdb_if_needed",
+                    "src.dataset.builders.homologs.download_pdb_if_needed",
                     return_value=pdb_path,
                 ),
                 patch(
-                    "src.pdb_dataset_builder.compute_stride_core_range_for_modeled_auth_seq_ids_in_first_model",
+                    "src.dataset.builders.homologs.compute_stride_core_range_for_modeled_auth_seq_ids_in_first_model",
                     return_value=(1, 10),
                 ),
             ):
@@ -888,11 +888,11 @@ class SequenceSearchTests(unittest.TestCase):
                     return_value=(sequence, 1, len(sequence), nmr_residues),
                 ),
                 patch(
-                    "src.pdb_dataset_builder.download_pdb_chain_subset_if_needed",
+                    "src.dataset.builders.homologs.download_pdb_chain_subset_if_needed",
                     return_value=(pdb_path, {}),
                 ) as download_subset,
                 patch(
-                    "src.pdb_dataset_builder.load_cached_first_model_ca_data",
+                    "src.dataset.builders.homologs.load_cached_first_model_ca_data",
                     return_value=(tuple(nmr_residues), {}),
                 ) as load_ca_data,
             ):
@@ -928,15 +928,15 @@ class SequenceSearchTests(unittest.TestCase):
 
             with (
                 patch(
-                    "src.pdb_dataset_builder.download_pdb_chain_subset_if_needed",
+                    "src.dataset.builders.homologs.download_pdb_chain_subset_if_needed",
                     return_value=(root / "subset.pdb", {}),
                 ) as download_subset,
                 patch(
-                    "src.pdb_dataset_builder.load_cached_first_model_ca_data",
+                    "src.dataset.builders.homologs.load_cached_first_model_ca_data",
                     return_value=(tuple(), {}),
                 ),
                 patch(
-                    "src.pdb_dataset_builder.find_modeled_ca_core_identity_matches",
+                    "src.dataset.builders.homologs.find_modeled_ca_core_identity_matches",
                     side_effect=[False, True],
                 ),
             ):

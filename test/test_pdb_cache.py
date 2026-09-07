@@ -443,21 +443,21 @@ class SafePDBCacheTests(unittest.TestCase):
 
         with (
             patch(
-                "src.pdb_dataset_builder.download_pdb_if_needed",
+                "src.dataset.downloads.download_pdb_if_needed",
                 side_effect=RuntimeError(
                     "Atom serial number ('100000') exceeds PDB format limit"
                 ),
             ),
             patch(
-                "src.pdb_dataset_builder._download_mmcif_if_needed",
+                "src.dataset.downloads._download_mmcif_if_needed",
                 return_value=cif_path,
             ),
             patch(
-                "src.pdb_dataset_builder._load_pdb_cache_metadata",
+                "src.dataset.downloads._load_pdb_cache_metadata",
                 side_effect=metadata,
             ),
             patch(
-                "src.pdb_dataset_builder.parse_mmcif_structure",
+                "src.dataset.downloads.parse_mmcif_structure",
                 return_value=structure,
             ),
         ):
@@ -528,19 +528,19 @@ class SafePDBCacheTests(unittest.TestCase):
 
         with (
             patch(
-                "src.pdb_dataset_builder._download_pdb_if_needed_locked",
+                "src.dataset.downloads._download_pdb_if_needed_locked",
                 side_effect=RuntimeError("legacy PDB unavailable"),
             ),
             patch(
-                "src.pdb_dataset_builder._download_mmcif_if_needed_locked",
+                "src.dataset.downloads._download_mmcif_if_needed_locked",
                 return_value=cif_path,
             ),
             patch(
-                "src.pdb_dataset_builder._load_pdb_cache_metadata",
+                "src.dataset.downloads._load_pdb_cache_metadata",
                 side_effect=metadata,
             ),
             patch(
-                "src.pdb_dataset_builder.parse_mmcif_structure",
+                "src.dataset.downloads.parse_mmcif_structure",
                 side_effect=parse_structure,
             ),
             ThreadPoolExecutor(max_workers=2) as executor,

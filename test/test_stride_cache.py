@@ -42,7 +42,7 @@ class StrideCacheTests(unittest.TestCase):
 
             expected_states = {"A": {1: "H"}}
             with patch(
-                "src.pdb_dataset_builder._run_stride_for_model_text",
+                "src.dataset.stride._run_stride_for_model_text",
                 return_value=expected_states,
             ) as run_stride:
                 first_states, first_model_count = (

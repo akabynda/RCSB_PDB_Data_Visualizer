@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import src.dataset.downloads as dataset_downloads
+
 import gzip
 import hashlib
 import json
@@ -736,9 +738,11 @@ def test_pdb_fallback_without_chains_removes_obsolete_chain_map(
 
     sentinel = object()
     with (
-        patch.object(builder, "parse_mmcif_structure", return_value=sentinel),
-        patch.object(builder, "_coerce_structure_chain_ids_for_pdbio", return_value={}),
-        patch.object(builder, "PDBIO", _PDBIO),
+        patch.object(dataset_downloads, "parse_mmcif_structure", return_value=sentinel),
+        patch.object(
+            dataset_downloads, "_coerce_structure_chain_ids_for_pdbio", return_value={}
+        ),
+        patch.object(dataset_downloads, "PDBIO", _PDBIO),
     ):
         path = builder._download_pdb_if_needed_locked(
             session=session,  # type: ignore[arg-type]
@@ -773,9 +777,11 @@ def test_pdb_fallback_rejects_an_empty_converted_file(tmp_path: Path) -> None:
 
     sentinel = object()
     with (
-        patch.object(builder, "parse_mmcif_structure", return_value=sentinel),
-        patch.object(builder, "_coerce_structure_chain_ids_for_pdbio", return_value={}),
-        patch.object(builder, "PDBIO", _EmptyPDBIO),
+        patch.object(dataset_downloads, "parse_mmcif_structure", return_value=sentinel),
+        patch.object(
+            dataset_downloads, "_coerce_structure_chain_ids_for_pdbio", return_value={}
+        ),
+        patch.object(dataset_downloads, "PDBIO", _EmptyPDBIO),
     ):
         with pytest.raises(RuntimeError, match="Failed to download 1ABC"):
             builder._download_pdb_if_needed_locked(
@@ -807,7 +813,7 @@ def test_pdb_fallback_retries_parser_errors_without_damaging_cached_pdb(
 
     with (
         patch.object(
-            builder,
+            dataset_downloads,
             "parse_mmcif_structure",
             side_effect=[ValueError("bad cif one"), ValueError("bad cif two")],
         ),

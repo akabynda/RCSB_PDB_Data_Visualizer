@@ -1,5 +1,9 @@
 """Network-free coverage for homolog and X-ray RMSD builder orchestration."""
 
+import src.dataset.builders.homologs as dataset_builders_homologs
+import src.dataset.builders.rmsd_outputs as dataset_builders_rmsd_outputs
+import src.dataset.builders.xray_rmsd as dataset_builders_xray_rmsd
+
 from concurrent.futures import wait as futures_wait
 from dataclasses import replace
 from pathlib import Path
@@ -8,7 +12,6 @@ from unittest.mock import Mock, patch
 import numpy as np
 import pytest
 
-from src import pdb_dataset_builder as builder_module
 from src.pdb_dataset_builder import (
     DatasetBuildConfig,
     NMRHomologyQueryIneligibleError,
@@ -211,15 +214,17 @@ def test_homolog_build_handles_heartbeat_ineligible_and_non_5xx_failure(
     record_pairs: list[tuple[str, str]] = []
     with (
         patch.object(
-            builder_module,
+            dataset_builders_homologs,
             "fetch_solution_nmr_entry_ids",
             return_value=[seed.entry_id for seed in seeds],
         ),
         patch.object(homolog_builder, "_build_record_pair", side_effect=build_pair),
         patch.object(
-            builder_module, "wait", side_effect=heartbeat_then_wait
+            dataset_builders_homologs, "wait", side_effect=heartbeat_then_wait
         ) as wait_mock,
-        patch.object(builder_module, "_record_filtered_structure") as record_filtered,
+        patch.object(
+            dataset_builders_homologs, "_record_filtered_structure"
+        ) as record_filtered,
     ):
         records_95, records_100 = homolog_builder.build(
             on_record_pair=lambda current, historical: record_pairs.append(
@@ -294,7 +299,7 @@ def test_homolog_record_and_candidate_failure_branches_are_network_free(
 
     failing_candidate = _candidate("BROKEN_1", chain_ids=("A", "B"))
     with patch.object(
-        builder_module,
+        dataset_builders_homologs,
         "download_pdb_chain_subset_if_needed",
         side_effect=OSError("offline fixture"),
     ):
@@ -358,7 +363,9 @@ def test_prepare_work_items_filters_batches_and_sorts_candidates(
     )
     rmsd_builder.client.fetch_xray_polymer_entity_candidates_for_ids = candidate_fetch
 
-    with patch.object(builder_module, "_record_filtered_structure") as record_filtered:
+    with patch.object(
+        dataset_builders_xray_rmsd, "_record_filtered_structure"
+    ) as record_filtered:
         work_items = rmsd_builder._prepare_work_items(
             skip_entry_ids={"SKIP"},
             progress_prefix="TEST RMSD",
@@ -441,7 +448,7 @@ def test_compute_candidate_record_selects_best_usable_chain(tmp_path: Path) -> N
 
     with (
         patch.object(
-            builder_module,
+            dataset_builders_xray_rmsd,
             "download_pdb_chain_subset_if_needed",
             side_effect=download_subset,
         ),
@@ -474,7 +481,7 @@ def test_compute_candidate_record_selects_best_usable_chain(tmp_path: Path) -> N
 
     with (
         patch.object(
-            builder_module,
+            dataset_builders_xray_rmsd,
             "download_pdb_chain_subset_if_needed",
             return_value=(tmp_path / "xray.pdb", {}),
         ),
@@ -501,7 +508,9 @@ def test_compute_candidate_records_reports_guard_and_failure_reasons(
     candidates = (_candidate("ONE_1"), _candidate("TWO_1"))
     successful = _rmsd("VALID", "TWO_1")
 
-    with patch.object(builder_module, "_record_filtered_structure") as record_filtered:
+    with patch.object(
+        dataset_builders_xray_rmsd, "_record_filtered_structure"
+    ) as record_filtered:
         assert (
             rmsd_builder._compute_candidate_records(
                 homolog=_homolog("NOCORE", core_end=None),
@@ -537,7 +546,9 @@ def test_compute_candidate_records_reports_guard_and_failure_reasons(
                 "_download_pdb_if_needed",
                 return_value=tmp_path / "nmr.pdb",
             ),
-            patch.object(builder_module, "load_cached_chain_id_map", return_value={}),
+            patch.object(
+                dataset_builders_xray_rmsd, "load_cached_chain_id_map", return_value={}
+            ),
             patch.object(rmsd_builder, "_prepare_nmr_core_data", return_value=None),
         ):
             assert (
@@ -554,7 +565,9 @@ def test_compute_candidate_records_reports_guard_and_failure_reasons(
                 "_download_pdb_if_needed",
                 return_value=tmp_path / "nmr.pdb",
             ),
-            patch.object(builder_module, "load_cached_chain_id_map", return_value={}),
+            patch.object(
+                dataset_builders_xray_rmsd, "load_cached_chain_id_map", return_value={}
+            ),
             patch.object(
                 rmsd_builder,
                 "_prepare_nmr_core_data",
@@ -577,7 +590,7 @@ def test_compute_candidate_records_reports_guard_and_failure_reasons(
                 return_value=tmp_path / "nmr.pdb",
             ),
             patch.object(
-                builder_module,
+                dataset_builders_xray_rmsd,
                 "load_cached_chain_id_map",
                 return_value={"N": "parsed-N"},
             ),
@@ -796,19 +809,21 @@ def test_ordinary_csv_wrapper_resumes_only_complete_matching_rows(
         return [new_record]
 
     with (
-        patch.object(builder_module, "_import_filtered_structures") as imported,
         patch.object(
-            builder_module,
+            dataset_builders_rmsd_outputs, "_import_filtered_structures"
+        ) as imported,
+        patch.object(
+            dataset_builders_rmsd_outputs,
             "read_solution_nmr_monomer_xray_homolog_csv",
             return_value=homolog_records,
         ),
         patch.object(
-            builder_module,
+            dataset_builders_rmsd_outputs,
             "read_solution_nmr_monomer_xray_rmsd_csv",
             return_value=[valid_late, outdated, wrong_identity, valid_early],
         ),
         patch.object(
-            builder_module,
+            dataset_builders_rmsd_outputs,
             "SolutionNMRMonomerXrayRmsdBuilder",
         ) as builder_class,
     ):
@@ -855,19 +870,21 @@ def test_extremes_csv_wrapper_resumes_only_complete_matching_rows(
         return [new_record]
 
     with (
-        patch.object(builder_module, "_import_filtered_structures") as imported,
         patch.object(
-            builder_module,
+            dataset_builders_rmsd_outputs, "_import_filtered_structures"
+        ) as imported,
+        patch.object(
+            dataset_builders_rmsd_outputs,
             "read_solution_nmr_monomer_xray_homolog_csv",
             return_value=homolog_records,
         ),
         patch.object(
-            builder_module,
+            dataset_builders_rmsd_outputs,
             "read_solution_nmr_monomer_xray_rmsd_extremes_csv",
             return_value=[valid_late, outdated, wrong_identity, valid_early],
         ),
         patch.object(
-            builder_module,
+            dataset_builders_rmsd_outputs,
             "SolutionNMRMonomerXrayRmsdBuilder",
         ) as builder_class,
     ):
@@ -926,22 +943,22 @@ def test_csv_wrappers_rebuild_without_loading_existing_rows(
         return [new_record]
 
     with (
-        patch.object(builder_module, "_import_filtered_structures"),
+        patch.object(dataset_builders_rmsd_outputs, "_import_filtered_structures"),
         patch.object(
-            builder_module,
+            dataset_builders_rmsd_outputs,
             "read_solution_nmr_monomer_xray_homolog_csv",
             return_value=[_homolog("NEW", year=2010)],
         ),
         patch.object(
-            builder_module,
+            dataset_builders_rmsd_outputs,
             "read_solution_nmr_monomer_xray_rmsd_csv",
         ) as read_ordinary,
         patch.object(
-            builder_module,
+            dataset_builders_rmsd_outputs,
             "read_solution_nmr_monomer_xray_rmsd_extremes_csv",
         ) as read_extremes,
         patch.object(
-            builder_module,
+            dataset_builders_rmsd_outputs,
             "SolutionNMRMonomerXrayRmsdBuilder",
         ) as builder_class,
     ):
@@ -979,14 +996,14 @@ def test_csv_wrappers_require_homolog_records(
     """Fail with an actionable message before constructing an RMSD builder."""
     homolog_path = tmp_path / "missing-homologs.csv"
     with (
-        patch.object(builder_module, "_import_filtered_structures"),
+        patch.object(dataset_builders_rmsd_outputs, "_import_filtered_structures"),
         patch.object(
-            builder_module,
+            dataset_builders_rmsd_outputs,
             "read_solution_nmr_monomer_xray_homolog_csv",
             return_value=[],
         ),
         patch.object(
-            builder_module,
+            dataset_builders_rmsd_outputs,
             "SolutionNMRMonomerXrayRmsdBuilder",
         ) as builder_class,
     ):

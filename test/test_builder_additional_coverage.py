@@ -14,6 +14,13 @@ import numpy as np
 import pytest
 import requests
 
+import src.dataset.ca_cache as builder_ca_cache
+import src.dataset.client.transport as builder_client_transport
+import src.dataset.downloads as builder_downloads
+import src.dataset.stride as builder_stride
+import src.dataset.stride_install as builder_stride_install
+import src.dataset.structures as builder_structures
+import src.dataset.utils as builder_utils
 import src.pdb_dataset_builder as builder
 
 
@@ -131,7 +138,7 @@ def test_batch_helpers_handle_empty_work_and_collect_all_results() -> None:
 
 
 def test_missing_response_entries_are_deduplicated_and_recorded() -> None:
-    with patch.object(builder, "_record_filtered_structure") as record:
+    with patch.object(builder_utils, "_record_filtered_structure") as record:
         builder._record_entries_missing_from_response(
             ["3CCC", "1AAA", "2BBB", "1AAA"],
             [None, {}, {"rcsb_id": "2BBB"}],
@@ -168,22 +175,22 @@ def test_resolve_stride_executable_obeys_explicit_path_and_fallbacks(
     local.touch()
     local.chmod(0o755)
 
-    with patch.object(builder.shutil, "which") as which:
+    with patch.object(builder_stride_install.shutil, "which") as which:
         assert builder.resolve_stride_executable(str(explicit)) == str(explicit)
         which.assert_not_called()
 
-    with patch.object(builder.shutil, "which", return_value="/bin/stride"):
+    with patch.object(builder_stride_install.shutil, "which", return_value="/bin/stride"):
         assert builder.resolve_stride_executable("  ") == "/bin/stride"
 
     with (
-        patch.object(builder.shutil, "which", return_value=None),
-        patch.object(builder, "LOCAL_STRIDE_CANDIDATE", local),
+        patch.object(builder_stride_install.shutil, "which", return_value=None),
+        patch.object(builder_stride_install, "LOCAL_STRIDE_CANDIDATE", local),
     ):
         assert builder.resolve_stride_executable("") == str(local.resolve())
 
     with (
-        patch.object(builder.shutil, "which", return_value=None),
-        patch.object(builder, "LOCAL_STRIDE_CANDIDATE", tmp_path / "absent"),
+        patch.object(builder_stride_install.shutil, "which", return_value=None),
+        patch.object(builder_stride_install, "LOCAL_STRIDE_CANDIDATE", tmp_path / "absent"),
     ):
         assert builder.resolve_stride_executable("") is None
         assert builder.resolve_stride_executable(str(tmp_path / "missing")) is None
@@ -373,7 +380,7 @@ def test_selected_chain_coercion_leaves_unselected_chains_untouched() -> None:
 @pytest.mark.parametrize("selected_only", [False, True])
 def test_chain_id_coercion_rejects_exhausted_pdb_id_pool(selected_only: bool) -> None:
     structure = [[SimpleNamespace(id="A"), SimpleNamespace(id="Alpha")]]
-    with patch.object(builder, "PDB_CHAIN_ID_POOL", ""):
+    with patch.object(builder_structures, "PDB_CHAIN_ID_POOL", ""):
         with pytest.raises(RuntimeError, match="Too many"):
             if selected_only:
                 builder._coerce_selected_structure_chain_ids_for_pdbio(
@@ -417,8 +424,8 @@ def test_valid_cached_chain_subset_requires_complete_source_bound_mapping(
         return subset_metadata if path == subset_path else cif_metadata
 
     with (
-        patch.object(builder, "_load_pdb_cache_metadata", side_effect=metadata),
-        patch.object(builder, "_cached_pdb_matches_metadata", return_value=True),
+        patch.object(builder_downloads, "_load_pdb_cache_metadata", side_effect=metadata),
+        patch.object(builder_downloads, "_cached_pdb_matches_metadata", return_value=True),
     ):
         assert builder._load_valid_cached_chain_subset(
             subset_path=subset_path,
@@ -440,8 +447,8 @@ def test_valid_cached_chain_subset_requires_complete_source_bound_mapping(
 def test_chain_map_loaders_use_metadata_then_legacy_csv(tmp_path: Path) -> None:
     metadata = {"chain_id_map": {"long": "A", "": "B", "bad": ""}}
     with (
-        patch.object(builder, "_load_pdb_cache_metadata", return_value=metadata),
-        patch.object(builder, "_cached_pdb_matches_metadata", return_value=True),
+        patch.object(builder_structures, "_load_pdb_cache_metadata", return_value=metadata),
+        patch.object(builder_structures, "_cached_pdb_matches_metadata", return_value=True),
     ):
         assert builder.load_cached_chain_id_map(tmp_path, "1abc") == {"long": "A"}
 
@@ -455,7 +462,7 @@ def test_chain_map_loaders_use_metadata_then_legacy_csv(tmp_path: Path) -> None:
 
     legacy_cache_map = tmp_path / "1ABC.chain_map.csv"
     legacy_cache_map.write_text(map_path.read_text(encoding="utf-8"), encoding="utf-8")
-    with patch.object(builder, "_load_pdb_cache_metadata", return_value=None):
+    with patch.object(builder_structures, "_load_pdb_cache_metadata", return_value=None):
         assert builder.load_cached_chain_id_map(tmp_path, "1abc") == {
             "long": "A",
             "second": "C",
@@ -463,7 +470,7 @@ def test_chain_map_loaders_use_metadata_then_legacy_csv(tmp_path: Path) -> None:
 
 
 def test_locked_subset_builder_requires_valid_cif_metadata(tmp_path: Path) -> None:
-    with patch.object(builder, "_load_pdb_cache_metadata", return_value=None):
+    with patch.object(builder_downloads, "_load_pdb_cache_metadata", return_value=None):
         with pytest.raises(RuntimeError, match="Missing validated mmCIF metadata"):
             builder._download_pdb_chain_subset_if_needed_locked(
                 cache_dir=tmp_path,
@@ -480,12 +487,12 @@ def test_locked_subset_builder_reports_selected_chains_missing_from_structure(
     cif_path = tmp_path / "1ABC.cif"
     with (
         patch.object(
-            builder,
+            builder_downloads,
             "_load_pdb_cache_metadata",
             return_value={"sha256": "source", "source_url": "fixture"},
         ),
-        patch.object(builder, "_load_valid_cached_chain_subset", return_value=None),
-        patch.object(builder, "parse_mmcif_structure", return_value=[[]]),
+        patch.object(builder_downloads, "_load_valid_cached_chain_subset", return_value=None),
+        patch.object(builder_downloads, "parse_mmcif_structure", return_value=[[]]),
     ):
         with pytest.raises(RuntimeError, match="missing selected chains: A"):
             builder._download_pdb_chain_subset_if_needed_locked(
@@ -558,13 +565,13 @@ def test_stride_runner_parses_success_and_returns_none_on_nonzero_exit() -> None
         assert kwargs == {"check": False, "capture_output": True, "text": True}
         return SimpleNamespace(returncode=0, stdout="ASG ALA A 1 1 H\n")
 
-    with patch.object(builder.subprocess, "run", side_effect=successful_run):
+    with patch.object(builder_stride.subprocess, "run", side_effect=successful_run):
         assert builder._run_stride_for_model_text(model_text, "stride-fixture") == {
             "A": {1: "H"}
         }
 
     with patch.object(
-        builder.subprocess,
+        builder_stride.subprocess,
         "run",
         return_value=SimpleNamespace(returncode=2, stdout="ignored"),
     ):
@@ -650,7 +657,7 @@ def test_first_model_stride_loader_handles_no_coordinates_and_failed_stride(
 ) -> None:
     empty_pdb = tmp_path / "empty.pdb"
     empty_pdb.write_text("HEADER fixture\nEND\n", encoding="utf-8")
-    with patch.object(builder, "_run_stride_for_model_text") as run_stride:
+    with patch.object(builder_stride, "_run_stride_for_model_text") as run_stride:
         assert builder.load_first_model_stride_state_by_chain(
             empty_pdb, "1ABC", "stride", tmp_path / "cache"
         ) == (None, 0)
@@ -659,8 +666,8 @@ def test_first_model_stride_loader_handles_no_coordinates_and_failed_stride(
     pdb_path = tmp_path / "one-model.pdb"
     pdb_path.write_text(_ca_line(), encoding="utf-8")
     with (
-        patch.object(builder, "_run_stride_for_model_text", return_value=None),
-        patch.object(builder, "_write_cached_stride_state_by_chain") as write_cache,
+        patch.object(builder_stride, "_run_stride_for_model_text", return_value=None),
+        patch.object(builder_stride, "_write_cached_stride_state_by_chain") as write_cache,
     ):
         assert builder.load_first_model_stride_state_by_chain(
             pdb_path, "1ABC", "stride", tmp_path / "cache"
@@ -673,11 +680,11 @@ def test_stride_coverages_fill_unassigned_modeled_length_as_coil(
 ) -> None:
     with (
         patch.object(
-            builder, "download_pdb_if_needed", return_value=tmp_path / "x.pdb"
+            builder_stride, "download_pdb_if_needed", return_value=tmp_path / "x.pdb"
         ),
-        patch.object(builder, "load_cached_chain_id_map", return_value={"long": "A"}),
+        patch.object(builder_stride, "load_cached_chain_id_map", return_value={"long": "A"}),
         patch.object(
-            builder,
+            builder_stride,
             "load_first_model_stride_state_by_chain",
             return_value=({"A": {1: "H", 2: "E"}}, 3),
         ),
@@ -712,7 +719,7 @@ def test_stride_coverages_return_sentinels_for_input_download_and_parse_failures
     tmp_path: Path,
 ) -> None:
     expected = {state: -1.0 for state in builder.STRIDE_STATE_CODES}
-    with patch.object(builder, "download_pdb_if_needed") as download:
+    with patch.object(builder_stride, "download_pdb_if_needed") as download:
         assert builder.compute_stride_state_coverages_for_chain_modeled_first_model(
             MagicMock(),
             builder.DatasetBuildConfig(),
@@ -727,7 +734,7 @@ def test_stride_coverages_return_sentinels_for_input_download_and_parse_failures
         download.assert_not_called()
 
     with patch.object(
-        builder, "download_pdb_if_needed", side_effect=RuntimeError("offline")
+        builder_stride, "download_pdb_if_needed", side_effect=RuntimeError("offline")
     ):
         assert builder.compute_stride_state_coverages_for_chain_modeled_first_model(
             MagicMock(),
@@ -742,10 +749,10 @@ def test_stride_coverages_return_sentinels_for_input_download_and_parse_failures
         ) == (expected, 0, 0)
 
     with (
-        patch.object(builder, "download_pdb_if_needed", return_value=tmp_path / "x"),
-        patch.object(builder, "load_cached_chain_id_map", return_value={}),
+        patch.object(builder_stride, "download_pdb_if_needed", return_value=tmp_path / "x"),
+        patch.object(builder_stride, "load_cached_chain_id_map", return_value={}),
         patch.object(
-            builder,
+            builder_stride,
             "load_first_model_stride_state_by_chain",
             return_value=({"B": {1: "H"}, "C": {1: "E"}}, 2),
         ),
@@ -766,7 +773,7 @@ def test_stride_coverages_return_sentinels_for_input_download_and_parse_failures
 def test_stride_core_wrapper_short_circuits_and_selects_single_chain_fallback(
     tmp_path: Path,
 ) -> None:
-    with patch.object(builder, "load_first_model_stride_state_by_chain") as load:
+    with patch.object(builder_stride, "load_first_model_stride_state_by_chain") as load:
         assert (
             builder.compute_stride_core_range_for_modeled_auth_seq_ids_in_first_model(
                 tmp_path / "x.pdb", "1ABC", "A", set(), "stride", tmp_path
@@ -776,7 +783,7 @@ def test_stride_core_wrapper_short_circuits_and_selects_single_chain_fallback(
         load.assert_not_called()
 
     with patch.object(
-        builder,
+        builder_stride,
         "load_first_model_stride_state_by_chain",
         return_value=({"different": {1: "C", 2: "H", 3: "E"}}, 1),
     ):
@@ -951,15 +958,15 @@ def test_coordinate_hash_prefers_valid_metadata_and_falls_back_to_file(
     trusted_sha = "a" * 64
     with (
         patch.object(
-            builder, "_load_pdb_cache_metadata", return_value={"sha256": trusted_sha}
+            builder_ca_cache, "_load_pdb_cache_metadata", return_value={"sha256": trusted_sha}
         ),
-        patch.object(builder, "_cached_pdb_matches_metadata", return_value=True),
-        patch.object(builder, "_sha256_file") as hash_file,
+        patch.object(builder_ca_cache, "_cached_pdb_matches_metadata", return_value=True),
+        patch.object(builder_ca_cache, "_sha256_file") as hash_file,
     ):
         assert builder._coordinate_source_sha256(pdb_path) == trusted_sha
         hash_file.assert_not_called()
 
-    with patch.object(builder, "_load_pdb_cache_metadata", return_value=None):
+    with patch.object(builder_ca_cache, "_load_pdb_cache_metadata", return_value=None):
         assert (
             builder._coordinate_source_sha256(pdb_path)
             == hashlib.sha256(b"fixture").hexdigest()
@@ -1034,12 +1041,12 @@ def test_cached_first_model_ca_data_reparses_if_source_changes_mid_transaction(
     first = {"A": ((builder.CAResidueRecord(1, "A", True),), {1: np.zeros(3)})}
     second = {"A": ((builder.CAResidueRecord(2, "G", True),), {2: np.ones(3)})}
     with (
-        patch.object(builder, "_coordinate_source_sha256", side_effect=["old", "new"]),
-        patch.object(builder, "_read_first_model_ca_cache", return_value=None),
+        patch.object(builder_ca_cache, "_coordinate_source_sha256", side_effect=["old", "new"]),
+        patch.object(builder_ca_cache, "_read_first_model_ca_cache", return_value=None),
         patch.object(
-            builder, "_parse_first_model_ca_data_by_chain", side_effect=[first, second]
+            builder_ca_cache, "_parse_first_model_ca_data_by_chain", side_effect=[first, second]
         ) as parse,
-        patch.object(builder, "_write_first_model_ca_cache") as write,
+        patch.object(builder_ca_cache, "_write_first_model_ca_cache") as write,
     ):
         records, coords = builder.load_cached_first_model_ca_data(pdb_path, "A")
 
@@ -1074,7 +1081,7 @@ def test_thread_local_session_is_reused_and_delegates_get_and_post() -> None:
     session.get.return_value = "get-response"
     session.post.return_value = "post-response"
     session.headers = {}
-    with patch.object(builder.requests, "Session", return_value=session) as factory:
+    with patch.object(builder_client_transport.requests, "Session", return_value=session) as factory:
         client = builder.ThreadLocalRequestsSession("fixture-agent")
         assert client.get("https://example.test/a", timeout=1) == "get-response"
         assert client.post("https://example.test/b", json={"x": 1}) == "post-response"
@@ -1177,7 +1184,7 @@ def test_client_post_json_retries_request_and_json_errors_then_succeeds() -> Non
     client.session = SimpleNamespace(
         post=Mock(side_effect=[request_failure, bad_json_response, success_response])
     )
-    with patch.object(builder.time, "sleep") as sleep:
+    with patch.object(builder_client_transport.time, "sleep") as sleep:
         assert client._post_json("https://example.test", {"x": 1}) == {"ok": True}
 
     assert client.session.post.call_count == 3
@@ -1192,7 +1199,7 @@ def test_client_post_json_raises_after_last_attempt_without_final_sleep() -> Non
     client.session = SimpleNamespace(
         post=Mock(side_effect=requests.Timeout("always offline"))
     )
-    with patch.object(builder.time, "sleep") as sleep:
+    with patch.object(builder_client_transport.time, "sleep") as sleep:
         with pytest.raises(RuntimeError, match="after 2 attempts: always offline"):
             client._post_json("https://example.test", {})
     sleep.assert_called_once_with(1.0)

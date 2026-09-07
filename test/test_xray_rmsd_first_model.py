@@ -234,7 +234,7 @@ class XrayRmsdFirstModelTests(unittest.TestCase):
                     return_value=root / "1NMR.pdb",
                 ),
                 patch(
-                    "src.pdb_dataset_builder.load_cached_chain_id_map",
+                    "src.dataset.builders.xray_rmsd.load_cached_chain_id_map",
                     return_value={},
                 ),
                 patch.object(

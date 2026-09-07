@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import src.dataset.stride_install as dataset_stride_install
+
 import subprocess
 from pathlib import Path
 from unittest.mock import patch
@@ -33,7 +35,7 @@ def test_ensure_stride_prefers_explicit_path_and_path_lookup(tmp_path: Path) -> 
     _write_executable(explicit)
     install_dir = tmp_path / "managed"
 
-    with patch.object(builder, "download_and_build_stride") as bootstrap:
+    with patch.object(dataset_stride_install, "download_and_build_stride") as bootstrap:
         assert builder.ensure_stride_executable(str(explicit), install_dir) == str(
             explicit
         )
@@ -45,7 +47,7 @@ def test_ensure_stride_prefers_explicit_path_and_path_lookup(tmp_path: Path) -> 
             "which",
             side_effect=lambda name: "/opt/bin/stride" if name == "stride" else None,
         ),
-        patch.object(builder, "download_and_build_stride") as bootstrap,
+        patch.object(dataset_stride_install, "download_and_build_stride") as bootstrap,
     ):
         assert builder.ensure_stride_executable("", install_dir) == "/opt/bin/stride"
         bootstrap.assert_not_called()
@@ -55,7 +57,7 @@ def test_ensure_stride_does_not_replace_invalid_explicit_path(
     tmp_path: Path,
 ) -> None:
     """Treat a bad explicit path as an error instead of silently downloading."""
-    with patch.object(builder, "download_and_build_stride") as bootstrap:
+    with patch.object(dataset_stride_install, "download_and_build_stride") as bootstrap:
         assert (
             builder.ensure_stride_executable(
                 str(tmp_path / "missing-stride"), tmp_path / "managed"
@@ -76,7 +78,7 @@ def test_resolve_stride_rejects_non_executable_files_and_directories(
 
     with (
         patch.object(builder.shutil, "which", return_value=None),
-        patch.object(builder, "LOCAL_STRIDE_CANDIDATE", non_executable),
+        patch.object(dataset_stride_install, "LOCAL_STRIDE_CANDIDATE", non_executable),
     ):
         assert builder.resolve_stride_executable(str(non_executable), tmp_path) is None
         assert builder.resolve_stride_executable(str(directory), tmp_path) is None
@@ -91,9 +93,11 @@ def test_ensure_stride_bootstraps_when_all_candidates_are_absent(
     expected = install_dir / "built-stride"
     with (
         patch.object(builder.shutil, "which", return_value=None),
-        patch.object(builder, "LOCAL_STRIDE_CANDIDATE", tmp_path / "legacy"),
         patch.object(
-            builder, "download_and_build_stride", return_value=expected
+            dataset_stride_install, "LOCAL_STRIDE_CANDIDATE", tmp_path / "legacy"
+        ),
+        patch.object(
+            dataset_stride_install, "download_and_build_stride", return_value=expected
         ) as bootstrap,
     ):
         assert builder.ensure_stride_executable("", install_dir) == str(expected)
@@ -110,8 +114,8 @@ def test_ensure_stride_reuses_existing_managed_binary(tmp_path: Path) -> None:
 
     with (
         patch.object(builder.shutil, "which", return_value=None),
-        patch.object(builder, "LOCAL_STRIDE_CANDIDATE", legacy),
-        patch.object(builder, "download_and_build_stride") as bootstrap,
+        patch.object(dataset_stride_install, "LOCAL_STRIDE_CANDIDATE", legacy),
+        patch.object(dataset_stride_install, "download_and_build_stride") as bootstrap,
     ):
         assert builder.ensure_stride_executable("", tmp_path) == str(
             executable.resolve()
@@ -204,9 +208,10 @@ def test_download_and_build_stride_repairs_existing_checkout(tmp_path: Path) -> 
         patch.object(builder.shutil, "which", side_effect=_tool_path) as which,
         patch.object(builder.subprocess, "run", side_effect=run) as run_command,
     ):
-        assert builder.download_and_build_stride(install_dir) == (
-            source_dir / "stride"
-        ).resolve()
+        assert (
+            builder.download_and_build_stride(install_dir)
+            == (source_dir / "stride").resolve()
+        )
 
     assert [call.args[0] for call in which.call_args_list] == [
         "git",
@@ -273,14 +278,14 @@ def test_download_and_build_stride_validates_tools_revision_and_output(
     (source_dir / "Makefile").write_text("stride:\n", encoding="utf-8")
 
     with (
-        patch.object(builder, "_verify_existing_stride_checkout"),
+        patch.object(dataset_stride_install, "_verify_existing_stride_checkout"),
         patch.object(builder.shutil, "which", return_value=None),
         pytest.raises(RuntimeError, match="GNU Make and a C compiler"),
     ):
         builder.download_and_build_stride(install_dir)
 
     with (
-        patch.object(builder, "_verify_existing_stride_checkout"),
+        patch.object(dataset_stride_install, "_verify_existing_stride_checkout"),
         patch.object(builder.shutil, "which", side_effect=_tool_path),
         patch.object(
             builder.subprocess,

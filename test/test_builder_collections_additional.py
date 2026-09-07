@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import src.dataset.builders.counts as dataset_builders_counts
+import src.dataset.builders.precision as dataset_builders_precision
+import src.dataset.builders.programs as dataset_builders_programs
+
 from pathlib import Path
 from unittest.mock import Mock, call, patch
 
@@ -127,12 +131,12 @@ def test_program_year_builder_fetches_year_batches_and_loads_programs(
     pdb_path = tmp_path / "entry.pdb"
     with (
         patch.object(
-            module,
+            dataset_builders_programs,
             "download_pdb_if_needed",
             side_effect=[pdb_path, RuntimeError("offline")],
         ) as download,
         patch.object(
-            module,
+            dataset_builders_programs,
             "extract_refinement_programs_from_pdb",
             return_value={"AMBER", "CNS"},
         ) as extract,
@@ -165,14 +169,20 @@ def test_program_year_builder_handles_every_missing_value_and_counts(
     }
 
     with (
-        patch.object(module, "fetch_solution_nmr_entry_ids", return_value=entry_ids),
+        patch.object(
+            dataset_builders_programs,
+            "fetch_solution_nmr_entry_ids",
+            return_value=entry_ids,
+        ),
         patch.object(builder, "_fetch_entry_years", return_value=years),
         patch.object(
             builder,
             "_load_programs_for_entry",
             side_effect=lambda entry_id: programs[entry_id],
         ),
-        patch.object(module, "_record_filtered_structure") as filtered,
+        patch.object(
+            dataset_builders_programs, "_record_filtered_structure"
+        ) as filtered,
     ):
         records = builder.build()
 
@@ -198,7 +208,9 @@ def test_program_year_builder_returns_early_when_search_is_empty(
     """Avoid year and PDB work when the search returns no entries."""
     builder = module.SolutionNMRProgramYearlyBuilder(Mock(), _config(), tmp_path)
     with (
-        patch.object(module, "fetch_solution_nmr_entry_ids", return_value=[]),
+        patch.object(
+            dataset_builders_programs, "fetch_solution_nmr_entry_ids", return_value=[]
+        ),
         patch.object(builder, "_fetch_entry_years") as fetch_years,
     ):
         assert builder.build() == []
@@ -216,7 +228,7 @@ def test_program_cluster_loader_supports_local_and_remote_sources(
     local = module.SolutionNMRMonomerProgramClusterBuilder([], tmp_path, 0)
     assert local.max_workers == 1
     with patch.object(
-        module,
+        dataset_builders_programs,
         "extract_raw_refinement_program_text_from_pdb",
         return_value="AMBER",
     ) as extract:
@@ -232,12 +244,12 @@ def test_program_cluster_loader_supports_local_and_remote_sources(
     )
     with (
         patch.object(
-            module,
+            dataset_builders_programs,
             "download_pdb_if_needed",
             side_effect=[valid_path, RuntimeError("offline")],
         ),
         patch.object(
-            module,
+            dataset_builders_programs,
             "extract_raw_refinement_program_text_from_pdb",
             return_value="CNS",
         ),
@@ -333,7 +345,9 @@ def test_membrane_builder_deduplicates_counts_and_filters_by_method() -> None:
         module.MembraneYearlyCountRecord(2020, 1),
     ]
 
-    with patch.object(module, "_record_filtered_structure") as filtered:
+    with patch.object(
+        dataset_builders_counts, "_record_filtered_structure"
+    ) as filtered:
         by_method = builder.build_by_method(
             [module.ExperimentalMethod.X_RAY, module.ExperimentalMethod.NMR]
         )
@@ -512,7 +526,7 @@ def test_precision_computation_rejects_small_intersection_and_counts_raw_fallbac
     )
 
     with patch.object(
-        module,
+        dataset_builders_precision,
         "parse_models_ca_coords_with_stats",
         side_effect=[one_model, too_small, complete],
     ):
@@ -560,7 +574,7 @@ def test_precision_builder_delegates_download_and_maps_core_result(
     assert builder.precision_workers == 1
     pdb_path = tmp_path / "cached.pdb"
     with patch.object(
-        module, "download_pdb_if_needed", return_value=pdb_path
+        dataset_builders_precision, "download_pdb_if_needed", return_value=pdb_path
     ) as download:
         assert builder._download_pdb_if_needed("1ABC") == pdb_path
     download.assert_called_once_with(
@@ -600,7 +614,9 @@ def test_precision_builder_delegates_download_and_maps_core_result(
             "_compute_mean_rmsd_to_average",
             return_value=(None, "bad core"),
         ),
-        patch.object(module, "_record_filtered_structure") as filtered,
+        patch.object(
+            dataset_builders_precision, "_record_filtered_structure"
+        ) as filtered,
     ):
         assert (
             builder._build_record_from_core_range(pdb_path, "BAD", 2021, "B", 1, 2)
@@ -631,11 +647,19 @@ def test_precision_stride_seed_handles_ineligible_inputs_and_failures(
 
     with (
         patch.object(builder, "_download_pdb_if_needed", return_value=pdb_path),
-        patch.object(module, "load_cached_chain_id_map", return_value={"LONG": "A"}),
         patch.object(
-            module, "parse_first_model_modeled_ca_auth_seq_ids", return_value=[]
+            dataset_builders_precision,
+            "load_cached_chain_id_map",
+            return_value={"LONG": "A"},
         ),
-        patch.object(module, "_record_filtered_structure") as filtered,
+        patch.object(
+            dataset_builders_precision,
+            "parse_first_model_modeled_ca_auth_seq_ids",
+            return_value=[],
+        ),
+        patch.object(
+            dataset_builders_precision, "_record_filtered_structure"
+        ) as filtered,
     ):
         assert builder._compute_record_from_seed(seed) is None
     filtered.assert_called_once_with(
@@ -644,18 +668,24 @@ def test_precision_stride_seed_handles_ineligible_inputs_and_failures(
 
     with (
         patch.object(builder, "_download_pdb_if_needed", return_value=pdb_path),
-        patch.object(module, "load_cached_chain_id_map", return_value={"LONG": "A"}),
         patch.object(
-            module,
+            dataset_builders_precision,
+            "load_cached_chain_id_map",
+            return_value={"LONG": "A"},
+        ),
+        patch.object(
+            dataset_builders_precision,
             "parse_first_model_modeled_ca_auth_seq_ids",
             return_value=[10, 11, 12],
         ),
         patch.object(
-            module,
+            dataset_builders_precision,
             "compute_stride_core_range_for_modeled_auth_seq_ids_in_first_model",
             return_value=None,
         ),
-        patch.object(module, "_record_filtered_structure") as filtered,
+        patch.object(
+            dataset_builders_precision, "_record_filtered_structure"
+        ) as filtered,
     ):
         assert builder._compute_record_from_seed(seed) is None
     filtered.assert_called_once_with(
@@ -666,7 +696,9 @@ def test_precision_stride_seed_handles_ineligible_inputs_and_failures(
         patch.object(
             builder, "_download_pdb_if_needed", side_effect=RuntimeError("offline")
         ),
-        patch.object(module, "_record_filtered_structure") as filtered,
+        patch.object(
+            dataset_builders_precision, "_record_filtered_structure"
+        ) as filtered,
     ):
         assert builder._compute_record_from_seed(seed) is None
     filtered.assert_called_once_with(
@@ -692,14 +724,18 @@ def test_precision_stride_seed_uses_mapped_chain_and_stride_core(
 
     with (
         patch.object(builder, "_download_pdb_if_needed", return_value=pdb_path),
-        patch.object(module, "load_cached_chain_id_map", return_value={"LONG": "A"}),
         patch.object(
-            module,
+            dataset_builders_precision,
+            "load_cached_chain_id_map",
+            return_value={"LONG": "A"},
+        ),
+        patch.object(
+            dataset_builders_precision,
             "parse_first_model_modeled_ca_auth_seq_ids",
             return_value=[10, 11, 12],
         ) as parse_modeled,
         patch.object(
-            module,
+            dataset_builders_precision,
             "compute_stride_core_range_for_modeled_auth_seq_ids_in_first_model",
             return_value=(10, 12),
         ) as compute_core,

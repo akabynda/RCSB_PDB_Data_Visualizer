@@ -36,6 +36,11 @@ from src.pdb_plot import (
     parse_plot_kinds,
     parse_positive_float,
 )
+from src.plotting import cli as plot_cli
+from src.plotting import programs as plot_programs
+from src.plotting import rendering as plot_rendering
+from src.plotting import style as plot_style
+from src.plotting import tables as plot_tables
 
 
 class PlotArgumentTests(unittest.TestCase):
@@ -113,8 +118,8 @@ class PlotArgumentTests(unittest.TestCase):
             args = parse_args()
 
         with (
-            patch.object(pdb_plot, "parse_args", return_value=args),
-            patch.object(pdb_plot, "PDBScientificPlotter") as plotter_class,
+            patch.object(plot_cli, "parse_args", return_value=args),
+            patch.object(plot_cli, "PDBScientificPlotter") as plotter_class,
         ):
             pdb_plot.main()
 
@@ -148,8 +153,8 @@ class PlotArgumentTests(unittest.TestCase):
             args = parse_args()
 
         with (
-            patch.object(pdb_plot, "parse_args", return_value=args),
-            patch.object(pdb_plot, "PDBScientificPlotter") as plotter_class,
+            patch.object(plot_cli, "parse_args", return_value=args),
+            patch.object(plot_cli, "PDBScientificPlotter") as plotter_class,
         ):
             pdb_plot.main()
 
@@ -180,13 +185,13 @@ class PlotInfrastructureTests(unittest.TestCase):
     def test_has_arial_font_matches_case_and_whitespace(self) -> None:
         pdb_plot._has_arial_font.cache_clear()
         fonts = [SimpleNamespace(name="Other"), SimpleNamespace(name=" ARIAL ")]
-        with patch.object(pdb_plot.font_manager.fontManager, "ttflist", fonts):
+        with patch.object(plot_style.font_manager.fontManager, "ttflist", fonts):
             self.assertTrue(pdb_plot._has_arial_font())
 
     def test_has_arial_font_returns_false_when_absent(self) -> None:
         pdb_plot._has_arial_font.cache_clear()
         with patch.object(
-            pdb_plot.font_manager.fontManager,
+            plot_style.font_manager.fontManager,
             "ttflist",
             [SimpleNamespace(name="Liberation Sans")],
         ):
@@ -195,8 +200,8 @@ class PlotInfrastructureTests(unittest.TestCase):
     def test_scientific_style_warns_when_arial_is_unavailable(self) -> None:
         with (
             plt.rc_context(),
-            patch.object(pdb_plot, "_has_arial_font", return_value=False),
-            patch.object(pdb_plot.plt.style, "use") as style_use,
+            patch.object(plot_style, "_has_arial_font", return_value=False),
+            patch.object(plot_style.plt.style, "use") as style_use,
         ):
             with self.assertWarnsRegex(RuntimeWarning, "Arial is not available"):
                 self.plotter._scientific_style()
@@ -211,7 +216,7 @@ class PlotInfrastructureTests(unittest.TestCase):
             root = Path(temp_dir)
             canonical = root / "table.csv"
             alias = root / "nested" / ".." / "table.csv"
-            with patch.object(pdb_plot.pd, "read_csv", return_value=frame) as read_csv:
+            with patch.object(plot_tables.pd, "read_csv", return_value=frame) as read_csv:
                 first = self.plotter._read_csv(canonical)
                 second = self.plotter._read_csv(alias)
 
@@ -432,8 +437,8 @@ class PlotInfrastructureTests(unittest.TestCase):
         draw = Mock()
 
         with (
-            patch.object(pdb_plot.plt, "subplots", return_value=(figure, axes)),
-            patch.object(pdb_plot.plt, "close") as close,
+            patch.object(plot_rendering.plt, "subplots", return_value=(figure, axes)),
+            patch.object(plot_rendering.plt, "close") as close,
             patch.object(self.plotter, "_configure_year_axis_ticks") as year_ticks,
             patch.object(self.plotter, "_remove_zero_y_tick"),
             patch.object(self.plotter, "_configure_minor_ticks"),
@@ -1149,8 +1154,8 @@ class PlotCallbackTests(unittest.TestCase):
         axes.get_legend_handles_labels.return_value = (["handle"], ["label"])
         draw = Mock()
         with (
-            patch.object(pdb_plot.plt, "figure", return_value=figure),
-            patch.object(pdb_plot.plt, "close") as close,
+            patch.object(plot_programs.plt, "figure", return_value=figure),
+            patch.object(plot_programs.plt, "close") as close,
             patch.object(self.plotter, "_configure_year_axis_ticks"),
             patch.object(self.plotter, "_remove_zero_y_tick"),
             patch.object(self.plotter, "_configure_minor_ticks"),

@@ -1,5 +1,8 @@
 """Tests for parsing modeled alpha-carbon residues from PDB files."""
 
+import src.dataset.builders.homologs as dataset_builders_homologs
+import src.dataset.stride as dataset_stride
+
 import tempfile
 import unittest
 from pathlib import Path
@@ -58,10 +61,14 @@ class PdbModeledCaTests(unittest.TestCase):
             modeled_ids = parse_first_model_modeled_ca_auth_seq_ids(pdb_path, "A")
 
             with (
-                patch.object(builder, "download_pdb_if_needed", return_value=pdb_path),
-                patch.object(builder, "load_cached_chain_id_map", return_value={}),
                 patch.object(
-                    builder,
+                    dataset_stride, "download_pdb_if_needed", return_value=pdb_path
+                ),
+                patch.object(
+                    dataset_stride, "load_cached_chain_id_map", return_value={}
+                ),
+                patch.object(
+                    dataset_stride,
                     "load_first_model_stride_state_by_chain",
                     return_value=({"A": dict.fromkeys(range(1, 62), "H")}, 1),
                 ),
@@ -200,10 +207,18 @@ class PdbModeledCaTests(unittest.TestCase):
             )
             seed = builder.SolutionNMRMonomerXrayHomologSeedRecord("1ABC", 2000, "A")
             with (
-                patch.object(builder, "download_pdb_if_needed", return_value=pdb_path),
-                patch.object(builder, "load_cached_chain_id_map", return_value={}),
                 patch.object(
-                    builder,
+                    dataset_builders_homologs,
+                    "download_pdb_if_needed",
+                    return_value=pdb_path,
+                ),
+                patch.object(
+                    dataset_builders_homologs,
+                    "load_cached_chain_id_map",
+                    return_value={},
+                ),
+                patch.object(
+                    dataset_stride,
                     "load_first_model_stride_state_by_chain",
                     return_value=({"A": {1: "H", 23: "E"}}, 1),
                 ),

@@ -1,5 +1,7 @@
 """Tests for the durable first-model X-ray alpha-carbon cache."""
 
+import src.dataset.ca_cache as dataset_ca_cache
+
 import os
 import tempfile
 import time
@@ -99,7 +101,7 @@ class XrayCaCacheTests(unittest.TestCase):
             encoding="utf-8",
         )
         with patch.object(
-            builder,
+            dataset_ca_cache,
             "_parse_first_model_ca_data_by_chain",
             wraps=builder._parse_first_model_ca_data_by_chain,
         ) as parse_source:
@@ -139,7 +141,7 @@ class XrayCaCacheTests(unittest.TestCase):
             builder.CAResidueRecord(1, "A", True),
             builder.CAResidueRecord(2, "HET:CA", False, has_hetatm_ca=True),
         )
-        with patch.object(builder, "XRAY_CA_PARSER_REVISION", 1):
+        with patch.object(dataset_ca_cache, "XRAY_CA_PARSER_REVISION", 1):
             builder._write_first_model_ca_cache(
                 cache_path,
                 builder._coordinate_source_sha256(self.pdb_path),
@@ -147,7 +149,7 @@ class XrayCaCacheTests(unittest.TestCase):
             )
 
         with patch.object(
-            builder,
+            dataset_ca_cache,
             "_parse_first_model_ca_data_by_chain",
             wraps=builder._parse_first_model_ca_data_by_chain,
         ) as parse_source:
@@ -168,7 +170,7 @@ class XrayCaCacheTests(unittest.TestCase):
         """Parse all first-model chains once and serve each chain from one cache."""
         real_parser = builder._parse_first_model_ca_data_by_chain
         with patch.object(
-            builder,
+            dataset_ca_cache,
             "_parse_first_model_ca_data_by_chain",
             wraps=real_parser,
         ) as parse_source:
@@ -201,7 +203,7 @@ class XrayCaCacheTests(unittest.TestCase):
 
         real_parser = builder._parse_first_model_ca_data_by_chain
         with patch.object(
-            builder,
+            dataset_ca_cache,
             "_parse_first_model_ca_data_by_chain",
             wraps=real_parser,
         ) as parse_source:
@@ -221,7 +223,7 @@ class XrayCaCacheTests(unittest.TestCase):
 
         real_parser = builder._parse_first_model_ca_data_by_chain
         with patch.object(
-            builder,
+            dataset_ca_cache,
             "_parse_first_model_ca_data_by_chain",
             wraps=real_parser,
         ) as parse_source:
@@ -249,7 +251,7 @@ class XrayCaCacheTests(unittest.TestCase):
             return real_parser(path)
 
         with patch.object(
-            builder,
+            dataset_ca_cache,
             "_parse_first_model_ca_data_by_chain",
             side_effect=counted_parser,
         ):

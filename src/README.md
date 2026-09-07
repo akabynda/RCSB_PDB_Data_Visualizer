@@ -1,12 +1,13 @@
 # Source Pipeline Reference
 
-This document is the technical reference for the two executable modules in
-`src/`. For installation and the article reproduction workflow, see the
-[project README](../README.md). Unless noted otherwise, run every command below
-from the repository root.
+This document is the technical reference for the dataset and plotting packages
+in `src/` and their two command-line entry points. For installation and the
+article reproduction workflow, see the [project README](../README.md). Unless
+noted otherwise, run every command below from the repository root.
 
 ## Table of Contents
 
+- [Source Organization](#source-organization)
 - [Dataset Builder](#dataset-builder)
 - [Important Filtering Rules](#important-filtering-rules)
 - [Modeled Part](#modeled-part)
@@ -32,6 +33,45 @@ from the repository root.
   - [`solution_nmr_monomer_xray_rmsd_extremes_historical`](#solution_nmr_monomer_xray_rmsd_extremes_historical)
 - [Plot Generation](#plot-generation)
 - [License](#license)
+
+## Source Organization
+
+The implementation is organized by responsibility under `src/dataset/` and
+`src/plotting/`. Paths in this table are relative to `src/`.
+
+| Module or directory | Responsibility |
+| --- | --- |
+| `pdb_dataset_builder.py`, `pdb_plot.py` | Compatible command-line entry points and exports for existing Python imports. |
+| `dataset/config.py`, `dataset/records.py`, `dataset/errors.py` | Build settings, dataset kinds, typed records, and domain exceptions. |
+| `dataset/client/` | HTTP transport, RCSB searches, metadata, NMR records, and homology API access. |
+| `dataset/structures.py`, `dataset/coordinates.py`, `dataset/matching.py`, `dataset/geometry.py` | Coordinate conversion and parsing, sequence matching, and RMSD calculations. |
+| `dataset/cache.py`, `dataset/downloads.py`, `dataset/ca_cache.py` | Coordinate downloads, cache validation and locking, and first-model CA caches. |
+| `dataset/stride.py`, `dataset/stride_install.py` | STRIDE execution, state caching, and managed executable installation. |
+| `dataset/programs.py`, `dataset/program_statistics.py`, `dataset/history.py` | Refinement-program parsing and summaries, and historical homolog filtering. |
+| `dataset/builders/` | Dataset-specific collection and computation, including shared RMSD output generation. |
+| `dataset/io/`, `dataset/reporting.py` | CSV schemas and serialization, resume checkpoints, warning logs, and filtered-structure reports. |
+| `dataset/arguments.py`, `dataset/cli.py`, `dataset/workflows/` | CLI flags, execution order, and per-dataset workflows; homolog resume validation is separate from streaming output. |
+| `plotting/config.py`, `plotting/constants.py`, `plotting/tables.py` | Plot settings, shared constants, and tabular data preparation. |
+| `plotting/style.py`, `plotting/rendering.py` | Figure styling, shared rendering helpers, CSV caching, and output variants. |
+| `plotting/counts.py`, `weights.py`, `quality.py`, `programs.py`, `homologs.py`, `rmsd.py`, `correlation.py` | Plot families, each in its own module under `plotting/`. |
+| `plotting/plotter.py`, `plotting/cli.py`, `plotting/cli_options/` | Composition of `PDBScientificPlotter`, plot dispatch, and grouped command-line options. |
+
+Build dependencies from shared foundations toward orchestration:
+`config/records → parsing/cache/API services → builders and CSV I/O → workflows/CLI`.
+Higher layers import the lower-level functionality they need; shared modules
+must not import the CLI or the legacy entry-point modules. Plot families use
+shared table and rendering helpers, and `plotter.py` composes their public API.
+
+Existing commands remain `python src/pdb_dataset_builder.py ...` and
+`python src/pdb_plot.py ...`. Existing imports from `src.pdb_dataset_builder`
+and `src.pdb_plot` remain supported. New implementation code should import the
+owning module directly, for example `src.dataset.client.RCSBClient` or
+`src.plotting.config.PlotConfig`.
+
+Tests patch a dependency where it is consumed. For example, patch
+`src.dataset.workflows.homologs.ensure_stride_executable` when testing the
+homolog workflow; patching its old entry-point export does not replace the
+workflow's local import.
 
 ## Dataset Builder
 

@@ -194,6 +194,11 @@ python src/pdb_plot.py \
 
 Implementation details, filtering rules, dataset definitions, cache behavior,
 and RMSD formulas are documented in [`src/README.md`](src/README.md).
+The implementation is split into focused modules under `src/dataset/` and
+`src/plotting/`; see the [source organization guide](src/README.md#source-organization)
+for responsibilities and import conventions. The existing CLI paths and
+Python imports through `src.pdb_dataset_builder` and `src.pdb_plot` remain
+supported.
 
 ## License
 

@@ -13,6 +13,15 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from src import pdb_dataset_builder as builder
+from src.dataset import cli as dataset_cli
+from src.dataset import stride as stride_helpers
+from src.dataset.workflows import counts as count_workflows
+from src.dataset.workflows import historical_homologs as historical_workflows
+from src.dataset.workflows import homologs as homolog_workflows
+from src.dataset.workflows import nmr as nmr_workflows
+from src.dataset.workflows import quality as quality_workflows
+from src.dataset.workflows import stride as stride_workflows
+from src.dataset.workflows import xray as xray_workflows
 
 
 class BuilderUtilityTests(unittest.TestCase):
@@ -324,11 +333,13 @@ class BuilderUtilityTests(unittest.TestCase):
         with (
             tempfile.TemporaryDirectory() as tmpdir,
             patch.object(
-                builder, "download_pdb_if_needed", return_value=Path(tmpdir) / "x.pdb"
+                stride_helpers,
+                "download_pdb_if_needed",
+                return_value=Path(tmpdir) / "x.pdb",
             ),
-            patch.object(builder, "load_cached_chain_id_map", return_value={}),
+            patch.object(stride_helpers, "load_cached_chain_id_map", return_value={}),
             patch.object(
-                builder,
+                stride_helpers,
                 "load_first_model_stride_state_by_chain",
                 return_value=(None, 3),
             ),
@@ -351,11 +362,13 @@ class BuilderUtilityTests(unittest.TestCase):
         with (
             tempfile.TemporaryDirectory() as tmpdir,
             patch.object(
-                builder, "download_pdb_if_needed", return_value=Path(tmpdir) / "x.pdb"
+                stride_helpers,
+                "download_pdb_if_needed",
+                return_value=Path(tmpdir) / "x.pdb",
             ),
-            patch.object(builder, "load_cached_chain_id_map", return_value={}),
+            patch.object(stride_helpers, "load_cached_chain_id_map", return_value={}),
             patch.object(
-                builder,
+                stride_helpers,
                 "load_first_model_stride_state_by_chain",
                 side_effect=RuntimeError("corrupt"),
             ),
@@ -376,7 +389,7 @@ class BuilderUtilityTests(unittest.TestCase):
             )
 
         with patch.object(
-            builder,
+            stride_helpers,
             "load_first_model_stride_state_by_chain",
             side_effect=[(None, 1), ({"B": {1: "H"}, "C": {1: "E"}}, 1)],
         ):
@@ -439,7 +452,7 @@ class BuilderMainDispatchTests(unittest.TestCase):
             xray_entry_id=xray_entity_id.split("_", 1)[0],
             xray_entity_id=xray_entity_id,
             xray_chain_ids=("A", "B"),
-            reason=builder.XRAY_HOMOLOG_REJECTION_REASON,
+            reason=builder.XRAY_HOMOLOG_HETATM_REJECTION_REASON,
         )
 
     @staticmethod
@@ -488,14 +501,16 @@ class BuilderMainDispatchTests(unittest.TestCase):
                 return [record_95], [record_100]
 
             with (
-                patch.object(builder, "parse_args", return_value=args),
-                patch.object(builder, "RCSBClient"),
+                patch.object(dataset_cli, "parse_args", return_value=args),
+                patch.object(dataset_cli, "RCSBClient"),
                 patch.object(
-                    builder, "ensure_stride_executable", return_value="/bin/true"
+                    homolog_workflows,
+                    "ensure_stride_executable",
+                    return_value="/bin/true",
                 ),
-                patch.object(builder, "_configure_dataset_warning_logs"),
+                patch.object(dataset_cli, "_configure_dataset_warning_logs"),
                 patch.object(
-                    builder, "SolutionNMRMonomerXrayHomologBuilder"
+                    homolog_workflows, "SolutionNMRMonomerXrayHomologBuilder"
                 ) as builder_class,
             ):
                 builder_class.return_value.build.side_effect = build_homologs
@@ -582,14 +597,16 @@ class BuilderMainDispatchTests(unittest.TestCase):
                 return [new_95], [new_100]
 
             with (
-                patch.object(builder, "parse_args", return_value=args),
-                patch.object(builder, "RCSBClient"),
+                patch.object(dataset_cli, "parse_args", return_value=args),
+                patch.object(dataset_cli, "RCSBClient"),
                 patch.object(
-                    builder, "ensure_stride_executable", return_value="/bin/true"
+                    homolog_workflows,
+                    "ensure_stride_executable",
+                    return_value="/bin/true",
                 ),
-                patch.object(builder, "_configure_dataset_warning_logs"),
+                patch.object(dataset_cli, "_configure_dataset_warning_logs"),
                 patch.object(
-                    builder, "SolutionNMRMonomerXrayHomologBuilder"
+                    homolog_workflows, "SolutionNMRMonomerXrayHomologBuilder"
                 ) as builder_class,
             ):
                 builder_class.return_value.build.side_effect = resume_homologs
@@ -659,14 +676,16 @@ class BuilderMainDispatchTests(unittest.TestCase):
                 return [rebuilt_95], [rebuilt_100]
 
             with (
-                patch.object(builder, "parse_args", return_value=args),
-                patch.object(builder, "RCSBClient"),
+                patch.object(dataset_cli, "parse_args", return_value=args),
+                patch.object(dataset_cli, "RCSBClient"),
                 patch.object(
-                    builder, "ensure_stride_executable", return_value="/bin/true"
+                    homolog_workflows,
+                    "ensure_stride_executable",
+                    return_value="/bin/true",
                 ),
-                patch.object(builder, "_configure_dataset_warning_logs"),
+                patch.object(dataset_cli, "_configure_dataset_warning_logs"),
                 patch.object(
-                    builder, "SolutionNMRMonomerXrayHomologBuilder"
+                    homolog_workflows, "SolutionNMRMonomerXrayHomologBuilder"
                 ) as builder_class,
             ):
                 builder_class.return_value.build.side_effect = resume_homologs
@@ -737,14 +756,16 @@ class BuilderMainDispatchTests(unittest.TestCase):
                 return [rebuilt_95], [rebuilt_100]
 
             with (
-                patch.object(builder, "parse_args", return_value=args),
-                patch.object(builder, "RCSBClient"),
+                patch.object(dataset_cli, "parse_args", return_value=args),
+                patch.object(dataset_cli, "RCSBClient"),
                 patch.object(
-                    builder, "ensure_stride_executable", return_value="/bin/true"
+                    homolog_workflows,
+                    "ensure_stride_executable",
+                    return_value="/bin/true",
                 ),
-                patch.object(builder, "_configure_dataset_warning_logs"),
+                patch.object(dataset_cli, "_configure_dataset_warning_logs"),
                 patch.object(
-                    builder, "SolutionNMRMonomerXrayHomologBuilder"
+                    homolog_workflows, "SolutionNMRMonomerXrayHomologBuilder"
                 ) as builder_class,
             ):
                 builder_class.return_value.build.side_effect = resume_homologs
@@ -776,61 +797,72 @@ class BuilderMainDispatchTests(unittest.TestCase):
                 "QUALITY", 2020, 1.0, 2.0, 3.0
             )
             homolog = BuilderUtilityTests._homolog_record("NMR", ("XRAY_1",))
-            class_names = [
-                "PDBMethodYearlyBuilder",
-                "MembraneProteinYearlyBuilder",
-                "SolutionNMRProgramYearlyBuilder",
-                "SolutionNMRWeightBuilder",
-                "SolutionNMRMonomerExperimentsBuilder",
-                "SolutionNMRMonomerStrideModeledFirstModelBuilder",
-                "SolutionNMRMonomerPrecisionStrideModeledFirstModelBuilder",
-                "SolutionNMRMonomerQualityBuilder",
-                "SolutionNMRMonomerProgramClusterBuilder",
-                "SolutionNMRMonomerXrayHomologBuilder",
-            ]
+            class_modules = {
+                "PDBMethodYearlyBuilder": count_workflows,
+                "MembraneProteinYearlyBuilder": count_workflows,
+                "SolutionNMRProgramYearlyBuilder": nmr_workflows,
+                "SolutionNMRWeightBuilder": nmr_workflows,
+                "SolutionNMRMonomerExperimentsBuilder": nmr_workflows,
+                "SolutionNMRMonomerStrideModeledFirstModelBuilder": stride_workflows,
+                "SolutionNMRMonomerPrecisionStrideModeledFirstModelBuilder": stride_workflows,
+                "SolutionNMRMonomerQualityBuilder": quality_workflows,
+                "SolutionNMRMonomerProgramClusterBuilder": quality_workflows,
+                "SolutionNMRMonomerXrayHomologBuilder": homolog_workflows,
+            }
 
             with ExitStack() as stack:
                 stack.enter_context(
-                    patch.object(builder, "parse_args", return_value=args)
+                    patch.object(dataset_cli, "parse_args", return_value=args)
                 )
-                stack.enter_context(patch.object(builder, "RCSBClient"))
+                stack.enter_context(patch.object(dataset_cli, "RCSBClient"))
                 ensure_stride = stack.enter_context(
                     patch.object(
-                        builder, "ensure_stride_executable", return_value="/bin/true"
+                        homolog_workflows,
+                        "ensure_stride_executable",
+                        return_value="/bin/true",
                     )
                 )
                 stack.enter_context(
-                    patch.object(builder, "_import_filtered_structures")
+                    patch.object(
+                        stride_workflows, "ensure_stride_executable", ensure_stride
+                    )
+                )
+                stack.enter_context(
+                    patch.object(quality_workflows, "_import_filtered_structures")
+                )
+                stack.enter_context(
+                    patch.object(historical_workflows, "_import_filtered_structures")
                 )
                 stack.enter_context(
                     patch.object(
-                        builder,
+                        quality_workflows,
                         "read_solution_nmr_monomer_quality_csv",
                         return_value=[quality],
                     )
                 )
                 stack.enter_context(
                     patch.object(
-                        builder,
+                        historical_workflows,
                         "read_solution_nmr_monomer_xray_homolog_csv",
                         return_value=[homolog],
                     )
                 )
                 stack.enter_context(
                     patch.object(
-                        builder,
+                        historical_workflows,
                         "filter_xray_homolog_records_by_deposit_date",
                         return_value=[homolog],
                     )
                 )
                 rmsd_build = stack.enter_context(
                     patch.object(
-                        builder, "build_solution_nmr_monomer_xray_rmsd_outputs_to_csv"
+                        xray_workflows,
+                        "build_solution_nmr_monomer_xray_rmsd_outputs_to_csv",
                     )
                 )
                 class_mocks = {
-                    name: stack.enter_context(patch.object(builder, name))
-                    for name in class_names
+                    name: stack.enter_context(patch.object(module, name))
+                    for name, module in class_modules.items()
                 }
                 for class_mock in class_mocks.values():
                     class_mock.return_value.build.return_value = []
