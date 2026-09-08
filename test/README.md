@@ -15,8 +15,7 @@ Run the complete test suite:
 python -m pytest -q
 ```
 
-Measure branch coverage for the tracked application code (the local
-`helpers/` directory is intentionally excluded):
+Measure branch coverage for the application code:
 
 ```bash
 python -m coverage erase

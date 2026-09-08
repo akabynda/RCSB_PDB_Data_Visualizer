@@ -61,7 +61,7 @@ download:
 Use `--stride-install-dir /another/directory` to change the root of the managed
 installation. Native Windows users should run the builder in WSL or provide a
 prebuilt executable explicitly. See the [technical STRIDE
-reference](src/README.md#stride) for lookup order, versioning, and cache details.
+reference](src/README.md#stride) for executable lookup, installation, and cache details.
 
 ## Reproduce All Article Figures
 
@@ -196,9 +196,8 @@ Implementation details, filtering rules, dataset definitions, cache behavior,
 and RMSD formulas are documented in [`src/README.md`](src/README.md).
 The implementation is split into focused modules under `src/dataset/` and
 `src/plotting/`; see the [source organization guide](src/README.md#source-organization)
-for responsibilities and import conventions. The existing CLI paths and
-Python imports through `src.pdb_dataset_builder` and `src.pdb_plot` remain
-supported.
+for responsibilities and import conventions. The command-line entry points and
+Python APIs are available through `src.pdb_dataset_builder` and `src.pdb_plot`.
 
 ## License
 

@@ -41,7 +41,7 @@ The implementation is organized by responsibility under `src/dataset/` and
 
 | Module or directory | Responsibility |
 | --- | --- |
-| `pdb_dataset_builder.py`, `pdb_plot.py` | Compatible command-line entry points and exports for existing Python imports. |
+| `pdb_dataset_builder.py`, `pdb_plot.py` | Command-line entry points and public Python exports. |
 | `dataset/config.py`, `dataset/records.py`, `dataset/errors.py` | Build settings, dataset kinds, typed records, and domain exceptions. |
 | `dataset/client/` | HTTP transport, RCSB searches, metadata, NMR records, and homology API access. |
 | `dataset/structures.py`, `dataset/coordinates.py`, `dataset/matching.py`, `dataset/geometry.py` | Coordinate conversion and parsing, sequence matching, and RMSD calculations. |
@@ -52,25 +52,25 @@ The implementation is organized by responsibility under `src/dataset/` and
 | `dataset/io/`, `dataset/reporting.py` | CSV schemas and serialization, resume checkpoints, warning logs, and filtered-structure reports. |
 | `dataset/arguments.py`, `dataset/cli.py`, `dataset/workflows/` | CLI flags, execution order, and per-dataset workflows; homolog resume validation is separate from streaming output. |
 | `plotting/config.py`, `plotting/constants.py`, `plotting/tables.py` | Plot settings, shared constants, and tabular data preparation. |
-| `plotting/style.py`, `plotting/rendering.py` | Figure styling, shared rendering helpers, CSV caching, and output variants. |
+| `plotting/style.py`, `plotting/rendering.py` | Figure styling, shared rendering functions, CSV caching, and output variants. |
 | `plotting/counts.py`, `weights.py`, `quality.py`, `programs.py`, `homologs.py`, `rmsd.py`, `correlation.py` | Plot families, each in its own module under `plotting/`. |
 | `plotting/plotter.py`, `plotting/cli.py`, `plotting/cli_options/` | Composition of `PDBScientificPlotter`, plot dispatch, and grouped command-line options. |
 
 Build dependencies from shared foundations toward orchestration:
 `config/records → parsing/cache/API services → builders and CSV I/O → workflows/CLI`.
 Higher layers import the lower-level functionality they need; shared modules
-must not import the CLI or the legacy entry-point modules. Plot families use
-shared table and rendering helpers, and `plotter.py` composes their public API.
+must not import the CLI or the entry-point modules. Plot families use
+shared table and rendering functions, and `plotter.py` composes their public API.
 
-Existing commands remain `python src/pdb_dataset_builder.py ...` and
-`python src/pdb_plot.py ...`. Existing imports from `src.pdb_dataset_builder`
-and `src.pdb_plot` remain supported. New implementation code should import the
+The command-line entry points are `python src/pdb_dataset_builder.py ...` and
+`python src/pdb_plot.py ...`. Public Python exports are available from
+`src.pdb_dataset_builder` and `src.pdb_plot`. Implementation code imports the
 owning module directly, for example `src.dataset.client.RCSBClient` or
 `src.plotting.config.PlotConfig`.
 
 Tests patch a dependency where it is consumed. For example, patch
 `src.dataset.workflows.homologs.ensure_stride_executable` when testing the
-homolog workflow; patching its old entry-point export does not replace the
+homolog workflow; patching its entry-point export does not replace the
 workflow's local import.
 
 ## Dataset Builder
@@ -102,12 +102,12 @@ run STRIDE, and compute RMSD values.
 Coordinates are downloaded from RCSB, wwPDB, PDBe, or the EBI archive mirror.
 Validated coordinate-cache entries have a `.cache.json` sidecar with their
 checksum, size, modification time, and available remote validators. An
-intermediate `.cif` retained after the legacy-PDB conversion fallback does not
+intermediate `.cif` retained after the mmCIF-to-PDB conversion fallback does not
 have its own sidecar; validation metadata is stored for the converted `.pdb`.
 Cache entries are revalidated after 24 hours by default. Set
 `--pdb-cache-validation-hours 0` to validate them on every access.
 
-Structures that do not fit the legacy PDB format are downloaded as mmCIF and
+Structures that do not fit the PDB format are downloaded as mmCIF and
 converted to per-chain PDB subsets. The cache also stores the resulting chain-ID
 mapping. Per-chain subset PDBs and chain-ID mappings are installed through
 unique temporary files and atomic replacement.
@@ -115,8 +115,14 @@ unique temporary files and atomic replacement.
 Both full mmCIF-to-PDB conversions and per-chain subsets write NMR software
 names and versions into `REMARK 210 SOFTWARE USED` before the coordinates.
 Software metadata can therefore be extracted from the resulting PDB without
-the source mmCIF. This applies to newly converted files; existing cache files
-are reused as-is.
+the source mmCIF.
+
+Before any coordinate consumer runs, native and converted PDB files are
+normalized to one conformer per residue in each model. Cached coordinate
+files undergo the same normalization under the cache lock, with recalculated
+checksums when their bytes change. Direct parser calls use the same normalized
+view without modifying caller-owned files. STRIDE, Bio.PDB parsing, and CA
+parsers therefore see the same selected atoms.
 
 A per-chain subset is reused only when its requested chain set and source mmCIF
 SHA-256 still match. Its chain-ID mapping is also embedded in the metadata
@@ -124,7 +130,7 @@ transaction, so an absent or truncated mapping cannot be combined with an
 otherwise valid subset. Remote revalidation uses `ETag` and `Last-Modified`
 when available.
 
-All coordinate artifacts for one PDB ID—legacy PDB, mmCIF, converted subsets,
+All coordinate artifacts for one PDB ID—PDB, mmCIF, converted subsets,
 chain maps, and metadata—share one keyed lock. Cache state is checked again
 after acquiring the lock. A transaction revision lets concurrent waiters reuse
 the result even with `--pdb-cache-validation-hours 0`; a later sequential call
@@ -133,12 +139,12 @@ downloads remain parallel. On POSIX, persistent lock files in
 `data/pdb_cache/.locks/` also protect the cache between builder processes.
 
 First-model X-ray CA residues and coordinates are cached beside each parsed PDB
-as `*.pdb.first_model_ca.v1.npz`. One cold pass parses every chain and records
-residue order, identity, `ATOM`/`HETATM` flags, and selected coordinates. The
-pickle-free payload contains both a schema version and parser revision and is
-accepted only when the source PDB SHA-256 matches. A changed source, old
-revision, or damaged NPZ is reparsed and atomically replaced. The cache is
-shared by 95%/100% homology checks and all X-ray RMSD views.
+as `*.pdb.first_model_ca.npz`. One cold pass parses every chain and records
+residue order, full author IDs (number plus insertion code), identity,
+`ATOM`/`HETATM` flags, and selected coordinates. The pickle-free payload is
+accepted only when the source PDB SHA-256 matches. A changed source or damaged
+NPZ triggers reparsing and atomic cache replacement. The cache is shared by
+95%/100% homology checks and all X-ray RMSD views.
 
 Each primary dataset CSV receives a sibling `.log` file containing warnings and
 errors from that build. Logs are recreated at the start of a run; multi-output
@@ -156,16 +162,16 @@ paired file has three columns:
 The `year` cell is empty when no valid deposition date is available. One entry
 can have several rows if it fails independent checks. Duplicate
 `entry_id`/`reason` rows are suppressed. A header-only file means that nothing
-was filtered. Fresh builds recreate the report. A resumed
-homolog build preserves its earlier exclusions, while a derived dataset imports
+was filtered. Builds without resume recreate the report. A resumed
+homolog build preserves its recorded exclusions, while a derived dataset imports
 upstream exclusions and then appends its own. Shared multi-output exclusions are
 written to every affected report; output-specific exclusions stay in their own
 report.
 
 The 95% and 100% X-ray homolog outputs additionally receive sibling
-`*_rejected.csv` reports. These are candidate-level audit files, distinct from
-the NMR-structure-level `*_filtered.csv` reports. Their schema and rejection
-rules are described in the dataset reference below.
+`*_rejected.csv` reports. These record reasons for rejecting individual X-ray
+candidates; `*_filtered.csv` records exclusions of NMR structures. Their schema
+and rejection rules are described in the dataset reference below.
 
 ## Important Filtering Rules
 
@@ -200,19 +206,42 @@ The STRIDE summary additionally requires exactly one polymer entity instance.
 
 ## Modeled Part
 
-For coordinate-level monomer datasets, a modeled CA position is an author
-residue number with a positive-occupancy `ATOM` or `HETATM` CA record in a
-coordinate model. Duplicate records, insertion-code variants, and alternate
-locations with the same residue number are collapsed to one position.
+For coordinate-level monomer datasets, a modeled CA position is a full author
+residue identifier (integer number plus insertion code) with a positive-occupancy
+carbon `CA` record in a coordinate model. Calcium ions, explicit noncarbon
+atoms, and ligand atoms named `CA` are excluded. For native PDB files, a
+`HETATM` residue needs polypeptide evidence from `MODRES` or its chain's `SEQRES`.
+When SEQRES is present, membership in Bio.PDB's amino-acid dictionary alone is
+insufficient: a known component can also be a free ligand (for example, `8SP`
+in `2LYB`). The dictionary is a fallback only for files without SEQRES.
+Modified and D-amino acids are included as modeled positions.
+mmCIF conversions preserve exact polypeptide membership
+from `_entity_poly` and `_atom_site` in `REMARK 999 POLYPEPTIDE V1` records;
+this exact membership takes precedence over component-name inference.
+`56`, `56A`, ..., `56E` are separate positions, independent of atom altLoc.
 
-The selection is deterministic: `ATOM` is preferred to `HETATM`; insertion codes
-are ordered blank first and then lexically; higher occupancy is preferred next;
-alternate locations are ordered blank, `A`, `1`, then lexically. Residue-level
-operations retain PDB author residue numbers rather than replacing them with
-RCSB label IDs. The parser also remembers that a positive-occupancy `HETATM` CA
-was present when an `ATOM` CA wins this collapsing step at the same author
-residue number. This prevents the stricter homology filters from masking the
-`HETATM` record.
+Alternate conformers are resolved upstream for the entire residue, separately
+for each model, chain, and TER segment. When CA has alternatives, its highest
+positive occupancy selects the conformer; otherwise the highest mean occupancy
+of labeled atoms selects it. Ties use blank, `A`, `1`, then lexical order.
+Shared blank-altLoc atoms are retained, minor conformers are removed, and the
+selected atoms' altLoc fields are cleared. Coordinates and residue IDs are not
+renumbered. Duplicate CA records still sharing a full residue ID prefer `ATOM`
+to `HETATM`, then higher occupancy. A retained positive-occupancy `HETATM` CA
+also sets the position's HETATM flag even when its `ATOM` record wins.
+
+Author IDs are retained rather than replaced with RCSB label IDs. Negative and
+zero numbers, gaps, nonmonotonic numbers, reverse insertion-code order, and
+letter or numeric insertion codes remain distinct in coordinate order. CSV
+endpoints use labels such as `56E`; a numeric insertion code is written `56^1`
+to distinguish it from residue `561`. STRIDE receives reversible temporary
+numbering when an insertion code would make its output ambiguous; returned
+assignments are mapped back to the original full IDs. mmCIF-to-PDB conversion
+rejects author numbers outside the PDB field range `-999` through `9999` instead
+of shifting their digits into the insertion-code column. Nonnumeric mmCIF
+author numbers are not supported by the current Bio.PDB conversion. Reuse of
+the same full CA identifier in another TER segment of the same model is
+rejected explicitly instead of merging the segments.
 
 The positions in the first model define the STRIDE summary, core endpoints, and
 homology query. Precision uses positions shared by all models. NMR-to-X-ray
@@ -229,10 +258,15 @@ one of these states in the first model:
 - `E`: beta strand
 - `B`: isolated beta bridge
 
-Both `ATOM` and `HETATM` CA records can define the endpoints. The STRIDE summary
-can retain an entry with no core states, but precision and homology datasets
-cannot. The core states define only the endpoints; downstream steps start from
-the observed CA positions between them, not only residues in those states.
+Core endpoints require explicit STRIDE assignments. The managed STRIDE build
+reads `ATOM` records and skips `HETATM`; modeled polypeptide `HETATM` positions
+can lie inside the core interval. The STRIDE summary can retain an entry with
+no core states, but precision and homology datasets cannot. The core states
+define only the endpoints; downstream steps start from the observed CA
+positions between them, not only residues in those states.
+The span follows coordinate-record order, including insertion codes, rather
+than numeric or lexical sorting. The first model defines its full set of IDs;
+a missing endpoint in another model cannot change that span.
 
 ## STRIDE
 
@@ -249,8 +283,8 @@ The builder resolves STRIDE in this order:
 1. the path passed with `--solution-nmr-monomer-stride-executable`;
 2. an executable named `stride` in `PATH`;
 3. the versioned, platform-specific managed build under `data/stride/`;
-4. the legacy local build at `/tmp/stride_src/src/stride`;
-5. a new automatic managed installation.
+4. the local build at `/tmp/stride_src/src/stride`;
+5. an automatic managed installation.
 
 The automatic path is used only when no explicit value was supplied. A bad
 explicit path fails instead of silently selecting or downloading another
@@ -276,15 +310,15 @@ files are verified before its Makefile is run again.
 
 Automatic setup requires Git, GNU Make, a C compiler (`gcc`, `cc`, or `clang`),
 and GitHub access. Use `--stride-install-dir` to change the managed installation
-root. Native Windows users should use WSL or pass a prebuilt executable. The
-versioned directory means that changing the pinned revision creates a separate
-installation rather than silently replacing an older one.
+root. Native Windows users should use WSL or pass a prebuilt executable. Each
+pinned revision uses a separate installation directory.
 
 First-model STRIDE state maps are cached by structure in `data/stride_cache/` by
-default and reused across STRIDE-based datasets. A cache entry is accepted only
-when the SHA-1 of the complete first-model coordinate text still matches. The
-STRIDE path and version are not part of that key, so clear this cache after
-changing STRIDE. Use `--stride-cache-dir` to change the cache location.
+default and reused across STRIDE-based datasets. A cache entry requires a
+matching SHA-1 of the complete first-model coordinate text. The STRIDE path and
+version are not part of that key, so clear
+this cache after changing STRIDE. Use `--stride-cache-dir` to change the cache
+location.
 
 ## Useful Options
 
@@ -312,10 +346,10 @@ Long-running calculations:
 
 The homolog completion checkpoint is written beside the 95% output as
 `<95%-output-stem>.resume.tsv`. With `--resume`, valid paired 95%/100% rows are
-retained only after their rejected-candidate audit was checkpointed; entries
-checkpointed as `ineligible` are also retained. Unfinished, failed, or legacy
-unaudited pairs are retried. Without the flag, the homolog CSV pair, rejected
-reports, and checkpoint are rebuilt.
+retained only after their rejected-candidate reports were checkpointed; entries
+checkpointed as `ineligible` are also retained. Unfinished or failed pairs, and
+pairs without checkpointed rejection reports, are retried. Without the flag,
+the homolog CSV pair, rejected reports, and checkpoint are rebuilt.
 
 Every selected dataset is rebuilt by default. With `--resume`, precision and
 each selected RMSD output reuse valid existing rows independently, so a
@@ -476,14 +510,24 @@ the modeled part only.
 The output stores the modeled residue span and STRIDE fractions for `H`, `G`,
 `I`, `E`, `B`, `T`, and `C`.
 
-Unrecognized or missing assignments are counted as `C`. If STRIDE returns no
-usable state map, the row is retained with state fractions of `-1.0` and
-`stride_secondary_structure_percent = 200.0`.
+Every modeled CA position must have a recognized STRIDE assignment. `C` means
+an explicit coil assignment; a missing or unrecognized assignment is not coil.
+STRIDE's `B` and lowercase `b` both mean an isolated bridge and are counted in
+the dataset's `B` class. The bundled STRIDE reads `ATOM` records only, so
+modified amino acids stored as `HETATM` (for example, hydroxyproline `HYP`)
+cause incomplete assignments under this completeness rule.
+Incomplete or failed STRIDE results are excluded and recorded in the filtered
+structure report, including when STRIDE exits successfully. No sentinel state
+fractions or percentages are written as a dataset row.
+The report preserves the distinction between a nonzero STRIDE exit (including
+its diagnostic), a missing requested chain, and incomplete residue assignments
+(including the missing author IDs). Assignments from another chain never
+substitute for the requested chain. STRIDE's `-` output label is mapped to a
+blank author chain only when the input actually contains a blank chain.
 
 That stored percentage is `100 * (1 - C)` and includes turns (`T`). Figure 3
 does not use it: the plot computes `100 * (H + G + I + E + B)`, removes values
-outside 0–100%, and takes the arithmetic mean for each year. In the article
-snapshot, this excludes 97 rows and plots 10,030 through 2024.
+outside 0–100%, and takes the arithmetic mean for each year.
 
 Output:
 
@@ -504,15 +548,16 @@ aligned coordinate of residue `j` in model `i`, and
 r_mean,j = (1/N) * sum_i r_ij(aligned).
 ```
 
-The current ensemble precision is
+Ensemble precision is
 
 ```text
 P = sqrt[(1 / (N*n)) * sum_i sum_j ||r_ij(aligned) - r_mean,j||^2].
 ```
 
-The CSV field `n_ca_core_used` is the size of the collapsed-CA intersection.
-`n_ca_core_raw` is the smallest raw positive-occupancy CA-record count across
-models at those positions.
+The CSV field `n_ca_core_used` is the size of the intersection of full residue
+IDs, including insertion codes. `n_ca_core_raw` is the smallest retained
+positive-occupancy CA-record count across models at those positions, after the
+shared altLoc cleanup and before duplicate-record selection.
 
 Output:
 
