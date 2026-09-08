@@ -3,6 +3,7 @@
 import unittest
 
 from src.pdb_dataset_builder import _extract_stride_core_range_for_modeled_auth_seq_ids
+from src.dataset.records import ResidueId
 
 
 class ExtractStrideCoreRangeForModeledAuthSeqIdsTests(unittest.TestCase):
@@ -48,3 +49,23 @@ class ExtractStrideCoreRangeForModeledAuthSeqIdsTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_core_endpoint_includes_the_last_structured_insertion() -> None:
+    ids = [ResidueId(56), *(ResidueId(56, code) for code in "ABCDE"), ResidueId(57)]
+    states = dict(zip(ids, ["H", "T", "T", "E", "E", "E", "C"]))
+    assert _extract_stride_core_range_for_modeled_auth_seq_ids(states, ids) == (
+        ResidueId(56),
+        ResidueId(56, "E"),
+    )
+
+
+def test_core_endpoints_follow_reverse_insertion_and_nonmonotonic_sequence_order() -> (
+    None
+):
+    ids = [ResidueId(1, "R"), ResidueId(1, "Q"), ResidueId(1), ResidueId(-3)]
+    states = dict(zip(ids, ["E", "H", "H", "C"]))
+    assert _extract_stride_core_range_for_modeled_auth_seq_ids(states, ids) == (
+        ResidueId(1, "R"),
+        ResidueId(1),
+    )

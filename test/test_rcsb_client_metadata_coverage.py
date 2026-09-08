@@ -81,8 +81,8 @@ class RCSBClientMetadataTests(unittest.TestCase):
     def test_monomer_context_rejects_every_invalid_metadata_layer(self) -> None:
         with patch.object(
             self.client,
-            "_solution_nmr_monomer_models_have_equal_lengths",
-            return_value=True,
+            "_solution_nmr_monomer_model_length_issue",
+            return_value=None,
         ) as equal_lengths:
             self.assertIsNone(self.client._extract_solution_nmr_monomer_context({}))
 
@@ -128,13 +128,15 @@ class RCSBClientMetadataTests(unittest.TestCase):
                         self.client._extract_solution_nmr_monomer_context(entry)
                     )
 
-            equal_lengths.return_value = False
+            equal_lengths.return_value = (
+                "coordinate models do not have equal full-chain lengths"
+            )
             self.assertIsNone(
                 self.client._extract_solution_nmr_monomer_context(
                     self._monomer_entry("UNEQUAL")
                 )
             )
-            equal_lengths.return_value = True
+            equal_lengths.return_value = None
             context = self.client._extract_solution_nmr_monomer_context(
                 self._monomer_entry("VALID")
             )
@@ -170,7 +172,8 @@ class RCSBClientMetadataTests(unittest.TestCase):
         self.assertEqual(starts, [0, 1])
 
         self.client._post_json = Mock(return_value={"total_count": 5, "result_set": []})
-        self.assertEqual(self.client._fetch_paginated_identifiers({}, "entry"), [])
+        with self.assertRaisesRegex(RuntimeError, "empty page before completion"):
+            self.client._fetch_paginated_identifiers({}, "entry")
 
     def test_method_and_annotation_queries_delegate_expected_filters(self) -> None:
         with patch.object(
@@ -664,13 +667,17 @@ class RCSBClientMetadataTests(unittest.TestCase):
                 return_value=context,
             ),
             patch.object(
-                stride_client, "download_pdb_if_needed", return_value=Path(tmpdir) / "x.pdb"
+                stride_client,
+                "download_pdb_if_needed",
+                return_value=Path(tmpdir) / "x.pdb",
             ),
-            patch.object(stride_client, "load_cached_chain_id_map", return_value={"A": "Z"}),
+            patch.object(
+                stride_client, "load_cached_chain_id_map", return_value={"A": "Z"}
+            ),
             patch.object(
                 stride_client,
                 "parse_first_model_modeled_ca_auth_seq_ids",
-                return_value={10, 11},
+                return_value=[10, 11],
             ),
             patch.object(
                 stride_client,
@@ -726,6 +733,42 @@ class RCSBClientMetadataTests(unittest.TestCase):
                 )
             )
         self.assertCountEqual(yielded, ["first", "second"])
+
+    def test_incomplete_stride_is_filtered_instead_of_writing_sentinel_percent(
+        self,
+    ) -> None:
+        entry = self._monomer_entry("INCOMPLETE")
+        entity = entry["polymer_entities"][0]
+        entity["polymer_entity_instances"] = [{"rcsb_id": "INCOMPLETE.A"}]
+        with (
+            patch.object(
+                self.client,
+                "_extract_solution_nmr_monomer_context",
+                return_value=("INCOMPLETE", 2020, 2, entity, "A"),
+            ),
+            patch.object(
+                stride_client, "download_pdb_if_needed", return_value=Path("x.pdb")
+            ),
+            patch.object(stride_client, "load_cached_chain_id_map", return_value={}),
+            patch.object(
+                stride_client,
+                "parse_first_model_modeled_ca_auth_seq_ids",
+                return_value=[10, 11],
+            ),
+            patch.object(
+                stride_client,
+                "compute_stride_state_coverages_for_chain_modeled_first_model",
+                return_value=(dict.fromkeys(builder.STRIDE_STATE_CODES, -1.0), 2, 0),
+            ),
+            patch.object(stride_client, "_record_filtered_structure") as rejected,
+        ):
+            record = self.client._compute_solution_nmr_monomer_stride_modeled_first_model_for_entry(
+                entry, "/stride", Path("cache"), Path("stride")
+            )
+        self.assertIsNone(record)
+        rejected.assert_called_once_with(
+            "INCOMPLETE", "STRIDE did not assign every modeled residue", year=2020
+        )
 
     def test_model_length_check_contains_download_and_short_model_failures(
         self,

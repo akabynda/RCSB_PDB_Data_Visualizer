@@ -32,6 +32,7 @@ from src.dataset.matching import (
     find_modeled_ca_core_identity_matches,
 )
 from src.dataset.records import (
+    ResidueId,
     SolutionNMRMonomerXrayRmsdExtremesRecord,
     SolutionNMRMonomerXrayRmsdRecord,
 )
@@ -309,8 +310,8 @@ class SolutionNMRMonomerXrayRmsdBuilder:
     def _prepare_nmr_core_data(
         nmr_pdb_path: Path,
         nmr_chain_id: str,
-        nmr_core_start_seq_id: int,
-        nmr_core_end_seq_id: int,
+        nmr_core_start_seq_id: ResidueId | int,
+        nmr_core_end_seq_id: ResidueId | int,
     ) -> PreparedNMRCoreData | None:
         """Parse invariant NMR core inputs once for all X-ray candidates."""
         nmr_residues = parse_first_model_ca_residues(
@@ -339,13 +340,15 @@ class SolutionNMRMonomerXrayRmsdBuilder:
     def _compute_ca_rmsd_to_xray(
         nmr_pdb_path: Path,
         nmr_chain_id: str,
-        nmr_core_start_seq_id: int,
-        nmr_core_end_seq_id: int,
+        nmr_core_start_seq_id: ResidueId | int,
+        nmr_core_end_seq_id: ResidueId | int,
         xray_pdb_path: Path,
         xray_chain_id: str,
         sequence_identity_percent: int,
         prepared_nmr_core: PreparedNMRCoreData | None = None,
-    ) -> tuple[int, float, int, int, int, int] | None:
+    ) -> (
+        tuple[int, float, ResidueId | int, ResidueId | int, ResidueId, ResidueId] | None
+    ):
         """Compute CA RMSD after aligning an NMR model core to an X-ray chain."""
         _ = sequence_identity_percent
         if prepared_nmr_core is None:
@@ -377,10 +380,13 @@ class SolutionNMRMonomerXrayRmsdBuilder:
         if not xray_first_model_map:
             return None
 
-        best_result: tuple[int, float, int, int, int, int] | None = None
+        best_result: (
+            tuple[int, float, ResidueId | int, ResidueId | int, ResidueId, ResidueId]
+            | None
+        ) = None
         for matched_pairs in matched_pair_sets:
             rmsd_pairs = [
-                (nmr_record.resid, xray_record.resid)
+                (nmr_record.key, xray_record.key)
                 for nmr_record, xray_record in matched_pairs
                 if nmr_record.is_standard_atom and xray_record.is_standard_atom
             ]
@@ -403,16 +409,14 @@ class SolutionNMRMonomerXrayRmsdBuilder:
                 dtype=float,
             )
             rmsd_value = _superposed_rmsd(nmr_coords, xray_coords)
-            xray_matched_resids = [
-                xray_record.resid for _, xray_record in matched_pairs
-            ]
+            xray_matched_resids = [xray_record.key for _, xray_record in matched_pairs]
             result = (
                 len(rmsd_pairs),
                 rmsd_value,
                 nmr_core_start_seq_id,
                 nmr_core_end_seq_id,
-                min(xray_matched_resids),
-                max(xray_matched_resids),
+                xray_matched_resids[0],
+                xray_matched_resids[-1],
             )
             if best_result is None or result[1] < best_result[1]:
                 best_result = result

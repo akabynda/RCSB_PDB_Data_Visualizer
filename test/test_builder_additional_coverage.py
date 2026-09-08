@@ -16,6 +16,7 @@ import requests
 
 import src.dataset.ca_cache as builder_ca_cache
 import src.dataset.client.transport as builder_client_transport
+import src.dataset.coordinates as builder_coordinates
 import src.dataset.downloads as builder_downloads
 import src.dataset.stride as builder_stride
 import src.dataset.stride_install as builder_stride_install
@@ -179,7 +180,9 @@ def test_resolve_stride_executable_obeys_explicit_path_and_fallbacks(
         assert builder.resolve_stride_executable(str(explicit)) == str(explicit)
         which.assert_not_called()
 
-    with patch.object(builder_stride_install.shutil, "which", return_value="/bin/stride"):
+    with patch.object(
+        builder_stride_install.shutil, "which", return_value="/bin/stride"
+    ):
         assert builder.resolve_stride_executable("  ") == "/bin/stride"
 
     with (
@@ -190,13 +193,15 @@ def test_resolve_stride_executable_obeys_explicit_path_and_fallbacks(
 
     with (
         patch.object(builder_stride_install.shutil, "which", return_value=None),
-        patch.object(builder_stride_install, "LOCAL_STRIDE_CANDIDATE", tmp_path / "absent"),
+        patch.object(
+            builder_stride_install, "LOCAL_STRIDE_CANDIDATE", tmp_path / "absent"
+        ),
     ):
         assert builder.resolve_stride_executable("") is None
         assert builder.resolve_stride_executable(str(tmp_path / "missing")) is None
 
 
-def test_cache_metadata_loader_rejects_missing_corrupt_and_old_payloads(
+def test_cache_metadata_loader_rejects_missing_corrupt_and_non_object_payloads(
     tmp_path: Path,
 ) -> None:
     pdb_path = tmp_path / "1ABC.pdb"
@@ -210,13 +215,7 @@ def test_cache_metadata_loader_rejects_missing_corrupt_and_old_payloads(
     sidecar.write_text("[]", encoding="utf-8")
     assert builder._load_pdb_cache_metadata(pdb_path) is None
 
-    sidecar.write_text(json.dumps({"schema_version": 999}), encoding="utf-8")
-    assert builder._load_pdb_cache_metadata(pdb_path) is None
-
-    payload = {
-        "schema_version": builder.PDB_CACHE_METADATA_SCHEMA_VERSION,
-        "cache_revision": "rev-1",
-    }
+    payload = {"cache_revision": "rev-1"}
     sidecar.write_text(json.dumps(payload), encoding="utf-8")
     assert builder._load_pdb_cache_metadata(pdb_path) == payload
     assert builder._cache_revision(payload) == "rev-1"
@@ -335,13 +334,19 @@ def test_coordinate_download_sources_and_cached_source_priority_are_stable() -> 
     assert len(set(prioritized)) == len(prioritized)
 
 
+class _EmptyChain(list):
+    def __init__(self, id: str) -> None:
+        super().__init__()
+        self.id = id
+
+
 def test_chain_id_coercion_handles_collisions_and_duplicate_models() -> None:
     first_model = [
-        SimpleNamespace(id="A"),
-        SimpleNamespace(id="Alpha"),
-        SimpleNamespace(id="Beta"),
+        _EmptyChain(id="A"),
+        _EmptyChain(id="Alpha"),
+        _EmptyChain(id="Beta"),
     ]
-    second_model = [SimpleNamespace(id="A"), SimpleNamespace(id="Alpha")]
+    second_model = [_EmptyChain(id="A"), _EmptyChain(id="Alpha")]
     structure = [first_model, second_model]
 
     changed = builder._coerce_structure_chain_ids_for_pdbio(structure)
@@ -354,7 +359,7 @@ def test_chain_id_coercion_handles_collisions_and_duplicate_models() -> None:
 
 
 def test_chain_id_map_is_applied_without_swap_collisions() -> None:
-    chains = [SimpleNamespace(id="A"), SimpleNamespace(id="B")]
+    chains = [_EmptyChain(id="A"), _EmptyChain(id="B")]
     builder._apply_chain_id_map_without_transient_conflicts(
         [chains], {"A": "B", "B": "A"}
     )
@@ -362,9 +367,9 @@ def test_chain_id_map_is_applied_without_swap_collisions() -> None:
 
 
 def test_selected_chain_coercion_leaves_unselected_chains_untouched() -> None:
-    selected_a = SimpleNamespace(id="A")
-    selected_long = SimpleNamespace(id="Alpha")
-    unselected = SimpleNamespace(id="other")
+    selected_a = _EmptyChain(id="A")
+    selected_long = _EmptyChain(id="Alpha")
+    unselected = _EmptyChain(id="other")
     mapping, selected_object_ids = (
         builder._coerce_selected_structure_chain_ids_for_pdbio(
             [[selected_long, unselected, selected_a]], {"A", "Alpha", "missing"}
@@ -379,7 +384,7 @@ def test_selected_chain_coercion_leaves_unselected_chains_untouched() -> None:
 
 @pytest.mark.parametrize("selected_only", [False, True])
 def test_chain_id_coercion_rejects_exhausted_pdb_id_pool(selected_only: bool) -> None:
-    structure = [[SimpleNamespace(id="A"), SimpleNamespace(id="Alpha")]]
+    structure = [[_EmptyChain(id="A"), _EmptyChain(id="Alpha")]]
     with patch.object(builder_structures, "PDB_CHAIN_ID_POOL", ""):
         with pytest.raises(RuntimeError, match="Too many"):
             if selected_only:
@@ -424,8 +429,12 @@ def test_valid_cached_chain_subset_requires_complete_source_bound_mapping(
         return subset_metadata if path == subset_path else cif_metadata
 
     with (
-        patch.object(builder_downloads, "_load_pdb_cache_metadata", side_effect=metadata),
-        patch.object(builder_downloads, "_cached_pdb_matches_metadata", return_value=True),
+        patch.object(
+            builder_downloads, "_load_pdb_cache_metadata", side_effect=metadata
+        ),
+        patch.object(
+            builder_downloads, "_cached_pdb_matches_metadata", return_value=True
+        ),
     ):
         assert builder._load_valid_cached_chain_subset(
             subset_path=subset_path,
@@ -447,8 +456,12 @@ def test_valid_cached_chain_subset_requires_complete_source_bound_mapping(
 def test_chain_map_loaders_use_metadata_then_legacy_csv(tmp_path: Path) -> None:
     metadata = {"chain_id_map": {"long": "A", "": "B", "bad": ""}}
     with (
-        patch.object(builder_structures, "_load_pdb_cache_metadata", return_value=metadata),
-        patch.object(builder_structures, "_cached_pdb_matches_metadata", return_value=True),
+        patch.object(
+            builder_structures, "_load_pdb_cache_metadata", return_value=metadata
+        ),
+        patch.object(
+            builder_structures, "_cached_pdb_matches_metadata", return_value=True
+        ),
     ):
         assert builder.load_cached_chain_id_map(tmp_path, "1abc") == {"long": "A"}
 
@@ -462,7 +475,9 @@ def test_chain_map_loaders_use_metadata_then_legacy_csv(tmp_path: Path) -> None:
 
     legacy_cache_map = tmp_path / "1ABC.chain_map.csv"
     legacy_cache_map.write_text(map_path.read_text(encoding="utf-8"), encoding="utf-8")
-    with patch.object(builder_structures, "_load_pdb_cache_metadata", return_value=None):
+    with patch.object(
+        builder_structures, "_load_pdb_cache_metadata", return_value=None
+    ):
         assert builder.load_cached_chain_id_map(tmp_path, "1abc") == {
             "long": "A",
             "second": "C",
@@ -491,7 +506,9 @@ def test_locked_subset_builder_reports_selected_chains_missing_from_structure(
             "_load_pdb_cache_metadata",
             return_value={"sha256": "source", "source_url": "fixture"},
         ),
-        patch.object(builder_downloads, "_load_valid_cached_chain_subset", return_value=None),
+        patch.object(
+            builder_downloads, "_load_valid_cached_chain_subset", return_value=None
+        ),
         patch.object(builder_downloads, "parse_mmcif_structure", return_value=[[]]),
     ):
         with pytest.raises(RuntimeError, match="missing selected chains: A"):
@@ -543,20 +560,19 @@ def test_stride_output_parser_ignores_bad_rows_normalizes_and_deduplicates() -> 
         ]
     )
     assert builder._parse_stride_state_by_chain(stdout) == {
-        "A": {12: "H"},
-        "B": {13: "C"},
+        "A": {builder.ResidueId(12, "A"): "H"},
     }
 
 
-def test_stride_chain_selection_uses_exact_then_single_chain_fallback() -> None:
+def test_stride_chain_selection_never_borrows_another_chain() -> None:
     exact = {"A": {1: "H"}, "B": {2: "E"}}
     assert builder._select_stride_chain_states(exact, "B") == {2: "E"}
     assert builder._select_stride_chain_states(exact, "missing") is None
-    assert builder._select_stride_chain_states({"only": {3: "T"}}, "A") == {3: "T"}
+    assert builder._select_stride_chain_states({"only": {3: "T"}}, "A") is None
     assert builder._select_stride_chain_states({}, "A") is None
 
 
-def test_stride_runner_parses_success_and_returns_none_on_nonzero_exit() -> None:
+def test_stride_runner_parses_success_and_reports_nonzero_exit() -> None:
     model_text = _ca_line()
 
     def successful_run(command, **kwargs):
@@ -575,7 +591,8 @@ def test_stride_runner_parses_success_and_returns_none_on_nonzero_exit() -> None
         "run",
         return_value=SimpleNamespace(returncode=2, stdout="ignored"),
     ):
-        assert builder._run_stride_for_model_text(model_text, "stride-fixture") is None
+        with pytest.raises(RuntimeError, match="STRIDE exited with status 2: ignored"):
+            builder._run_stride_for_model_text(model_text, "stride-fixture")
 
 
 @pytest.mark.parametrize(
@@ -667,7 +684,9 @@ def test_first_model_stride_loader_handles_no_coordinates_and_failed_stride(
     pdb_path.write_text(_ca_line(), encoding="utf-8")
     with (
         patch.object(builder_stride, "_run_stride_for_model_text", return_value=None),
-        patch.object(builder_stride, "_write_cached_stride_state_by_chain") as write_cache,
+        patch.object(
+            builder_stride, "_write_cached_stride_state_by_chain"
+        ) as write_cache,
     ):
         assert builder.load_first_model_stride_state_by_chain(
             pdb_path, "1ABC", "stride", tmp_path / "cache"
@@ -675,14 +694,16 @@ def test_first_model_stride_loader_handles_no_coordinates_and_failed_stride(
         write_cache.assert_not_called()
 
 
-def test_stride_coverages_fill_unassigned_modeled_length_as_coil(
+def test_stride_coverages_reject_unassigned_modeled_residues(
     tmp_path: Path,
 ) -> None:
     with (
         patch.object(
             builder_stride, "download_pdb_if_needed", return_value=tmp_path / "x.pdb"
         ),
-        patch.object(builder_stride, "load_cached_chain_id_map", return_value={"long": "A"}),
+        patch.object(
+            builder_stride, "load_cached_chain_id_map", return_value={"long": "A"}
+        ),
         patch.object(
             builder_stride,
             "load_first_model_stride_state_by_chain",
@@ -703,16 +724,8 @@ def test_stride_coverages_fill_unassigned_modeled_length_as_coil(
             )
         )
 
-    assert (model_count, succeeded) == (3, 1)
-    assert coverages == {
-        "H": 0.25,
-        "G": 0.0,
-        "I": 0.0,
-        "E": 0.25,
-        "B": 0.0,
-        "T": 0.0,
-        "C": 0.5,
-    }
+    assert (model_count, succeeded) == (3, 0)
+    assert coverages == {state: -1.0 for state in builder.STRIDE_STATE_CODES}
 
 
 def test_stride_coverages_return_sentinels_for_input_download_and_parse_failures(
@@ -749,7 +762,9 @@ def test_stride_coverages_return_sentinels_for_input_download_and_parse_failures
         ) == (expected, 0, 0)
 
     with (
-        patch.object(builder_stride, "download_pdb_if_needed", return_value=tmp_path / "x"),
+        patch.object(
+            builder_stride, "download_pdb_if_needed", return_value=tmp_path / "x"
+        ),
         patch.object(builder_stride, "load_cached_chain_id_map", return_value={}),
         patch.object(
             builder_stride,
@@ -770,7 +785,7 @@ def test_stride_coverages_return_sentinels_for_input_download_and_parse_failures
         ) == (expected, 2, 0)
 
 
-def test_stride_core_wrapper_short_circuits_and_selects_single_chain_fallback(
+def test_stride_core_wrapper_short_circuits_and_rejects_other_chain(
     tmp_path: Path,
 ) -> None:
     with patch.object(builder_stride, "load_first_model_stride_state_by_chain") as load:
@@ -791,7 +806,7 @@ def test_stride_core_wrapper_short_circuits_and_selects_single_chain_fallback(
             builder.compute_stride_core_range_for_modeled_auth_seq_ids_in_first_model(
                 tmp_path / "x.pdb", "1ABC", "A", {1, 2, 3}, "stride", tmp_path
             )
-            == (2, 3)
+            is None
         )
 
 
@@ -803,7 +818,10 @@ def test_ca_line_parser_handles_fixed_columns_long_names_and_bad_fields() -> Non
     assert builder._parse_first_model_ca_line_fields(_ca_line(atom_name="N")) is None
 
     long_name = builder._parse_first_model_ca_line_fields(
-        _ca_line(record="HETATM", resname="A1BEB", resid=30)
+        _ca_line(record="HETATM", resname="A1BEB", resid=30),
+        polymer_metadata=builder_coordinates.PDBPolymerMetadata(
+            seqres_by_chain={"A": {"A1BEB"}}
+        ),
     )
     assert long_name == ("A", 30, "", "", 1.0, "A1BEB")
 
@@ -864,7 +882,7 @@ def test_modres_parser_ignores_truncated_record(tmp_path: Path) -> None:
     assert builder._parse_pdb_modres_identity_map(pdb_path) == {}
 
 
-def test_first_model_residue_parser_applies_atom_insertion_and_altloc_priority(
+def test_first_model_residue_parser_preserves_insertions_and_selects_altloc(
     tmp_path: Path,
 ) -> None:
     pdb_path = tmp_path / "selection.pdb"
@@ -888,8 +906,9 @@ def test_first_model_residue_parser_applies_atom_insertion_and_altloc_priority(
     records = builder.parse_first_model_ca_residues(
         pdb_path, "A", start_seq_id=5, end_seq_id=7, include_hetatm=True
     )
-    assert [(record.resid, record.identity) for record in records] == [
+    assert [(record.key, record.identity) for record in records] == [
         (5, "A"),
+        (builder.ResidueId(6, "A"), "A"),
         (6, "A"),
         (7, "S"),
     ]
@@ -899,7 +918,7 @@ def test_first_model_residue_parser_applies_atom_insertion_and_altloc_priority(
     atom_only = builder.parse_first_model_ca_residue_sequence(
         pdb_path, "A", include_hetatm=False
     )
-    assert atom_only == [(5, "A"), (6, "A"), (7, "S")]
+    assert atom_only == [(5, "A"), (builder.ResidueId(6, "A"), "A"), (6, "A"), (7, "S")]
 
 
 def test_model_coordinate_parser_finalizes_model_less_altloc_data(
@@ -913,7 +932,7 @@ def test_model_coordinate_parser_finalizes_model_less_altloc_data(
         encoding="utf-8",
     )
     models, raw_counts = builder.parse_models_ca_coords_with_stats(pdb_path, "A")
-    assert raw_counts == [{1: 2}]
+    assert raw_counts == [{1: 1}]
     np.testing.assert_allclose(models[0][1], [2.0, 2.0, 3.0])
     wrapped = builder.parse_models_ca_coords(pdb_path, "A")
     np.testing.assert_allclose(wrapped[0][1], [2.0, 2.0, 3.0])
@@ -958,9 +977,13 @@ def test_coordinate_hash_prefers_valid_metadata_and_falls_back_to_file(
     trusted_sha = "a" * 64
     with (
         patch.object(
-            builder_ca_cache, "_load_pdb_cache_metadata", return_value={"sha256": trusted_sha}
+            builder_ca_cache,
+            "_load_pdb_cache_metadata",
+            return_value={"sha256": trusted_sha},
         ),
-        patch.object(builder_ca_cache, "_cached_pdb_matches_metadata", return_value=True),
+        patch.object(
+            builder_ca_cache, "_cached_pdb_matches_metadata", return_value=True
+        ),
         patch.object(builder_ca_cache, "_sha256_file") as hash_file,
     ):
         assert builder._coordinate_source_sha256(pdb_path) == trusted_sha
@@ -991,12 +1014,11 @@ def test_first_model_ca_cache_roundtrip_supports_empty_and_coordinate_less_chain
 
 def _write_raw_ca_cache(path: Path, **overrides: np.ndarray) -> None:
     payload = {
-        "schema_version": np.asarray(builder.XRAY_CA_CACHE_SCHEMA_VERSION),
-        "parser_revision": np.asarray(builder.XRAY_CA_PARSER_REVISION),
         "source_sha256": np.asarray("source"),
         "chain_ids": np.asarray(["A"]),
         "chain_offsets": np.asarray([0, 1], dtype=np.int64),
         "resids": np.asarray([1], dtype=np.int64),
+        "insertion_codes": np.asarray([""]),
         "identities": np.asarray(["A"]),
         "flags": np.asarray([1], dtype=np.uint8),
         "coords": np.asarray([[1.0, 2.0, 3.0]]),
@@ -1018,6 +1040,7 @@ def _write_raw_ca_cache(path: Path, **overrides: np.ndarray) -> None:
         {
             "chain_offsets": np.asarray([0, 2]),
             "resids": np.asarray([1, 1]),
+            "insertion_codes": np.asarray(["", ""]),
             "identities": np.asarray(["A", "A"]),
             "flags": np.asarray([1, 1], dtype=np.uint8),
             "coords": np.asarray([[1.0, 2.0, 3.0], [2.0, 3.0, 4.0]]),
@@ -1041,10 +1064,14 @@ def test_cached_first_model_ca_data_reparses_if_source_changes_mid_transaction(
     first = {"A": ((builder.CAResidueRecord(1, "A", True),), {1: np.zeros(3)})}
     second = {"A": ((builder.CAResidueRecord(2, "G", True),), {2: np.ones(3)})}
     with (
-        patch.object(builder_ca_cache, "_coordinate_source_sha256", side_effect=["old", "new"]),
+        patch.object(
+            builder_ca_cache, "_coordinate_source_sha256", side_effect=["old", "new"]
+        ),
         patch.object(builder_ca_cache, "_read_first_model_ca_cache", return_value=None),
         patch.object(
-            builder_ca_cache, "_parse_first_model_ca_data_by_chain", side_effect=[first, second]
+            builder_ca_cache,
+            "_parse_first_model_ca_data_by_chain",
+            side_effect=[first, second],
         ) as parse,
         patch.object(builder_ca_cache, "_write_first_model_ca_cache") as write,
     ):
@@ -1081,7 +1108,9 @@ def test_thread_local_session_is_reused_and_delegates_get_and_post() -> None:
     session.get.return_value = "get-response"
     session.post.return_value = "post-response"
     session.headers = {}
-    with patch.object(builder_client_transport.requests, "Session", return_value=session) as factory:
+    with patch.object(
+        builder_client_transport.requests, "Session", return_value=session
+    ) as factory:
         client = builder.ThreadLocalRequestsSession("fixture-agent")
         assert client.get("https://example.test/a", timeout=1) == "get-response"
         assert client.post("https://example.test/b", json={"x": 1}) == "post-response"
@@ -1139,7 +1168,9 @@ def test_sequence_identity_group_extraction_filters_memberships() -> None:
     ) == {95: "g95"}
 
 
-def test_client_pagination_advances_by_returned_items_and_stops_on_empty_page() -> None:
+def test_client_pagination_advances_by_returned_items_and_rejects_early_empty_page() -> (
+    None
+):
     client = builder.RCSBClient(builder.DatasetBuildConfig(page_size=2))
     client._post_json = Mock(
         side_effect=[
@@ -1155,10 +1186,8 @@ def test_client_pagination_advances_by_returned_items_and_stops_on_empty_page() 
         ]
     )
     query = {"type": "terminal"}
-    assert client._fetch_paginated_identifiers(query, "entry", "fixture") == [
-        "1ABC",
-        "2DEF",
-    ]
+    with pytest.raises(RuntimeError, match="empty page before completion"):
+        client._fetch_paginated_identifiers(query, "entry", "fixture")
     calls = client._post_json.call_args_list
     assert calls[0].args[1]["request_options"]["paginate"] == {
         "start": 0,

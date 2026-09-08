@@ -152,8 +152,8 @@ class SafePDBCacheTests(unittest.TestCase):
         self.addCleanup(self.temp_dir.cleanup)
         self.cache_dir = Path(self.temp_dir.name)
 
-    def test_initial_download_writes_file_and_versioned_metadata(self) -> None:
-        """Write coordinate data and schema-versioned metadata initially."""
+    def test_initial_download_writes_file_and_cache_metadata(self) -> None:
+        """Write coordinate data and checksum metadata initially."""
         session = _FakeSession(
             [
                 _FakeResponse(
@@ -430,7 +430,7 @@ class SafePDBCacheTests(unittest.TestCase):
         )
         structure = parse_pdb_structure("4W2E", source_pdb)
         cif_path = self.cache_dir / "4W2E.cif"
-        cif_path.write_text("test fixture", encoding="utf-8")
+        cif_path.write_text("data_4W2E\n#\n", encoding="utf-8")
 
         def metadata(path: Path) -> dict[str, object] | None:
             """Read cache metadata from ``path`` when the file exists."""
@@ -484,7 +484,7 @@ class SafePDBCacheTests(unittest.TestCase):
             encoding="utf-8",
         )
         cif_path = self.cache_dir / "4W2E.cif"
-        cif_path.write_text("test fixture", encoding="utf-8")
+        cif_path.write_text("data_4W2E\n#\n", encoding="utf-8")
         parser_calls = 0
         parser_calls_lock = threading.Lock()
         first_parser_entered = threading.Event()

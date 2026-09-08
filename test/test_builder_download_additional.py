@@ -90,11 +90,10 @@ def _write_valid_cache(
     etag: str | None = None,
     last_modified: str | None = None,
 ) -> dict[str, Any]:
-    """Write a coordinate file and matching versioned cache metadata."""
+    """Write a coordinate file and matching cache metadata."""
     path.write_text("cached coordinates\n", encoding="utf-8")
     stat = path.stat()
     metadata = {
-        "schema_version": builder.PDB_CACHE_METADATA_SCHEMA_VERSION,
         "cache_revision": revision,
         "entry_id": "1ABC",
         "source_url": source_url,

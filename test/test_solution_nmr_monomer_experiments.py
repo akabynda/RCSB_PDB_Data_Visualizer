@@ -63,11 +63,11 @@ class _ExperimentsClient(RCSBClient):
             }
         }
 
-    def _solution_nmr_monomer_models_have_equal_lengths(
+    def _solution_nmr_monomer_model_length_issue(
         self, entry_id: str, chain_id: str
-    ) -> bool:
+    ) -> str | None:
         """Treat coordinate model lengths as equal in metadata-focused tests."""
-        return True
+        return None
 
 
 class SolutionNMRMonomerExperimentsTests(unittest.TestCase):
@@ -75,8 +75,10 @@ class SolutionNMRMonomerExperimentsTests(unittest.TestCase):
 
     def test_fetches_experiments_only_for_eligible_monomers(self) -> None:
         """Fetch experiment metadata only for eligible monomer entries."""
-        records = _ExperimentsClient().fetch_solution_nmr_monomer_experiment_records_for_ids(
-            ["1ABC", "2DEF"]
+        records = (
+            _ExperimentsClient().fetch_solution_nmr_monomer_experiment_records_for_ids(
+                ["1ABC", "2DEF"]
+            )
         )
 
         self.assertEqual(

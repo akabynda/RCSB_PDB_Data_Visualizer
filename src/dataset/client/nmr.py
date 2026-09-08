@@ -94,15 +94,12 @@ class SolutionNMRMixin:
             )
             return None
 
-        if not self._solution_nmr_monomer_models_have_equal_lengths(
+        model_length_issue = self._solution_nmr_monomer_model_length_issue(
             entry_id=entry_id,
             chain_id=chain_id,
-        ):
-            _record_filtered_structure(
-                entry_id,
-                "coordinate models do not have equal full-chain lengths",
-                year=year,
-            )
+        )
+        if model_length_issue is not None:
+            _record_filtered_structure(entry_id, model_length_issue, year=year)
             return None
 
         return entry_id, year, model_count, polymer_entity, chain_id
@@ -122,6 +119,14 @@ class SolutionNMRMixin:
         chain_id: str,
     ) -> bool:
         """Return whether every coordinate model has the same full-chain length."""
+        return self._solution_nmr_monomer_model_length_issue(entry_id, chain_id) is None
+
+    def _solution_nmr_monomer_model_length_issue(
+        self,
+        entry_id: str,
+        chain_id: str,
+    ) -> str | None:
+        """Explain coordinate failures separately from model-length exclusions."""
         try:
             pdb_path = self._download_solution_nmr_monomer_pdb_if_needed(entry_id)
             chain_map = load_cached_chain_id_map(
@@ -139,7 +144,7 @@ class SolutionNMRMixin:
                 entry_id,
                 exc,
             )
-            return False
+            return f"coordinate preparation failed: {type(exc).__name__}: {exc}"
 
         if len(model_maps) < 2:
             LOGGER.info(
@@ -147,9 +152,17 @@ class SolutionNMRMixin:
                 entry_id,
                 chain_id,
             )
-            return False
+            return f"fewer than 2 coordinate models (found {len(model_maps)})"
 
         model_lengths = [len(model_map) for model_map in model_maps]
+        empty_models = [
+            str(index) for index, length in enumerate(model_lengths, 1) if length == 0
+        ]
+        if empty_models:
+            return (
+                f"no usable modeled CA residues for chain {chain_id} in coordinate "
+                f"model(s): {', '.join(empty_models)}"
+            )
         if len(set(model_lengths)) != 1:
             LOGGER.info(
                 "Skipping SOLUTION NMR monomer %s chain %s: coordinate models have different full-chain lengths (%s)",
@@ -157,8 +170,8 @@ class SolutionNMRMixin:
                 chain_id,
                 model_lengths,
             )
-            return False
-        return True
+            return "coordinate models do not have equal full-chain lengths"
+        return None
 
     def fetch_solution_nmr_weight_records_for_ids(
         self, entry_ids: list[str]

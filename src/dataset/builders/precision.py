@@ -24,6 +24,7 @@ from src.dataset.geometry import (
     _coordinates_aligned_to_first_model,
 )
 from src.dataset.records import (
+    ResidueId,
     SolutionNMRMonomerPrecisionRecord,
 )
 from src.dataset.reporting import (
@@ -83,8 +84,8 @@ class SolutionNMRMonomerPrecisionBuilder:
     def _compute_mean_rmsd_to_average(
         pdb_path: Path,
         chain_id: str,
-        start_seq_id: int,
-        end_seq_id: int,
+        start_seq_id: ResidueId | int,
+        end_seq_id: ResidueId | int,
     ) -> tuple[tuple[int, int, int, float] | None, str | None]:
         """Compute ensemble CA RMSD to per-residue mean coordinates."""
         model_maps, raw_ca_counts_per_model = parse_models_ca_coords_with_stats(
@@ -142,8 +143,8 @@ class SolutionNMRMonomerPrecisionBuilder:
         entry_id: str,
         year: int,
         chain_id: str,
-        core_start_seq_id: int,
-        core_end_seq_id: int,
+        core_start_seq_id: ResidueId | int,
+        core_end_seq_id: ResidueId | int,
         parsed_chain_id: str | None = None,
     ) -> SolutionNMRMonomerPrecisionRecord | None:
         """Build a precision record from a modeled residue core range."""

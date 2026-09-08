@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import io
+import json
 import warnings
 from collections.abc import Sequence
 from pathlib import Path
@@ -11,6 +13,7 @@ from typing import Any
 
 from Bio import BiopythonWarning
 from Bio.PDB import MMCIFParser, PDBParser, Select
+from Bio.PDB.MMCIF2Dict import MMCIF2Dict
 from Bio.PDB.PDBExceptions import PDBConstructionWarning
 
 from src.dataset.cache import (
@@ -19,6 +22,11 @@ from src.dataset.cache import (
 )
 from src.dataset.config import (
     PDB_CHAIN_ID_POOL,
+    PROTEIN_MONOMER_ENTITY_TYPES,
+)
+from src.dataset.pdb_normalization import (
+    POLYPEPTIDE_REMARK_PREFIX,
+    iter_normalized_pdb_lines,
 )
 
 
@@ -43,11 +51,95 @@ def parse_mmcif_structure(entry_id: str, cif_path: Path) -> Any:
 
 
 def parse_pdb_structure(entry_id: str, pdb_path: str | Path) -> Any:
-    """Parse a PDB coordinate file into a Biopython structure."""
+    """Parse the shared residue conformer selection into a Biopython structure."""
     parser = PDBParser(QUIET=True)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", PDBConstructionWarning)
-        return parser.get_structure(entry_id, str(pdb_path))
+        return parser.get_structure(
+            entry_id, io.StringIO("".join(iter_normalized_pdb_lines(pdb_path)))
+        )
+
+
+def _prepend_mmcif_polymer_remarks(
+    pdb_path: Path,
+    cif_path: Path,
+    chain_id_map: dict[str, str],
+    selected_chain_ids: set[str] | None = None,
+) -> None:
+    """Preserve exact polypeptide membership in a temporary converted PDB.
+
+    PDBIO drops polymer metadata, and a component name alone cannot distinguish
+    a modified residue from a free ligand. The versioned remarks retain author
+    IDs from the original atom_site rows, including D/rare amino acids. The
+    caller atomically publishes this temporary file after all conversion steps.
+    """
+    metadata = MMCIF2Dict(str(cif_path))
+    entity_ids = metadata.get("_entity_poly.entity_id", [])
+    entity_types = metadata.get("_entity_poly.type", [])
+    if not entity_ids and not entity_types:
+        # Minimal standalone coordinate mmCIF can lack entity metadata entirely.
+        # In that case the PDB parser retains only recognized amino acids.
+        return
+    if len(entity_ids) != len(entity_types):
+        raise ValueError("Incomplete mmCIF polymer entity metadata")
+    peptide_entities = {
+        entity_id
+        for entity_id, entity_type in zip(entity_ids, entity_types, strict=True)
+        if entity_type in PROTEIN_MONOMER_ENTITY_TYPES
+    }
+    atom_entities = metadata.get("_atom_site.label_entity_id", [])
+    atom_chains = metadata.get("_atom_site.auth_asym_id", [])
+    atom_numbers = metadata.get("_atom_site.auth_seq_id", [])
+    atom_components = metadata.get("_atom_site.label_comp_id", [])
+    atom_insertions = metadata.get(
+        "_atom_site.pdbx_PDB_ins_code", ["?"] * len(atom_entities)
+    )
+    if (
+        not atom_entities
+        or len(
+            {
+                len(values)
+                for values in (
+                    atom_entities,
+                    atom_chains,
+                    atom_numbers,
+                    atom_components,
+                    atom_insertions,
+                )
+            }
+        )
+        != 1
+    ):
+        raise ValueError("Incomplete mmCIF atom-site polymer membership metadata")
+
+    residues: dict[tuple[str, int, str, str], None] = {}
+    for entity, chain, number, component, insertion in zip(
+        atom_entities,
+        atom_chains,
+        atom_numbers,
+        atom_components,
+        atom_insertions,
+        strict=True,
+    ):
+        if entity not in peptide_entities:
+            continue
+        if selected_chain_ids is not None and chain not in selected_chain_ids:
+            continue
+        # entity_poly membership is authoritative even when label_seq_id is
+        # absent: author IDs are the identifiers written by MMCIFParser/PDBIO.
+        residue_key = (
+            chain_id_map.get(chain, chain).strip(),
+            int(number),
+            "" if insertion in {"?", "."} else insertion.strip(),
+            component,
+        )
+        residues[residue_key] = None
+    remarks = POLYPEPTIDE_REMARK_PREFIX + "COMPLETE\n"
+    remarks += "".join(
+        POLYPEPTIDE_REMARK_PREFIX + json.dumps(residue, separators=(",", ":")) + "\n"
+        for residue in residues
+    )
+    pdb_path.write_bytes(remarks.encode("ascii") + pdb_path.read_bytes())
 
 
 def _coerce_structure_chain_ids_for_pdbio(structure: Any) -> dict[str, str]:
@@ -56,6 +148,7 @@ def _coerce_structure_chain_ids_for_pdbio(structure: Any) -> dict[str, str]:
     seen_original_ids: set[str] = set()
     for model in structure:
         for chain in model:
+            _validate_pdb_residue_numbers(chain)
             chain_id = str(chain.id)
             if chain_id in seen_original_ids:
                 continue
@@ -102,6 +195,7 @@ def _coerce_selected_structure_chain_ids_for_pdbio(
         for chain in model:
             chain_id = str(chain.id)
             if chain_id in selected_chain_ids:
+                _validate_pdb_residue_numbers(chain)
                 existing_chain_ids.add(chain_id)
                 selected_chain_object_ids.add(id(chain))
     chain_id_map: dict[str, str] = {}
@@ -127,6 +221,18 @@ def _coerce_selected_structure_chain_ids_for_pdbio(
 
     _apply_chain_id_map_without_transient_conflicts(structure, chain_id_map)
     return chain_id_map, selected_chain_object_ids
+
+
+def _validate_pdb_residue_numbers(chain: Any) -> None:
+    """Reject author numbers that overflow the four-column legacy PDB field."""
+    for residue in chain:
+        author_number = residue.id[1]
+        if not -999 <= author_number <= 9999:
+            raise RuntimeError(
+                f"Unsupported legacy PDB residue numbering: chain {chain.id!r} "
+                f"has author residue number {author_number}; supported range is "
+                "-999 through 9999"
+            )
 
 
 def _apply_chain_id_map_without_transient_conflicts(

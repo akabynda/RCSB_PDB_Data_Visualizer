@@ -10,6 +10,7 @@ from src.dataset.io.common import (
     write_csv_rows,
 )
 from src.dataset.records import (
+    parse_residue_id,
     SolutionNMRMonomerXrayRmsdExtremesRecord,
     SolutionNMRMonomerXrayRmsdRecord,
 )
@@ -38,12 +39,12 @@ def read_solution_nmr_monomer_xray_rmsd_csv(
                     sequence_identity_percent=int(row["sequence_identity_percent"]),
                     nmr_chain_id=str(row["nmr_chain_id"]),
                     nmr_core_start_seq_id=(
-                        int(nmr_core_start_raw)
+                        parse_residue_id(nmr_core_start_raw)
                         if nmr_core_start_raw not in {None, ""}
                         else None
                     ),
                     nmr_core_end_seq_id=(
-                        int(nmr_core_end_raw)
+                        parse_residue_id(nmr_core_end_raw)
                         if nmr_core_end_raw not in {None, ""}
                         else None
                     ),
@@ -55,12 +56,12 @@ def read_solution_nmr_monomer_xray_rmsd_csv(
                     xray_entry_id=str(row["xray_entry_id"]),
                     xray_chain_id=str(row["xray_chain_id"]),
                     xray_core_start_seq_id=(
-                        int(xray_core_start_raw)
+                        parse_residue_id(xray_core_start_raw)
                         if xray_core_start_raw not in {None, ""}
                         else None
                     ),
                     xray_core_end_seq_id=(
-                        int(xray_core_end_raw)
+                        parse_residue_id(xray_core_end_raw)
                         if xray_core_end_raw not in {None, ""}
                         else None
                     ),
@@ -244,12 +245,12 @@ def read_solution_nmr_monomer_xray_rmsd_extremes_csv(
                     sequence_identity_percent=int(row["sequence_identity_percent"]),
                     nmr_chain_id=str(row["nmr_chain_id"]),
                     nmr_core_start_seq_id=(
-                        int(nmr_core_start_raw)
+                        parse_residue_id(nmr_core_start_raw)
                         if nmr_core_start_raw not in {None, ""}
                         else None
                     ),
                     nmr_core_end_seq_id=(
-                        int(nmr_core_end_raw)
+                        parse_residue_id(nmr_core_end_raw)
                         if nmr_core_end_raw not in {None, ""}
                         else None
                     ),
@@ -267,12 +268,12 @@ def read_solution_nmr_monomer_xray_rmsd_extremes_csv(
                         row["best_xray_resolution_angstrom"]
                     ),
                     best_xray_core_start_seq_id=(
-                        int(best_core_start_raw)
+                        parse_residue_id(best_core_start_raw)
                         if best_core_start_raw not in {None, ""}
                         else None
                     ),
                     best_xray_core_end_seq_id=(
-                        int(best_core_end_raw)
+                        parse_residue_id(best_core_end_raw)
                         if best_core_end_raw not in {None, ""}
                         else None
                     ),
@@ -287,12 +288,12 @@ def read_solution_nmr_monomer_xray_rmsd_extremes_csv(
                         row["worst_xray_resolution_angstrom"]
                     ),
                     worst_xray_core_start_seq_id=(
-                        int(worst_core_start_raw)
+                        parse_residue_id(worst_core_start_raw)
                         if worst_core_start_raw not in {None, ""}
                         else None
                     ),
                     worst_xray_core_end_seq_id=(
-                        int(worst_core_end_raw)
+                        parse_residue_id(worst_core_end_raw)
                         if worst_core_end_raw not in {None, ""}
                         else None
                     ),

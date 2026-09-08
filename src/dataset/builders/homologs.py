@@ -38,6 +38,7 @@ from src.dataset.matching import (
     find_modeled_ca_core_identity_matches,
 )
 from src.dataset.records import (
+    ResidueId,
     RejectedXrayHomologRecord,
     SolutionNMRMonomerXrayHomologRecord,
     XrayPolymerEntityCandidateRecord,
@@ -111,7 +112,7 @@ class SolutionNMRMonomerXrayHomologBuilder:
     def _build_stride_core_query_sequence(
         self,
         seed: SolutionNMRMonomerXrayHomologSeedRecord,
-    ) -> tuple[str, int, int, list[CAResidueRecord]]:
+    ) -> tuple[str, ResidueId, ResidueId, list[CAResidueRecord]]:
         """Build the STRIDE-core query sequence used for homolog searches."""
         pdb_path = download_pdb_if_needed(
             session=self.client.session,
@@ -298,7 +299,9 @@ class SolutionNMRMonomerXrayHomologBuilder:
         self,
         seed: SolutionNMRMonomerXrayHomologSeedRecord,
         sequence_identity_percent: int,
-        core_query: (tuple[str, int, int, list[CAResidueRecord]] | object) = _MISSING,
+        core_query: (
+            tuple[str, ResidueId, ResidueId, list[CAResidueRecord]] | object
+        ) = _MISSING,
         candidate_cache: (dict[str, XrayPolymerEntityCandidateRecord] | None) = None,
         chain_residue_cache: (
             dict[tuple[str, str], tuple[CAResidueRecord, ...]] | None

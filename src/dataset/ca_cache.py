@@ -24,23 +24,23 @@ from src.dataset.cache import (
     _load_pdb_cache_metadata,
     _sha256_file,
 )
-from src.dataset.config import (
-    XRAY_CA_CACHE_SCHEMA_VERSION,
-    XRAY_CA_PARSER_REVISION,
-)
 from src.dataset.coordinates import (
     _is_better_ca_candidate,
     _parse_first_model_ca_line_fields,
     _parse_pdb_modres_identity_map,
 )
+from src.dataset.pdb_normalization import (
+    iter_normalized_pdb_lines,
+    load_pdb_polymer_metadata,
+    pdb_atom_field_offset,
+)
 from src.dataset.records import (
     CAResidueRecord,
+    ResidueId,
 )
 
 if TYPE_CHECKING:
-    from src.dataset.records import (
-        PreparedXrayCAData,
-    )
+    from src.dataset.records import PreparedXrayCAData
 
 
 _FIRST_MODEL_CA_CACHE_LOCKS_GUARD = Lock()
@@ -50,10 +50,8 @@ _FIRST_MODEL_CA_CACHE_LOCKS: dict[str, tuple[Any, int]] = {}
 
 
 def _first_model_ca_cache_path(pdb_path: Path) -> Path:
-    """Return the versioned durable first-model CA cache path."""
-    return pdb_path.with_name(
-        f"{pdb_path.name}.first_model_ca.v{XRAY_CA_CACHE_SCHEMA_VERSION}.npz"
-    )
+    """Return the durable first-model CA cache path."""
+    return pdb_path.with_name(f"{pdb_path.name}.first_model_ca.npz")
 
 
 @contextmanager
@@ -112,144 +110,89 @@ def _parse_first_model_ca_data_by_chain(
     pdb_path: Path,
 ) -> dict[str, PreparedXrayCAData]:
     """Parse residue identities, HETATM evidence, and coordinates in one pass."""
-    residue_order_by_chain: dict[str, list[int]] = {}
+    residue_order_by_chain: dict[str, list[ResidueId]] = {}
     residue_candidates_by_chain: dict[
-        str, dict[int, tuple[str, float, str, CAResidueRecord]]
+        str, dict[ResidueId, tuple[str, float, str, CAResidueRecord]]
     ] = {}
     coordinate_candidates_by_chain: dict[
-        str, dict[int, tuple[str, float, str, bool, np.ndarray]]
+        str, dict[ResidueId, tuple[str, float, str, bool, np.ndarray]]
     ] = {}
-    hetatm_ca_resids_by_chain: dict[str, set[int]] = {}
+    hetatm_ca_resids_by_chain: dict[str, set[ResidueId]] = {}
     modres_identity_by_key = _parse_pdb_modres_identity_map(pdb_path)
+    polymer_metadata = load_pdb_polymer_metadata(pdb_path)
     has_model_records = False
     in_model = False
 
-    with pdb_path.open("r", encoding="utf-8", errors="ignore") as handle:
-        for line in handle:
-            record_type = line[:6]
-            if record_type.startswith("MODEL"):
-                if has_model_records:
-                    break
-                has_model_records = True
-                in_model = True
-                continue
-            if record_type.startswith("ENDMDL"):
-                if in_model:
-                    break
-                continue
-            if has_model_records and not in_model:
-                continue
-            is_standard_atom = record_type.startswith("ATOM")
-            is_hetero_atom = record_type.startswith("HETATM")
-            if not is_standard_atom and not is_hetero_atom:
-                continue
-            parsed_fields = _parse_first_model_ca_line_fields(line)
-            if parsed_fields is None:
-                continue
-            (
-                chain_id,
-                resid,
+    for line in iter_normalized_pdb_lines(pdb_path):
+        record_type = line[:6]
+        if record_type.startswith("MODEL"):
+            if has_model_records:
+                break
+            has_model_records = True
+            in_model = True
+            continue
+        if record_type.startswith("ENDMDL"):
+            if in_model:
+                break
+            continue
+        if has_model_records and not in_model:
+            continue
+        is_standard_atom = record_type.startswith("ATOM")
+        is_hetero_atom = record_type.startswith("HETATM")
+        if not is_standard_atom and not is_hetero_atom:
+            continue
+        parsed_fields = _parse_first_model_ca_line_fields(line, polymer_metadata)
+        if parsed_fields is None:
+            continue
+        (
+            chain_id,
+            resid,
+            insertion_code,
+            alt_loc,
+            occupancy,
+            resname,
+        ) = parsed_fields
+        if occupancy <= 0.0:
+            continue
+
+        key = ResidueId(resid, insertion_code)
+        if is_hetero_atom:
+            hetatm_ca_resids_by_chain.setdefault(chain_id, set()).add(key)
+        if is_standard_atom:
+            identity = seq1(resname, custom_map={"MSE": "M"}, undef_code="X")
+        else:
+            identity = modres_identity_by_key.get(
+                (chain_id, resid, insertion_code, resname), f"HET:{resname}"
+            )
+        ca_record = CAResidueRecord(
+            resid=resid,
+            insertion_code=insertion_code,
+            identity=identity,
+            is_standard_atom=is_standard_atom,
+            has_hetatm_ca=is_hetero_atom,
+        )
+        residue_candidates = residue_candidates_by_chain.setdefault(chain_id, {})
+        existing_residue = residue_candidates.get(key)
+        if existing_residue is None:
+            residue_order_by_chain.setdefault(chain_id, []).append(key)
+            residue_candidates[key] = (
                 insertion_code,
-                alt_loc,
                 occupancy,
-                resname,
-            ) = parsed_fields
-            if occupancy <= 0.0:
-                continue
-
-            if is_hetero_atom:
-                hetatm_ca_resids_by_chain.setdefault(chain_id, set()).add(resid)
-            if is_standard_atom:
-                identity = seq1(resname, custom_map={"MSE": "M"}, undef_code="X")
-            else:
-                identity = modres_identity_by_key.get(
-                    (chain_id, resid, insertion_code, resname),
-                    modres_identity_by_key.get(
-                        (chain_id, resid, "", resname),
-                        f"HET:{resname}",
-                    ),
-                )
-            ca_record = CAResidueRecord(
-                resid=resid,
-                identity=identity,
-                is_standard_atom=is_standard_atom,
-                has_hetatm_ca=is_hetero_atom,
+                alt_loc,
+                ca_record,
             )
-            residue_candidates = residue_candidates_by_chain.setdefault(chain_id, {})
-            existing_residue = residue_candidates.get(resid)
-            if existing_residue is None:
-                residue_order_by_chain.setdefault(chain_id, []).append(resid)
-                residue_candidates[resid] = (
-                    insertion_code,
-                    occupancy,
-                    alt_loc,
-                    ca_record,
-                )
-            else:
-                (
-                    existing_insertion_code,
-                    existing_occupancy,
-                    existing_alt_loc,
-                    existing_record,
-                ) = existing_residue
-                should_replace = False
-                if ca_record.is_standard_atom != existing_record.is_standard_atom:
-                    should_replace = ca_record.is_standard_atom
-                else:
-                    should_replace = _is_better_ca_candidate(
-                        new_insertion_code=insertion_code,
-                        new_occupancy=occupancy,
-                        new_alt_loc=alt_loc,
-                        current_insertion_code=existing_insertion_code,
-                        current_occupancy=existing_occupancy,
-                        current_alt_loc=existing_alt_loc,
-                    )
-                if should_replace:
-                    residue_candidates[resid] = (
-                        insertion_code,
-                        occupancy,
-                        alt_loc,
-                        ca_record,
-                    )
-
-            try:
-                x = float(line[30:38].strip())
-                y = float(line[38:46].strip())
-                z = float(line[46:54].strip())
-            except ValueError:
-                parts = line.split()
-                if len(parts) < 9:
-                    continue
-                try:
-                    x, y, z = (float(value) for value in parts[6:9])
-                except ValueError:
-                    continue
-            coords = np.asarray([x, y, z], dtype=float)
-            coordinate_candidates = coordinate_candidates_by_chain.setdefault(
-                chain_id, {}
-            )
-            existing_coordinate = coordinate_candidates.get(resid)
-            if existing_coordinate is None:
-                coordinate_candidates[resid] = (
-                    insertion_code,
-                    occupancy,
-                    alt_loc,
-                    is_standard_atom,
-                    coords,
-                )
-                continue
+        else:
             (
                 existing_insertion_code,
                 existing_occupancy,
                 existing_alt_loc,
-                existing_is_standard_atom,
-                _,
-            ) = existing_coordinate
-            should_replace_coordinate = False
-            if is_standard_atom != existing_is_standard_atom:
-                should_replace_coordinate = is_standard_atom
+                existing_record,
+            ) = existing_residue
+            should_replace = False
+            if ca_record.is_standard_atom != existing_record.is_standard_atom:
+                should_replace = ca_record.is_standard_atom
             else:
-                should_replace_coordinate = _is_better_ca_candidate(
+                should_replace = _is_better_ca_candidate(
                     new_insertion_code=insertion_code,
                     new_occupancy=occupancy,
                     new_alt_loc=alt_loc,
@@ -257,14 +200,66 @@ def _parse_first_model_ca_data_by_chain(
                     current_occupancy=existing_occupancy,
                     current_alt_loc=existing_alt_loc,
                 )
-            if should_replace_coordinate:
-                coordinate_candidates[resid] = (
+            if should_replace:
+                residue_candidates[key] = (
                     insertion_code,
                     occupancy,
                     alt_loc,
-                    is_standard_atom,
-                    coords,
+                    ca_record,
                 )
+
+        offset = pdb_atom_field_offset(line)
+        try:
+            coords = np.asarray(
+                [
+                    float(line[30 + offset : 38 + offset]),
+                    float(line[38 + offset : 46 + offset]),
+                    float(line[46 + offset : 54 + offset]),
+                ],
+                dtype=float,
+            )
+        except ValueError:
+            continue
+        if not np.all(np.isfinite(coords)):
+            continue
+        coordinate_candidates = coordinate_candidates_by_chain.setdefault(chain_id, {})
+        existing_coordinate = coordinate_candidates.get(key)
+        if existing_coordinate is None:
+            coordinate_candidates[key] = (
+                insertion_code,
+                occupancy,
+                alt_loc,
+                is_standard_atom,
+                coords,
+            )
+            continue
+        (
+            existing_insertion_code,
+            existing_occupancy,
+            existing_alt_loc,
+            existing_is_standard_atom,
+            _,
+        ) = existing_coordinate
+        should_replace_coordinate = False
+        if is_standard_atom != existing_is_standard_atom:
+            should_replace_coordinate = is_standard_atom
+        else:
+            should_replace_coordinate = _is_better_ca_candidate(
+                new_insertion_code=insertion_code,
+                new_occupancy=occupancy,
+                new_alt_loc=alt_loc,
+                current_insertion_code=existing_insertion_code,
+                current_occupancy=existing_occupancy,
+                current_alt_loc=existing_alt_loc,
+            )
+        if should_replace_coordinate:
+            coordinate_candidates[key] = (
+                insertion_code,
+                occupancy,
+                alt_loc,
+                is_standard_atom,
+                coords,
+            )
 
     parsed_by_chain: dict[str, PreparedXrayCAData] = {}
     for chain_id, residue_order in residue_order_by_chain.items():
@@ -273,6 +268,7 @@ def _parse_first_model_ca_data_by_chain(
         records = tuple(
             CAResidueRecord(
                 resid=residue_candidates[resid][3].resid,
+                insertion_code=residue_candidates[resid][3].insertion_code,
                 identity=residue_candidates[resid][3].identity,
                 is_standard_atom=residue_candidates[resid][3].is_standard_atom,
                 has_hetatm_ca=resid in hetatm_resids,
@@ -298,6 +294,7 @@ def _write_first_model_ca_cache(
     chain_ids = list(parsed_by_chain)
     offsets = [0]
     resids: list[int] = []
+    insertion_codes: list[str] = []
     identities: list[str] = []
     flags: list[int] = []
     coordinates: list[np.ndarray] = []
@@ -306,11 +303,12 @@ def _write_first_model_ca_cache(
         records, coords_by_resid = parsed_by_chain[chain_id]
         for record in records:
             resids.append(record.resid)
+            insertion_codes.append(record.insertion_code)
             identities.append(record.identity)
             flags.append(
                 int(record.is_standard_atom) | (int(record.has_hetatm_ca) << 1)
             )
-            coords = coords_by_resid.get(record.resid)
+            coords = coords_by_resid.get(record.key)
             coordinate_present.append(coords is not None)
             coordinates.append(
                 np.asarray(coords, dtype=np.float64)
@@ -332,12 +330,11 @@ def _write_first_model_ca_cache(
             temp_path = Path(handle.name)
             np.savez_compressed(
                 handle,
-                schema_version=np.asarray(XRAY_CA_CACHE_SCHEMA_VERSION, dtype=np.int64),
-                parser_revision=np.asarray(XRAY_CA_PARSER_REVISION, dtype=np.int64),
                 source_sha256=np.asarray(source_sha256),
                 chain_ids=np.asarray(chain_ids, dtype=np.str_),
                 chain_offsets=np.asarray(offsets, dtype=np.int64),
                 resids=np.asarray(resids, dtype=np.int64),
+                insertion_codes=np.asarray(insertion_codes, dtype=np.str_),
                 identities=np.asarray(identities, dtype=np.str_),
                 flags=np.asarray(flags, dtype=np.uint8),
                 coords=(
@@ -364,15 +361,12 @@ def _read_first_model_ca_cache(
         return None
     try:
         with np.load(cache_path, allow_pickle=False) as payload:
-            if int(payload["schema_version"].item()) != XRAY_CA_CACHE_SCHEMA_VERSION:
-                return None
-            if int(payload["parser_revision"].item()) != XRAY_CA_PARSER_REVISION:
-                return None
             if str(payload["source_sha256"].item()) != source_sha256:
                 return None
             chain_ids = np.asarray(payload["chain_ids"]).astype(str).tolist()
             offsets = np.asarray(payload["chain_offsets"], dtype=np.int64)
             resids = np.asarray(payload["resids"], dtype=np.int64)
+            insertion_codes = np.asarray(payload["insertion_codes"]).astype(str)
             identities = np.asarray(payload["identities"]).astype(str)
             flags = np.asarray(payload["flags"], dtype=np.uint8)
             coordinates = np.asarray(payload["coords"], dtype=np.float64)
@@ -391,6 +385,8 @@ def _read_first_model_ca_cache(
         return None
     if (
         identities.shape != (item_count,)
+        or insertion_codes.shape != (item_count,)
+        or any(len(code) > 1 or code.isspace() for code in insertion_codes)
         or flags.shape != (item_count,)
         or coordinates.shape != (item_count, 3)
         or coordinate_present.shape != (item_count,)
@@ -405,16 +401,19 @@ def _read_first_model_ca_cache(
         chain_records = tuple(
             CAResidueRecord(
                 resid=int(resids[index]),
+                insertion_code=str(insertion_codes[index]),
                 identity=str(identities[index]),
                 is_standard_atom=bool(flags[index] & 0b01),
                 has_hetatm_ca=bool(flags[index] & 0b10),
             )
             for index in range(start, end)
         )
-        if len({record.resid for record in chain_records}) != len(chain_records):
+        if len({record.key for record in chain_records}) != len(chain_records):
             return None
         chain_coords = {
-            int(resids[index]): np.asarray(coordinates[index], dtype=float).copy()
+            ResidueId(int(resids[index]), str(insertion_codes[index])): np.asarray(
+                coordinates[index], dtype=float
+            ).copy()
             for index in range(start, end)
             if coordinate_present[index]
         }
@@ -428,7 +427,7 @@ def load_cached_first_model_ca_data(
     pdb_path: Path,
     chain_id: str,
 ) -> PreparedXrayCAData:
-    """Load versioned first-model X-ray CA data, rebuilding safe cache misses."""
+    """Load first-model X-ray CA data, rebuilding cache misses."""
     pdb_path = Path(pdb_path)
     cache_path = _first_model_ca_cache_path(pdb_path)
     with _first_model_ca_cache_lock(cache_path):

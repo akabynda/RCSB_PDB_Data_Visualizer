@@ -16,6 +16,7 @@ from src.dataset.io.common import (
     write_csv_rows,
 )
 from src.dataset.records import (
+    parse_residue_id,
     RejectedXrayHomologRecord,
     SolutionNMRMonomerXrayHomologRecord,
 )
@@ -127,12 +128,12 @@ def _read_rejected_xray_homolog_csv_with_status(
                         nmr_chain_id=str(row.get("nmr_chain_id") or ""),
                         sequence_identity_percent=int(row["sequence_identity_percent"]),
                         nmr_core_start_seq_id=(
-                            int(nmr_core_start_raw)
+                            parse_residue_id(nmr_core_start_raw)
                             if nmr_core_start_raw not in {None, ""}
                             else None
                         ),
                         nmr_core_end_seq_id=(
-                            int(nmr_core_end_raw)
+                            parse_residue_id(nmr_core_end_raw)
                             if nmr_core_end_raw not in {None, ""}
                             else None
                         ),
@@ -242,12 +243,12 @@ def read_solution_nmr_monomer_xray_homolog_csv(
                     year=int(row["year"]),
                     sequence_identity_percent=int(row["sequence_identity_percent"]),
                     nmr_core_start_seq_id=(
-                        int(nmr_core_start_raw)
+                        parse_residue_id(nmr_core_start_raw)
                         if nmr_core_start_raw not in {None, ""}
                         else None
                     ),
                     nmr_core_end_seq_id=(
-                        int(nmr_core_end_raw)
+                        parse_residue_id(nmr_core_end_raw)
                         if nmr_core_end_raw not in {None, ""}
                         else None
                     ),

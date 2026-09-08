@@ -11,6 +11,7 @@ from src.dataset.io.common import (
     write_csv_rows,
 )
 from src.dataset.records import (
+    parse_residue_id,
     SolutionNMRMonomerPrecisionRecord,
     SolutionNMRMonomerQualityRecord,
 )
@@ -186,8 +187,8 @@ def read_solution_nmr_monomer_precision_csv(
                     entry_id=str(row["entry_id"]),
                     year=int(row["year"]),
                     chain_id=str(row["chain_id"]),
-                    core_start_seq_id=int(row["core_start_seq_id"]),
-                    core_end_seq_id=int(row["core_end_seq_id"]),
+                    core_start_seq_id=parse_residue_id(row["core_start_seq_id"]),
+                    core_end_seq_id=parse_residue_id(row["core_end_seq_id"]),
                     n_models=int(row["n_models"]),
                     n_ca_core_used=int(str(n_ca_core_used_raw)),
                     n_ca_core_raw=int(str(n_ca_core_raw_raw)),

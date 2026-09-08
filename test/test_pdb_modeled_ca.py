@@ -70,7 +70,13 @@ class PdbModeledCaTests(unittest.TestCase):
                 patch.object(
                     dataset_stride,
                     "load_first_model_stride_state_by_chain",
-                    return_value=({"A": dict.fromkeys(range(1, 62), "H")}, 1),
+                    return_value=(
+                        {
+                            "A": dict.fromkeys(range(1, 62), "H")
+                            | dict.fromkeys(range(62, 76), "C")
+                        },
+                        1,
+                    ),
                 ),
             ):
                 coverages, model_count, succeeded = (
@@ -149,7 +155,8 @@ class PdbModeledCaTests(unittest.TestCase):
                 _hetatm_ca_line(3, "A1BEB", 3, 1.0),
             ]
             pdb_path.write_text(
-                "".join(record.removesuffix("C\n") + " \n" for record in records)
+                "SEQRES   1 A    3  ALA MSE A1BEB\n"
+                + "".join(record.removesuffix("C\n") + " \n" for record in records)
                 + _calcium_line(4, 4, element=""),
                 encoding="utf-8",
             )
@@ -169,7 +176,8 @@ class PdbModeledCaTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             pdb_path = Path(tmpdir) / "noncarbon.pdb"
             pdb_path.write_text(
-                _ca_line(1, 1, 1.0).removesuffix(" C\n")
+                "SEQRES   1 A    4  ALA A1BEB ALA A1BEB\n"
+                + _ca_line(1, 1, 1.0).removesuffix(" C\n")
                 + "CA\n"
                 + _hetatm_ca_line(2, "A1BEB", 2, 1.0).removesuffix(" C\n")
                 + "CA\n"
@@ -257,7 +265,7 @@ class PdbModeledCaTests(unittest.TestCase):
 
             self.assertEqual(
                 parse_first_model_modeled_ca_auth_seq_ids(pdb_path, "A"),
-                {10, 13},
+                [10, 13],
             )
 
     def test_model_coordinate_maps_skip_zero_occupancy_ca_atoms(self) -> None:
@@ -307,7 +315,7 @@ class PdbModeledCaTests(unittest.TestCase):
 
             self.assertEqual(
                 parse_first_model_modeled_ca_auth_seq_ids(pdb_path, "A"),
-                {-5, -4, -3, 1},
+                [-5, -4, -3, 1],
             )
 
     def test_model_coordinate_maps_ignore_seqadv_labels(self) -> None:
@@ -352,6 +360,7 @@ class PdbModeledCaTests(unittest.TestCase):
             pdb_path.write_text(
                 "".join(
                     [
+                        "SEQRES   1 A    3  ALA NLE A1BEB\n",
                         "MODEL        1\n",
                         _ca_line(1, 1, 1.0),
                         _hetatm_ca_line(2, "NLE", 2, 1.0),
@@ -364,7 +373,7 @@ class PdbModeledCaTests(unittest.TestCase):
 
             self.assertEqual(
                 parse_first_model_modeled_ca_auth_seq_ids(pdb_path, "A"),
-                {1, 2, 3},
+                [1, 2, 3],
             )
 
     def test_model_coordinate_maps_include_hetatm_ca_atoms(self) -> None:
@@ -374,6 +383,7 @@ class PdbModeledCaTests(unittest.TestCase):
             pdb_path.write_text(
                 "".join(
                     [
+                        "SEQRES   1 A    3  ALA NLE A1BEB\n",
                         "MODEL        1\n",
                         _ca_line(1, 1, 1.0),
                         _hetatm_ca_line(2, "A1BEB", 2, 1.0),
@@ -395,6 +405,7 @@ class PdbModeledCaTests(unittest.TestCase):
             pdb_path.write_text(
                 "".join(
                     [
+                        "SEQRES   1 A    3  ALA NLE A1BEB\n",
                         "MODEL        1\n",
                         _ca_line(1, 1, 1.0),
                         _hetatm_ca_line(2, "A1BEB", 30, 1.0),

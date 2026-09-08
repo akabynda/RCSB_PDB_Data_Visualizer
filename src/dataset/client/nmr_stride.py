@@ -126,11 +126,11 @@ class SolutionNMRStrideMixin:
                 entry_id, "no usable first-model modeled CA residues", year=year
             )
             return None
-        modeled_start_seq_id = min(modeled_auth_seq_ids)
-        modeled_end_seq_id = max(modeled_auth_seq_ids)
+        modeled_start_seq_id = modeled_auth_seq_ids[0]
+        modeled_end_seq_id = modeled_auth_seq_ids[-1]
 
         try:
-            stride_coverages, _, _ = (
+            stride_coverages, _, successful_models = (
                 compute_stride_state_coverages_for_chain_modeled_first_model(
                     session=self.session,
                     config=self.config,
@@ -141,6 +141,7 @@ class SolutionNMRStrideMixin:
                     modeled_sequence_length=modeled_sequence_length,
                     modeled_auth_seq_ids=modeled_auth_seq_ids,
                     stride_executable=stride_executable,
+                    raise_on_failure=True,
                 )
             )
         except Exception as exc:
@@ -149,6 +150,13 @@ class SolutionNMRStrideMixin:
             )
             _record_filtered_structure(
                 entry_id, f"STRIDE calculation failed: {exc}", year=year
+            )
+            return None
+        if not successful_models or any(
+            value < 0.0 for value in stride_coverages.values()
+        ):
+            _record_filtered_structure(
+                entry_id, "STRIDE did not assign every modeled residue", year=year
             )
             return None
         stride_coil_fraction = stride_coverages["C"]

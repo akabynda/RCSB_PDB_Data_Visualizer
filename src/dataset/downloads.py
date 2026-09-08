@@ -30,23 +30,23 @@ from src.dataset.cache import (
     _pdb_download_sources,
     _prioritize_cached_source,
     _response_chunks,
+    _sha256_file,
     _utc_now_iso,
 )
-from src.dataset.config import (
-    LOGGER,
-    PDB_CACHE_METADATA_SCHEMA_VERSION,
-)
+from src.dataset.config import LOGGER
 from src.dataset.io.common import (
     _atomic_write_csv_rows,
 )
 from src.dataset.programs import (
     _prepend_mmcif_software_remarks,
 )
+from src.dataset.pdb_normalization import ensure_normalized_pdb
 from src.dataset.structures import (
     ChainSubsetSelect,
     _chain_subset_cache_stem,
     _coerce_selected_structure_chain_ids_for_pdbio,
     _coerce_structure_chain_ids_for_pdbio,
+    _prepend_mmcif_polymer_remarks,
     load_cached_chain_id_map,
     parse_mmcif_structure,
 )
@@ -94,6 +94,8 @@ def _download_pdb_if_needed_locked(
         path, metadata
     )
     current_revision = _cache_revision(metadata)
+    if cache_is_valid and metadata is not None:
+        metadata = _normalize_cached_pdb(path, metadata)
     if (
         cache_is_valid
         and current_revision is not None
@@ -248,6 +250,10 @@ def _download_pdb_if_needed_locked(
                         temp_pdb_path = Path(pdb_handle.name)
                     io.save(str(temp_pdb_path))
                     _prepend_mmcif_software_remarks(temp_pdb_path, cif_path)
+                    _prepend_mmcif_polymer_remarks(
+                        temp_pdb_path, cif_path, chain_id_map
+                    )
+                    ensure_normalized_pdb(temp_pdb_path)
                     temp_pdb_path.replace(path)
                 finally:
                     if temp_pdb_path is not None:
@@ -449,13 +455,13 @@ def download_pdb_chain_subset_if_needed(
     observed_subset_revision = _cache_revision(_load_pdb_cache_metadata(subset_path))
     with _pdb_cache_entry_lock(cache_dir, normalized_entry_id):
         cif_path = cache_dir / f"{normalized_entry_id}.cif"
+        current_subset_metadata = _load_pdb_cache_metadata(subset_path)
+        current_subset_revision = _cache_revision(current_subset_metadata)
         cached_subset = _load_valid_cached_chain_subset(
             subset_path=subset_path,
             cif_path=cif_path,
             selected_chain_ids=selected_chain_ids,
         )
-        current_subset_metadata = _load_pdb_cache_metadata(subset_path)
-        current_subset_revision = _cache_revision(current_subset_metadata)
         cif_metadata = _load_pdb_cache_metadata(cif_path)
         if cached_subset is not None and (
             (
@@ -526,6 +532,7 @@ def _load_valid_cached_chain_subset(
         and all(str(value) for value in cached_chain_map.values())
     ):
         return None
+    _normalize_cached_pdb(subset_path, subset_metadata)
     return subset_path, {
         str(original): str(mapped) for original, mapped in cached_chain_map.items()
     }
@@ -583,6 +590,10 @@ def _download_pdb_chain_subset_if_needed_locked(
             select=ChainSubsetSelect(selected_chain_object_ids),
         )
         _prepend_mmcif_software_remarks(temp_subset_path, cif_path)
+        _prepend_mmcif_polymer_remarks(
+            temp_subset_path, cif_path, chain_id_map, selected_chain_ids
+        )
+        ensure_normalized_pdb(temp_subset_path)
         temp_subset_path.replace(path)
     finally:
         if temp_subset_path is not None:
@@ -596,7 +607,6 @@ def _download_pdb_chain_subset_if_needed_locked(
     _atomic_write_json(
         metadata_path,
         {
-            "schema_version": PDB_CACHE_METADATA_SCHEMA_VERSION,
             "cache_revision": uuid.uuid4().hex,
             "entry_id": entry_id.upper(),
             "source_url": str(cif_metadata.get("source_url") or ""),
@@ -612,3 +622,25 @@ def _download_pdb_chain_subset_if_needed_locked(
         },
     )
     return path, chain_id_map
+
+
+def _normalize_cached_pdb(path: Path, metadata: dict[str, Any]) -> dict[str, Any]:
+    """Ensure cache hits satisfy the same input policy as fresh downloads."""
+    if not path.is_file():
+        return metadata
+    ensure_normalized_pdb(path)
+    stat = path.stat()
+    if (
+        metadata.get("size_bytes") == stat.st_size
+        and metadata.get("mtime_ns") == stat.st_mtime_ns
+    ):
+        return metadata
+    normalized_metadata = dict(metadata)
+    normalized_metadata.update(
+        sha256=_sha256_file(path),
+        size_bytes=stat.st_size,
+        mtime_ns=stat.st_mtime_ns,
+        cache_revision=uuid.uuid4().hex,
+    )
+    _atomic_write_json(_pdb_cache_metadata_path(path), normalized_metadata)
+    return normalized_metadata

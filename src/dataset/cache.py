@@ -24,10 +24,8 @@ from threading import local
 
 import requests
 
-from src.dataset.config import (
-    LOGGER,
-    PDB_CACHE_METADATA_SCHEMA_VERSION,
-)
+from src.dataset.config import LOGGER
+from src.dataset.pdb_normalization import ensure_normalized_pdb
 
 _PDB_CACHE_ENTRY_LOCKS_GUARD = Lock()
 
@@ -120,7 +118,7 @@ def _utc_now_iso() -> str:
 
 
 def _load_pdb_cache_metadata(pdb_path: Path) -> dict[str, Any] | None:
-    """Load validated cache metadata, returning None for old or damaged sidecars."""
+    """Load cache metadata, returning None for missing or damaged sidecars."""
     metadata_path = _pdb_cache_metadata_path(pdb_path)
     if not metadata_path.exists():
         return None
@@ -128,10 +126,7 @@ def _load_pdb_cache_metadata(pdb_path: Path) -> dict[str, Any] | None:
         payload = json.loads(metadata_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
-    if (
-        not isinstance(payload, dict)
-        or payload.get("schema_version") != PDB_CACHE_METADATA_SCHEMA_VERSION
-    ):
+    if not isinstance(payload, dict):
         return None
     return payload
 
@@ -260,9 +255,16 @@ def _atomic_install_pdb_response(
 
         if size_bytes <= 0:
             raise RuntimeError(f"Downloaded empty coordinate file for {pdb_path.stem}")
+        if pdb_path.suffix.lower() == ".pdb":
+            ensure_normalized_pdb(output_path)
+            # The cache hash describes the coordinates all consumers receive,
+            # including the conformer selection, rather than the HTTP payload.
+            digest_hex = _sha256_file(output_path)
+        else:
+            digest_hex = digest.hexdigest()
         output_path.replace(pdb_path)
         stat = pdb_path.stat()
-        return digest.hexdigest(), stat.st_size, stat.st_mtime_ns
+        return digest_hex, stat.st_size, stat.st_mtime_ns
     finally:
         if download_path is not None:
             download_path.unlink(missing_ok=True)
@@ -280,7 +282,6 @@ def _cache_metadata_from_response(
 ) -> dict[str, Any]:
     """Build the durable sidecar for one successfully installed PDB file."""
     return {
-        "schema_version": PDB_CACHE_METADATA_SCHEMA_VERSION,
         "cache_revision": uuid.uuid4().hex,
         "entry_id": entry_id.upper(),
         "source_url": source_url,

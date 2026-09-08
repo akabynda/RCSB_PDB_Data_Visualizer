@@ -27,10 +27,11 @@ def _ca_line(
     z: float,
     occupancy: float = 1.0,
     element: str = "C",
+    insertion_code: str = "",
 ) -> str:
     """Return one fixed-column PDB alpha-carbon record."""
     return (
-        f"{record:<6}{serial:5d}  CA  {resname:>3} {chain_id}{resid:4d}    "
+        f"{record:<6}{serial:5d}  CA  {resname:>3} {chain_id}{resid:4d}{insertion_code:1}   "
         f"{x:8.3f}{y:8.3f}{z:8.3f}{occupancy:6.2f}{20.0:6.2f}"
         f"          {element:>2}\n"
     )
@@ -59,7 +60,7 @@ def _write_fixture(path: Path, first_x: float = 1.0) -> None:
 
 
 class XrayCaCacheTests(unittest.TestCase):
-    """Verify cache fidelity, versioning, invalidation, and thread safety."""
+    """Verify cache fidelity, source invalidation, and thread safety."""
 
     def setUp(self) -> None:
         """Create one isolated source PDB for each test."""
@@ -129,43 +130,6 @@ class XrayCaCacheTests(unittest.TestCase):
         self.assertEqual(records_c, ())
         self.assertEqual(coords_c, {})
 
-    def test_cache_from_calcium_counting_parser_is_rebuilt(self) -> None:
-        """Invalidate revision 1 even when its source SHA still matches."""
-        self.pdb_path.write_text(
-            _ca_line("ATOM", 1, "ALA", "A", 1, 1.0, 2.0, 3.0)
-            + _ca_line("HETATM", 2, "CA", "A", 2, 9.0, 9.0, 9.0, element="CA"),
-            encoding="utf-8",
-        )
-        cache_path = builder._first_model_ca_cache_path(self.pdb_path)
-        contaminated_records = (
-            builder.CAResidueRecord(1, "A", True),
-            builder.CAResidueRecord(2, "HET:CA", False, has_hetatm_ca=True),
-        )
-        with patch.object(dataset_ca_cache, "XRAY_CA_PARSER_REVISION", 1):
-            builder._write_first_model_ca_cache(
-                cache_path,
-                builder._coordinate_source_sha256(self.pdb_path),
-                {"A": (contaminated_records, {1: np.ones(3), 2: np.ones(3)})},
-            )
-
-        with patch.object(
-            dataset_ca_cache,
-            "_parse_first_model_ca_data_by_chain",
-            wraps=builder._parse_first_model_ca_data_by_chain,
-        ) as parse_source:
-            records, coords = builder.load_cached_first_model_ca_data(
-                self.pdb_path, "A"
-            )
-
-        self.assertEqual(parse_source.call_count, 1)
-        self.assertEqual([record.resid for record in records], [1])
-        self.assertEqual(set(coords), {1})
-        np.testing.assert_allclose(coords[1], [1.0, 2.0, 3.0])
-        with np.load(cache_path, allow_pickle=False) as payload:
-            self.assertEqual(
-                payload["parser_revision"].item(), builder.XRAY_CA_PARSER_REVISION
-            )
-
     def test_second_chain_uses_same_whole_file_parse(self) -> None:
         """Parse all first-model chains once and serve each chain from one cache."""
         real_parser = builder._parse_first_model_ca_data_by_chain
@@ -184,7 +148,7 @@ class XrayCaCacheTests(unittest.TestCase):
         np.testing.assert_allclose(coords_b[7], [7.0, 8.0, 9.0])
         cache_path = builder._first_model_ca_cache_path(self.pdb_path)
         self.assertTrue(cache_path.is_file())
-        self.assertIn(".v", cache_path.name)
+        self.assertEqual(cache_path.name, "1ABC.pdb.first_model_ca.npz")
 
     def test_source_sha256_invalidates_cache_even_if_size_and_mtime_match(
         self,
@@ -274,3 +238,106 @@ class XrayCaCacheTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_ca_cache_retains_independent_insertions_order_and_flags(
+    tmp_path: Path,
+) -> None:
+    pdb_path = tmp_path / "insertions.pdb"
+    source = [
+        (56, "", "ATOM", "LYS"),
+        (56, "A", "ATOM", "ASP"),
+        (56, "B", "HETATM", "MSE"),
+        (56, "1", "ATOM", "GLY"),
+        (561, "", "ATOM", "GLU"),
+        (0, "", "ATOM", "ALA"),
+        (-1, "a", "ATOM", "ALA"),
+    ]
+    pdb_path.write_text(
+        "".join(
+            _ca_line(
+                record,
+                ordinal,
+                name,
+                "A",
+                resid,
+                float(ordinal),
+                0.0,
+                0.0,
+                insertion_code=code,
+            )
+            for ordinal, (resid, code, record, name) in enumerate(source, start=1)
+        ),
+        encoding="utf-8",
+    )
+    expected_keys = [builder.ResidueId(resid, code) for resid, code, _, _ in source]
+    first = builder.load_cached_first_model_ca_data(pdb_path, "A")
+    with patch.object(dataset_ca_cache, "_parse_first_model_ca_data_by_chain") as parse:
+        cached = builder.load_cached_first_model_ca_data(pdb_path, "A")
+    parse.assert_not_called()
+    assert first[0] == cached[0]
+    for records, coords in (first, cached):
+        assert [record.key for record in records] == expected_keys
+        assert list(coords) == expected_keys
+        assert [record.has_hetatm_ca for record in records] == [
+            False,
+            False,
+            True,
+            False,
+            False,
+            False,
+            False,
+        ]
+        for ordinal, key in enumerate(expected_keys, start=1):
+            np.testing.assert_array_equal(coords[key], [float(ordinal), 0.0, 0.0])
+
+
+def test_ca_cache_uses_shifted_coordinates_for_long_component_ids(
+    tmp_path: Path,
+) -> None:
+    pdb_path = tmp_path / "long-component.pdb"
+    pdb_path.write_text(
+        "SEQRES   1 A    1  A1A2\n"
+        + _ca_line(
+            "HETATM",
+            1,
+            "A1A2",
+            "A",
+            56,
+            123.456,
+            -789.123,
+            0.345,
+            insertion_code="1",
+        ),
+        encoding="utf-8",
+    )
+    for _ in range(2):
+        records, coords = builder.load_cached_first_model_ca_data(pdb_path, "A")
+        assert [record.key for record in records] == [builder.ResidueId(56, "1")]
+        assert records[0].identity == "HET:A1A2"
+        np.testing.assert_array_equal(
+            coords[builder.ResidueId(56, "1")], [123.456, -789.123, 0.345]
+        )
+
+
+def test_ca_cache_modres_does_not_leak_across_insertion_codes(tmp_path: Path) -> None:
+    pdb_path = tmp_path / "modres.pdb"
+    modres = list(" " * 80)
+    modres[:6] = "MODRES"
+    modres[12:15] = "MSE"
+    modres[16] = "A"
+    modres[18:22] = "  56"
+    modres[24:27] = "MET"
+    pdb_path.write_text(
+        "".join(modres)
+        + "\n"
+        + _ca_line("HETATM", 1, "MSE", "A", 56, 1.0, 0.0, 0.0)
+        + _ca_line("HETATM", 2, "MSE", "A", 56, 2.0, 0.0, 0.0, insertion_code="A"),
+        encoding="utf-8",
+    )
+    for _ in range(2):
+        records, _coords = builder.load_cached_first_model_ca_data(pdb_path, "A")
+        assert [(record.key, record.identity) for record in records] == [
+            (builder.ResidueId(56), "M"),
+            (builder.ResidueId(56, "A"), "HET:MSE"),
+        ]

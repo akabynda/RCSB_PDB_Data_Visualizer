@@ -134,7 +134,6 @@ from src.dataset.config import (
     LOCAL_STRIDE_CANDIDATE,
     LOGGER,
     MEMBRANE_ANNOTATION_TYPES,
-    PDB_CACHE_METADATA_SCHEMA_VERSION,
     PDB_CHAIN_ID_POOL,
     PROTEIN_MONOMER_ENTITY_TYPES,
     PROTEIN_POLYMER_TYPE,
@@ -145,8 +144,6 @@ from src.dataset.config import (
     STRIDE_SETUP_TIMEOUT_SECONDS,
     STRIDE_SOURCE_REVISION,
     STRIDE_STATE_CODES,
-    XRAY_CA_CACHE_SCHEMA_VERSION,
-    XRAY_CA_PARSER_REVISION,
     XRAY_HOMOLOG_HETATM_REJECTION_REASON,
     XRAY_HOMOLOG_METHOD_REJECTION_REASON,
     XRAY_HOMOLOG_SEARCH_MAX_ATTEMPTS,
@@ -273,6 +270,8 @@ from src.dataset.programs import (
 )
 from src.dataset.records import (
     CAResidueRecord,
+    ResidueId,
+    parse_residue_id,
     MembraneYearlyCountRecord,
     PreparedNMRCoreData,
     PreparedXrayCAData,

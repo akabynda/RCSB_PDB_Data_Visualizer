@@ -3,8 +3,74 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import total_ordering
+from numbers import Integral
+import re
 
 import numpy as np
+
+
+@total_ordering
+@dataclass(frozen=True, eq=False)
+class ResidueId:
+    """Author residue number and insertion code, independent of atom altLoc."""
+
+    seq_id: int
+    insertion_code: str = ""
+
+    def __post_init__(self) -> None:
+        if len(self.insertion_code) > 1 or self.insertion_code.isspace():
+            raise ValueError("Insertion code must be empty or one nonblank character")
+
+    def __hash__(self) -> int:
+        # Preserve compatibility with integer keys for ordinary numbered residues.
+        return (
+            hash((self.seq_id, self.insertion_code))
+            if self.insertion_code
+            else hash(self.seq_id)
+        )
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, Integral):
+            return not self.insertion_code and self.seq_id == other
+        if isinstance(other, ResidueId):
+            return (self.seq_id, self.insertion_code) == (
+                other.seq_id,
+                other.insertion_code,
+            )
+        return NotImplemented
+
+    def __lt__(self, other: object) -> bool:
+        if isinstance(other, Integral):
+            other = ResidueId(int(other))
+        if isinstance(other, ResidueId):
+            return (self.seq_id, self.insertion_code) < (
+                other.seq_id,
+                other.insertion_code,
+            )
+        return NotImplemented
+
+    def __int__(self) -> int:
+        return self.seq_id
+
+    def __str__(self) -> str:
+        # Numeric insertion codes must not become an extra digit of resSeq.
+        suffix = self.insertion_code
+        if suffix and not suffix.isalpha():
+            suffix = "^" + suffix
+        return f"{self.seq_id}{suffix}"
+
+
+def parse_residue_id(value: str | int | ResidueId) -> ResidueId:
+    """Read a CSV/STRIDE residue label without discarding its insertion code."""
+    if isinstance(value, ResidueId):
+        return value
+    if isinstance(value, Integral):
+        return ResidueId(int(value))
+    match = re.fullmatch(r"([+-]?\d+)(?:\^([^\s])|([A-Za-z]))?", str(value).strip())
+    if match is None:
+        raise ValueError(f"Invalid author residue identifier: {value!r}")
+    return ResidueId(int(match.group(1)), match.group(2) or match.group(3) or "")
 
 
 @dataclass(frozen=True)
@@ -15,17 +81,23 @@ class CAResidueRecord:
     identity: str
     is_standard_atom: bool
     has_hetatm_ca: bool = False
+    insertion_code: str = ""
+
+    @property
+    def key(self) -> ResidueId:
+        """Return the full identity used for residue and coordinate lookups."""
+        return ResidueId(self.resid, self.insertion_code)
 
 
 PreparedNMRCoreData = tuple[
     tuple[CAResidueRecord, ...],
-    dict[int, np.ndarray],
+    dict[ResidueId, np.ndarray],
 ]
 
 
 PreparedXrayCAData = tuple[
     tuple[CAResidueRecord, ...],
-    dict[int, np.ndarray],
+    dict[ResidueId, np.ndarray],
 ]
 
 
@@ -128,8 +200,8 @@ class SolutionNMRMonomerStrideModeledFirstModelRecord:
     entry_id: str
     year: int
     chain_id: str
-    modeled_start_seq_id: int
-    modeled_end_seq_id: int
+    modeled_start_seq_id: ResidueId | int
+    modeled_end_seq_id: ResidueId | int
     modeled_sequence_length: int
     stride_alpha_helix_fraction: float
     stride_3_10_helix_fraction: float
@@ -157,8 +229,8 @@ class SolutionNMRMonomerPrecisionRecord:
     entry_id: str
     year: int
     chain_id: str
-    core_start_seq_id: int
-    core_end_seq_id: int
+    core_start_seq_id: ResidueId | int
+    core_end_seq_id: ResidueId | int
     n_models: int
     n_ca_core_used: int
     n_ca_core_raw: int
@@ -184,8 +256,8 @@ class RejectedXrayHomologRecord:
     nmr_year: int
     nmr_chain_id: str
     sequence_identity_percent: int
-    nmr_core_start_seq_id: int | None
-    nmr_core_end_seq_id: int | None
+    nmr_core_start_seq_id: ResidueId | int | None
+    nmr_core_end_seq_id: ResidueId | int | None
     nmr_query_sequence_length: int
     xray_entry_id: str
     xray_entity_id: str
@@ -200,8 +272,8 @@ class SolutionNMRMonomerXrayHomologRecord:
     entry_id: str
     year: int
     sequence_identity_percent: int
-    nmr_core_start_seq_id: int | None
-    nmr_core_end_seq_id: int | None
+    nmr_core_start_seq_id: ResidueId | int | None
+    nmr_core_end_seq_id: ResidueId | int | None
     nmr_query_sequence_length: int
     xray_homolog_entry_ids: tuple[str, ...]
     xray_homolog_entity_ids: tuple[str, ...]
@@ -236,15 +308,15 @@ class SolutionNMRMonomerXrayRmsdRecord:
     year: int
     sequence_identity_percent: int
     nmr_chain_id: str
-    nmr_core_start_seq_id: int | None
-    nmr_core_end_seq_id: int | None
+    nmr_core_start_seq_id: ResidueId | int | None
+    nmr_core_end_seq_id: ResidueId | int | None
     nmr_query_sequence_length: int
     xray_homolog_entity_id: str
     xray_homolog_count: int
     xray_entry_id: str
     xray_chain_id: str
-    xray_core_start_seq_id: int | None
-    xray_core_end_seq_id: int | None
+    xray_core_start_seq_id: ResidueId | int | None
+    xray_core_end_seq_id: ResidueId | int | None
     xray_resolution_angstrom: float
     n_common_ca: int
     rmsd_ca_angstrom: float
@@ -258,8 +330,8 @@ class SolutionNMRMonomerXrayRmsdExtremesRecord:
     year: int
     sequence_identity_percent: int
     nmr_chain_id: str
-    nmr_core_start_seq_id: int | None
-    nmr_core_end_seq_id: int | None
+    nmr_core_start_seq_id: ResidueId | int | None
+    nmr_core_end_seq_id: ResidueId | int | None
     nmr_query_sequence_length: int
     xray_homolog_count: int
     successful_xray_homolog_count: int
@@ -267,16 +339,16 @@ class SolutionNMRMonomerXrayRmsdExtremesRecord:
     best_xray_entry_id: str
     best_xray_chain_id: str
     best_xray_resolution_angstrom: float
-    best_xray_core_start_seq_id: int | None
-    best_xray_core_end_seq_id: int | None
+    best_xray_core_start_seq_id: ResidueId | int | None
+    best_xray_core_end_seq_id: ResidueId | int | None
     best_n_common_ca: int
     best_rmsd_ca_angstrom: float
     worst_xray_homolog_entity_id: str
     worst_xray_entry_id: str
     worst_xray_chain_id: str
     worst_xray_resolution_angstrom: float
-    worst_xray_core_start_seq_id: int | None
-    worst_xray_core_end_seq_id: int | None
+    worst_xray_core_start_seq_id: ResidueId | int | None
+    worst_xray_core_end_seq_id: ResidueId | int | None
     worst_n_common_ca: int
     worst_rmsd_ca_angstrom: float
     rmsd_delta_angstrom: float
