@@ -20,6 +20,7 @@ class EntrySearchMixin:
     ) -> list[str]:
         """Run a paginated RCSB search query and return all identifiers."""
         all_ids: list[str] = []
+        seen_ids: set[str] = set()
         start = 0
         total_count: int | None = None
         while total_count is None or start < total_count:
@@ -31,16 +32,45 @@ class EntrySearchMixin:
                 },
             }
             data = self._post_json(self.config.search_url, payload)
-            total_count = int(data.get("total_count", 0))
+            try:
+                page_total = int(data["total_count"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise RuntimeError(
+                    "RCSB search response has no valid total_count"
+                ) from exc
+            if page_total < 0:
+                raise RuntimeError("RCSB search response has a negative total_count")
+            if total_count is not None and page_total != total_count:
+                raise RuntimeError(
+                    "RCSB search total_count changed during pagination "
+                    f"({total_count} to {page_total}); rerun the search"
+                )
+            total_count = page_total
             batch_ids = [
                 item["identifier"]
                 for item in data.get("result_set") or []
                 if "identifier" in item
             ]
-            all_ids.extend(batch_ids)
-            start += len(batch_ids)
             if not batch_ids:
+                if start < total_count:
+                    raise RuntimeError(
+                        "RCSB search returned an empty page before completion "
+                        f"({start}/{total_count} identifiers)"
+                    )
                 break
+            if len(set(batch_ids)) != len(batch_ids) or seen_ids.intersection(
+                batch_ids
+            ):
+                raise RuntimeError(
+                    f"RCSB search repeated identifiers at pagination offset {start}"
+                )
+            if start + len(batch_ids) > total_count:
+                raise RuntimeError(
+                    "RCSB search returned more identifiers than total_count"
+                )
+            all_ids.extend(batch_ids)
+            seen_ids.update(batch_ids)
+            start += len(batch_ids)
             if progress_label:
                 LOGGER.info(
                     "%s: fetched %d/%d entry IDs",

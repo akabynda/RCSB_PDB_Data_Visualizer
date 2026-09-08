@@ -64,7 +64,26 @@ class RCSBTransport:
                     url, json=payload, timeout=self.config.timeout_seconds
                 )
                 response.raise_for_status()
-                return response.json()
+                data = response.json()
+                if not isinstance(data, dict):
+                    raise ValueError("RCSB response is not a JSON object")
+                if data.get("errors"):
+                    errors = data["errors"]
+                    if isinstance(errors, list):
+                        detail = "; ".join(
+                            str(error.get("message", error))
+                            if isinstance(error, dict)
+                            else str(error)
+                            for error in errors
+                        )
+                    else:
+                        detail = str(errors)
+                    raise ValueError(f"RCSB response contains errors: {detail}")
+                if isinstance(payload.get("query"), str) and not isinstance(
+                    data.get("data"), dict
+                ):
+                    raise ValueError("GraphQL response does not contain a data object")
+                return data
             except (requests.RequestException, ValueError) as exc:
                 last_error = exc
                 wait_seconds = self.config.backoff_seconds * attempt
