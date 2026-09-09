@@ -192,7 +192,7 @@ def test_network_failure_is_not_reported_as_unequal_model_lengths(tmp_path):
             "coordinate preparation failed: Timeout: network outage",
             year=2020,
         )
-        assert not client._solution_nmr_monomer_models_have_equal_lengths("TEST", "A")
+        assert not client._solution_nmr_monomer_coordinates_are_eligible("TEST", "A")
 
 
 @pytest.mark.parametrize(
@@ -224,7 +224,7 @@ def test_model_filter_records_the_actual_failure_reason(tmp_path, models, reason
                 client._extract_solution_nmr_monomer_context(_monomer_entry()) is None
             )
         filtered.assert_called_once_with("TEST", reason, year=2020)
-        assert not client._solution_nmr_monomer_models_have_equal_lengths("TEST", "A")
+        assert not client._solution_nmr_monomer_coordinates_are_eligible("TEST", "A")
 
 
 def test_equal_length_policy_still_allows_different_residue_sets(tmp_path):
@@ -233,7 +233,7 @@ def test_equal_length_policy_still_allows_different_residue_sets(tmp_path):
     with patch.object(
         client, "_download_solution_nmr_monomer_pdb_if_needed", return_value=path
     ):
-        assert client._solution_nmr_monomer_models_have_equal_lengths("TEST", "A")
+        assert client._solution_nmr_monomer_coordinates_are_eligible("TEST", "A")
         assert (
             client._extract_solution_nmr_monomer_context(_monomer_entry()) is not None
         )

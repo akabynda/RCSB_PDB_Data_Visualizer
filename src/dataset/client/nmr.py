@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from ..config import LOGGER, PROTEIN_MONOMER_ENTITY_TYPES, PROTEIN_POLYMER_TYPE
-from ..coordinates import parse_models_ca_coords_with_stats
+from ..coordinates import parse_models_ca_data
 from ..downloads import download_pdb_if_needed
 from ..records import (
     SolutionNMRMonomerExperimentsRecord,
@@ -27,7 +27,7 @@ class SolutionNMRMixin:
         self,
         entry: dict[str, Any],
     ) -> tuple[str, int, int, dict[str, Any], str] | None:
-        """Extract context for a monomer whose models have equal chain lengths."""
+        """Extract context for a monomer with eligible modeled protein coordinates."""
         entry_id = entry.get("rcsb_id")
         if not entry_id:
             return None
@@ -94,12 +94,12 @@ class SolutionNMRMixin:
             )
             return None
 
-        model_length_issue = self._solution_nmr_monomer_model_length_issue(
+        coordinate_issue = self._solution_nmr_monomer_coordinate_issue(
             entry_id=entry_id,
             chain_id=chain_id,
         )
-        if model_length_issue is not None:
-            _record_filtered_structure(entry_id, model_length_issue, year=year)
+        if coordinate_issue is not None:
+            _record_filtered_structure(entry_id, coordinate_issue, year=year)
             return None
 
         return entry_id, year, model_count, polymer_entity, chain_id
@@ -113,20 +113,20 @@ class SolutionNMRMixin:
             entry_id=entry_id,
         )
 
-    def _solution_nmr_monomer_models_have_equal_lengths(
+    def _solution_nmr_monomer_coordinates_are_eligible(
         self,
         entry_id: str,
         chain_id: str,
     ) -> bool:
-        """Return whether every coordinate model has the same full-chain length."""
-        return self._solution_nmr_monomer_model_length_issue(entry_id, chain_id) is None
+        """Return whether all models satisfy the common monomer coordinate rules."""
+        return self._solution_nmr_monomer_coordinate_issue(entry_id, chain_id) is None
 
-    def _solution_nmr_monomer_model_length_issue(
+    def _solution_nmr_monomer_coordinate_issue(
         self,
         entry_id: str,
         chain_id: str,
     ) -> str | None:
-        """Explain coordinate failures separately from model-length exclusions."""
+        """Check all modeled chain positions for HETATM and equal model lengths."""
         try:
             pdb_path = self._download_solution_nmr_monomer_pdb_if_needed(entry_id)
             chain_map = load_cached_chain_id_map(
@@ -134,13 +134,13 @@ class SolutionNMRMixin:
                 entry_id,
             )
             parsed_chain_id = chain_map.get(chain_id, chain_id)
-            model_maps, _ = parse_models_ca_coords_with_stats(
+            model_maps, _, hetatm_ids_per_model = parse_models_ca_data(
                 pdb_path=pdb_path,
                 chain_id=parsed_chain_id,
             )
         except Exception as exc:
             LOGGER.warning(
-                "Skipping SOLUTION NMR monomer %s: model-length check failed: %s",
+                "Skipping SOLUTION NMR monomer %s: coordinate check failed: %s",
                 entry_id,
                 exc,
             )
@@ -163,6 +163,15 @@ class SolutionNMRMixin:
                 f"no usable modeled CA residues for chain {chain_id} in coordinate "
                 f"model(s): {', '.join(empty_models)}"
             )
+        for model_index, hetatm_ids in enumerate(hetatm_ids_per_model, 1):
+            if hetatm_ids:
+                residue_ids = ", ".join(str(key) for key in sorted(hetatm_ids)[:20])
+                if len(hetatm_ids) > 20:
+                    residue_ids += f", ... ({len(hetatm_ids)} total)"
+                return (
+                    f"modeled protein chain contains HETATM CA residues "
+                    f"(chain {chain_id}, model {model_index}; residue IDs: {residue_ids})"
+                )
         if len(set(model_lengths)) != 1:
             LOGGER.info(
                 "Skipping SOLUTION NMR monomer %s chain %s: coordinate models have different full-chain lengths (%s)",

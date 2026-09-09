@@ -382,10 +382,29 @@ def parse_models_ca_coords_with_stats(
     end_seq_id: ResidueId | int | None = None,
 ) -> tuple[list[dict[ResidueId, np.ndarray]], list[dict[ResidueId, int]]]:
     """Parse normalized CA coordinates and count retained records per full ID."""
+    models, raw_counts, _ = parse_models_ca_data(
+        pdb_path, chain_id, start_seq_id, end_seq_id
+    )
+    return models, raw_counts
+
+
+def parse_models_ca_data(
+    pdb_path: Path,
+    chain_id: str,
+    start_seq_id: ResidueId | int | None = None,
+    end_seq_id: ResidueId | int | None = None,
+) -> tuple[
+    list[dict[ResidueId, np.ndarray]],
+    list[dict[ResidueId, int]],
+    list[set[ResidueId]],
+]:
+    """Parse coordinates, record counts, and modeled HETATM evidence per model."""
     models: list[dict[ResidueId, np.ndarray]] = []
     raw_ca_counts_per_model: list[dict[ResidueId, int]] = []
+    hetatm_ids_per_model: list[set[ResidueId]] = []
     current_candidates: dict[ResidueId, tuple[str, float, str, bool, np.ndarray]] = {}
     current_raw_counts: Counter[ResidueId] = Counter()
+    current_hetatm_ids: set[ResidueId] = set()
     polymer_metadata = load_pdb_polymer_metadata(pdb_path)
     has_model_records = False
     in_model = False
@@ -395,6 +414,7 @@ def parse_models_ca_coords_with_stats(
         keys = list(current_candidates)
         models.append({key: current_candidates[key][4] for key in keys})
         raw_ca_counts_per_model.append({key: current_raw_counts[key] for key in keys})
+        hetatm_ids_per_model.append(current_hetatm_ids.intersection(keys))
 
     for line in iter_normalized_pdb_lines(pdb_path):
         record = line[:6]
@@ -403,6 +423,7 @@ def parse_models_ca_coords_with_stats(
                 finalize_model()
                 current_candidates = {}
                 current_raw_counts = Counter()
+                current_hetatm_ids = set()
             has_model_records = True
             in_model = True
             continue
@@ -411,6 +432,7 @@ def parse_models_ca_coords_with_stats(
                 finalize_model()
                 current_candidates = {}
                 current_raw_counts = Counter()
+                current_hetatm_ids = set()
                 in_model = False
             continue
         is_standard_atom = record.startswith("ATOM")
@@ -436,6 +458,8 @@ def parse_models_ca_coords_with_stats(
         if occupancy <= 0.0:
             continue
         current_raw_counts[residue_key] += 1
+        if is_hetero_atom:
+            current_hetatm_ids.add(residue_key)
 
         offset = pdb_atom_field_offset(line)
         try:
@@ -510,4 +534,5 @@ def parse_models_ca_coords_with_stats(
             {key: count for key, count in counts.items() if key in selected_keys}
             for counts in raw_ca_counts_per_model
         ]
-    return models, raw_ca_counts_per_model
+        hetatm_ids_per_model = [ids & selected_keys for ids in hetatm_ids_per_model]
+    return models, raw_ca_counts_per_model, hetatm_ids_per_model

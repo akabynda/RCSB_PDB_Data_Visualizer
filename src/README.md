@@ -192,6 +192,8 @@ structural filters:
 - that polymer entity is a protein, with entity type `polypeptide(L)` or
   `polypeptide(D)`;
 - the polymer entity has exactly one chain ID in `pdbx_strand_id`;
+- no positive-occupancy protein `HETATM` CA records remain after conformer
+  selection in any model, including outside the STRIDE core;
 - every coordinate model has the same number of modeled CA positions, as
   defined below.
 
@@ -214,7 +216,6 @@ atoms, and ligand atoms named `CA` are excluded. For native PDB files, a
 When SEQRES is present, membership in Bio.PDB's amino-acid dictionary alone is
 insufficient: a known component can also be a free ligand (for example, `8SP`
 in `2LYB`). The dictionary is a fallback only for files without SEQRES.
-Modified and D-amino acids are included as modeled positions.
 mmCIF conversions preserve exact polypeptide membership
 from `_entity_poly` and `_atom_site` in `REMARK 999 POLYPEPTIDE V1` records;
 this exact membership takes precedence over component-name inference.
@@ -258,12 +259,9 @@ one of these states in the first model:
 - `E`: beta strand
 - `B`: isolated beta bridge
 
-Core endpoints require explicit STRIDE assignments. The managed STRIDE build
-reads `ATOM` records and skips `HETATM`; modeled polypeptide `HETATM` positions
-can lie inside the core interval. The STRIDE summary can retain an entry with
-no core states, but precision and homology datasets cannot. The core states
-define only the endpoints; downstream steps start from the observed CA
-positions between them, not only residues in those states.
+The STRIDE summary can retain an entry with no core states, but precision and
+homology datasets cannot. Core calculations include all modeled CA positions
+between the endpoints.
 The span follows coordinate-record order, including insertion codes, rather
 than numeric or lexical sorting. The first model defines its full set of IDs;
 a missing endpoint in another model cannot change that span.
@@ -502,10 +500,8 @@ Output:
 
 ### `solution_nmr_monomer_stride_modeled_first_model`
 
-Runs STRIDE on the first model of each eligible SOLUTION NMR protein monomer,
-restricts the STRIDE assignments to the modeled `ATOM` and `HETATM` CA residues
-from that same first model, and summarizes the resulting state fractions over
-the modeled part only.
+Runs STRIDE on the first model of each eligible SOLUTION NMR protein monomer
+and computes state fractions over its modeled CA positions.
 
 The output stores the modeled residue span and STRIDE fractions for `H`, `G`,
 `I`, `E`, `B`, `T`, and `C`.
@@ -513,9 +509,7 @@ The output stores the modeled residue span and STRIDE fractions for `H`, `G`,
 Every modeled CA position must have a recognized STRIDE assignment. `C` means
 an explicit coil assignment; a missing or unrecognized assignment is not coil.
 STRIDE's `B` and lowercase `b` both mean an isolated bridge and are counted in
-the dataset's `B` class. The bundled STRIDE reads `ATOM` records only, so
-modified amino acids stored as `HETATM` (for example, hydroxyproline `HYP`)
-cause incomplete assignments under this completeness rule.
+the dataset's `B` class.
 Incomplete or failed STRIDE results are excluded and recorded in the filtered
 structure report, including when STRIDE exits successfully. No sentinel state
 fractions or percentages are written as a dataset row.
@@ -537,7 +531,7 @@ Output:
 ### `solution_nmr_monomer_precision_stride_modeled_first_model`
 
 Computes NMR ensemble precision over the first-model STRIDE core. It uses
-positive-occupancy `ATOM` and `HETATM` CA residues found in every coordinate
+positive-occupancy `ATOM` CA residues found in every coordinate
 model. At least three common residues are required.
 
 Every NMR model is first rigidly aligned to the first NMR model. Let `N` be the
@@ -607,8 +601,6 @@ entity chain contains at least one matching HETATM-free region.
   identities are required.
 - The 100% check requires the complete query to match one consecutive window;
   the X-ray chain may have additional residues outside that window.
-- An NMR core is excluded if any modeled CA position is represented by, or also
-  contains, a positive-occupancy `HETATM` record.
 - A matching X-ray region containing any positive-occupancy `HETATM` CA is
   excluded at every identity cutoff. If several regions match, clean regions
   remain eligible and dirty regions are ignored; a `HETATM` outside the selected
@@ -673,15 +665,10 @@ Historical-only runs do not require a current homolog CSV. The calculation still
 requires an exact modeled-core match at either cutoff. Use different output paths
 to retain both 95% and 100% runs.
 
-Computes CA RMSD between an NMR STRIDE core and a matching X-ray homolog.
-
-The exact sequence match is repeated over HETATM-free X-ray regions, so RMSD
-cannot silently select a dirty repeat after the homolog stage accepted a clean
-one. The RMSD uses matched `ATOM` CA pairs from the first NMR and X-ray models
-and requires at least three pairs. The NMR-core positive-occupancy `HETATM` rule
-above is revalidated. Invariant NMR residues and first-model coordinates are
-parsed once per NMR entry and reused across its X-ray candidates. X-ray
-first-model residues and coordinates come from the CA cache described above.
+Computes CA RMSD between an NMR STRIDE core and an exactly matching HETATM-free
+X-ray region. It uses at least three matched `ATOM` CA pairs from the first NMR
+and X-ray models. NMR residues and coordinates are parsed once per entry and
+reused across its X-ray candidates; X-ray data comes from the CA cache.
 
 ```text
 d_eh = RMSD_superposed(NMR_e,model1, Xray_h,model1)

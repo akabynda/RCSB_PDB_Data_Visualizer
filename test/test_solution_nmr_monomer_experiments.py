@@ -63,7 +63,7 @@ class _ExperimentsClient(RCSBClient):
             }
         }
 
-    def _solution_nmr_monomer_model_length_issue(
+    def _solution_nmr_monomer_coordinate_issue(
         self, entry_id: str, chain_id: str
     ) -> str | None:
         """Treat coordinate model lengths as equal in metadata-focused tests."""

@@ -81,7 +81,7 @@ class RCSBClientMetadataTests(unittest.TestCase):
     def test_monomer_context_rejects_every_invalid_metadata_layer(self) -> None:
         with patch.object(
             self.client,
-            "_solution_nmr_monomer_model_length_issue",
+            "_solution_nmr_monomer_coordinate_issue",
             return_value=None,
         ) as equal_lengths:
             self.assertIsNone(self.client._extract_solution_nmr_monomer_context({}))
@@ -780,7 +780,7 @@ class RCSBClientMetadataTests(unittest.TestCase):
             side_effect=RuntimeError("offline"),
         ):
             self.assertFalse(
-                self.client._solution_nmr_monomer_models_have_equal_lengths(
+                self.client._solution_nmr_monomer_coordinates_are_eligible(
                     "BROKEN", "A"
                 )
             )
@@ -794,12 +794,12 @@ class RCSBClientMetadataTests(unittest.TestCase):
             patch.object(nmr_client, "load_cached_chain_id_map", return_value={}),
             patch.object(
                 nmr_client,
-                "parse_models_ca_coords_with_stats",
-                return_value=([{1: Mock()}], [{1: 1}]),
+                "parse_models_ca_data",
+                return_value=([{1: Mock()}], [{1: 1}], [set()]),
             ),
         ):
             self.assertFalse(
-                self.client._solution_nmr_monomer_models_have_equal_lengths(
+                self.client._solution_nmr_monomer_coordinates_are_eligible(
                     "ONE_MODEL", "A"
                 )
             )
