@@ -17,9 +17,9 @@ This README contains the steps required to reproduce those results.
 ## Requirements
 
 - Python 3.10 or newer.
-- Network access and at least 80 GiB of free disk space for a full build. The
-  current coordinate cache occupies approximately 65 GiB; 100 GiB is recommended
-  for temporary files and future updates.
+- Network access for dataset builds. Budget about 100 GiB of free disk space
+  for a full build, including coordinate caches and temporary files; actual
+  usage depends on the selected datasets and downloaded structures.
 - Git, GNU Make, and a C compiler (`gcc`, `cc`, or `clang`) for the first
   automatic STRIDE build used by Figures 3–7. These tools are not needed when a
   working STRIDE executable is already installed or supplied explicitly.
@@ -65,7 +65,7 @@ reference](src/README.md#stride) for executable lookup, installation, and cache 
 
 ## Reproduce All Article Figures
 
-Build every dataset in dependency order:
+Build every dataset in dependency order, including the additional analyses beyond the article figures:
 
 ```bash
 python src/pdb_dataset_builder.py --datasets all
@@ -81,9 +81,11 @@ After the datasets have been created in `data/`, render all figures:
 python src/pdb_plot.py --plots all
 ```
 
-Each figure is written to its own directory under `figures/`. The main article
-image has the same name as its directory. Three additional PNG variants without
-a title and/or with open top and right axes are generated alongside it.
+Each figure is written to its own directory under `figures/`. The base PNG has
+the same name as its directory, with a title and a closed frame. Three additional
+variants use the suffixes `_no_title`, `_open_axes`, and `_no_title_open_axes`.
+The article uses the titled `_open_axes.png` variants for Figures 1–6 and 8,
+and the base PNG with a closed frame for Figure 7.
 
 ## Reproduce Individual Article Figures
 
@@ -182,10 +184,12 @@ python src/pdb_plot.py \
 ## Long-Running Builds
 
 - Downloaded coordinates, the managed STRIDE source/binary, and STRIDE results
-  are cached in `data/`. Rerunning a command reuses available files.
-- Coordinate downloads and conversions are single-flight per PDB ID. Threads
-  and concurrent POSIX builder processes cannot publish mixed PDB/mmCIF,
-  chain-map, or metadata cache bundles; different PDB IDs still run in parallel.
+  are cached in `data/` and reused when their validation checks pass. See the
+  [cache reference](src/README.md#dataset-builder) for revalidation and concurrent
+  access behavior.
+- Dataset CSVs are rebuilt by default. Add `--resume` to continue homolog,
+  precision, and X-ray RMSD calculations from existing results; see the
+  [resume rules](src/README.md#useful-options) before reusing a previous run.
 - Use `python src/pdb_dataset_builder.py --help` and
   `python src/pdb_plot.py --help` for optional input/output paths, worker
   counts, resume behavior, and SVG generation.
@@ -198,6 +202,7 @@ The implementation is split into focused modules under `src/dataset/` and
 `src/plotting/`; see the [source organization guide](src/README.md#source-organization)
 for responsibilities and import conventions. The command-line entry points and
 Python APIs are available through `src.pdb_dataset_builder` and `src.pdb_plot`.
+Test and coverage commands are documented in [`test/README.md`](test/README.md).
 
 ## License
 

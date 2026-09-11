@@ -45,14 +45,15 @@ The implementation is organized by responsibility under `src/dataset/` and
 | `dataset/config.py`, `dataset/records.py`, `dataset/errors.py` | Build settings, dataset kinds, typed records, and domain exceptions. |
 | `dataset/client/` | HTTP transport, RCSB searches, metadata, NMR records, and homology API access. |
 | `dataset/structures.py`, `dataset/coordinates.py`, `dataset/matching.py`, `dataset/geometry.py` | Coordinate conversion and parsing, sequence matching, and RMSD calculations. |
+| `dataset/pdb_normalization.py` | Shared conformer selection and polypeptide-membership metadata used by coordinate consumers. |
 | `dataset/cache.py`, `dataset/downloads.py`, `dataset/ca_cache.py` | Coordinate downloads, cache validation and locking, and first-model CA caches. |
 | `dataset/stride.py`, `dataset/stride_install.py` | STRIDE execution, state caching, and managed executable installation. |
 | `dataset/programs.py`, `dataset/program_statistics.py`, `dataset/history.py` | Refinement-program parsing and summaries, and historical homolog filtering. |
 | `dataset/builders/` | Dataset-specific collection and computation, including shared RMSD output generation. |
 | `dataset/io/`, `dataset/reporting.py` | CSV schemas and serialization, resume checkpoints, warning logs, and filtered-structure reports. |
 | `dataset/arguments.py`, `dataset/cli.py`, `dataset/workflows/` | CLI flags, execution order, and per-dataset workflows; homolog resume validation is separate from streaming output. |
-| `plotting/config.py`, `plotting/constants.py`, `plotting/tables.py` | Plot settings, shared constants, and tabular data preparation. |
-| `plotting/style.py`, `plotting/rendering.py` | Figure styling, shared rendering functions, CSV caching, and output variants. |
+| `plotting/config.py`, `plotting/constants.py`, `plotting/tables.py` | Plot settings, shared constants, CSV caching, and tabular data preparation. |
+| `plotting/style.py`, `plotting/rendering.py` | Figure styling, shared rendering functions, and output variants. |
 | `plotting/counts.py`, `weights.py`, `quality.py`, `programs.py`, `homologs.py`, `rmsd.py`, `correlation.py` | Plot families, each in its own module under `plotting/`. |
 | `plotting/plotter.py`, `plotting/cli.py`, `plotting/cli_options/` | Composition of `PDBScientificPlotter`, plot dispatch, and grouped command-line options. |
 
@@ -99,7 +100,9 @@ python src/pdb_dataset_builder.py --datasets all
 Building `all` can take a long time because some datasets download coordinates,
 run STRIDE, and compute RMSD values.
 
-Coordinates are downloaded from RCSB, wwPDB, PDBe, or the EBI archive mirror.
+Native PDB downloads try RCSB, wwPDB, PDBe, and the EBI archive mirror. When
+those attempts fail and at least one source reports HTTP 404, the full-structure
+fallback downloads mmCIF from RCSB and converts it to PDB.
 Validated coordinate-cache entries have a `.cache.json` sidecar with their
 checksum, size, modification time, and available remote validators. An
 intermediate `.cif` retained after the mmCIF-to-PDB conversion fallback does not
@@ -107,10 +110,13 @@ have its own sidecar; validation metadata is stored for the converted `.pdb`.
 Cache entries are revalidated after 24 hours by default. Set
 `--pdb-cache-validation-hours 0` to validate them on every access.
 
-Structures that do not fit the PDB format are downloaded as mmCIF and
-converted to per-chain PDB subsets. The cache also stores the resulting chain-ID
-mapping. Per-chain subset PDBs and chain-ID mappings are installed through
-unique temporary files and atomic replacement.
+X-ray homology and RMSD calculations also support a separate chain-subset
+route. It reuses a full PDB when possible; otherwise, or for multicharacter
+chain IDs, it downloads mmCIF through the four mirrors and converts only the
+requested chains to PDB. This handles entries too large for full PDB conversion.
+The cache stores the resulting chain-ID mapping. Per-chain subset PDBs and
+chain-ID mappings are installed through unique temporary files and atomic
+replacement.
 
 Both full mmCIF-to-PDB conversions and per-chain subsets write NMR software
 names and versions into `REMARK 210 SOFTWARE USED` before the coordinates.
@@ -149,7 +155,8 @@ NPZ triggers reparsing and atomic cache replacement. The cache is shared by
 Each primary dataset CSV receives a sibling `.log` file containing warnings and
 errors from that build. Logs are recreated at the start of a run; multi-output
 datasets send shared warnings and errors to each affected log. An empty log
-indicates a clean run.
+means no warnings or errors were logged; eligibility exclusions may still be
+present in the filtered report.
 
 Each primary dataset `name.csv` also receives a paired `name_filtered.csv`. The
 paired file has three columns:
@@ -161,8 +168,9 @@ paired file has three columns:
 
 The `year` cell is empty when no valid deposition date is available. One entry
 can have several rows if it fails independent checks. Duplicate
-`entry_id`/`reason` rows are suppressed. A header-only file means that nothing
-was filtered. Builds without resume recreate the report. A resumed
+`entry_id`/`reason` rows are suppressed. A header-only file means no exclusions
+were recorded after the initial API search; entries outside that search are not
+listed. Builds without resume recreate the report. A resumed
 homolog build preserves its recorded exclusions, while a derived dataset imports
 upstream exclusions and then appends its own. Shared multi-output exclusions are
 written to every affected report; output-specific exclusions stay in their own
@@ -192,6 +200,8 @@ structural filters:
 - that polymer entity is a protein, with entity type `polypeptide(L)` or
   `polypeptide(D)`;
 - the polymer entity has exactly one chain ID in `pdbx_strand_id`;
+- every coordinate model has at least one usable modeled CA position in that
+  chain;
 - no positive-occupancy protein `HETATM` CA records remain after conformer
   selection in any model, including outside the STRIDE core;
 - every coordinate model has the same number of modeled CA positions, as
@@ -273,8 +283,6 @@ The following datasets require a STRIDE executable:
 - `solution_nmr_monomer_stride_modeled_first_model`
 - `solution_nmr_monomer_precision_stride_modeled_first_model`
 - `solution_nmr_monomer_xray_homologs`
-
-The builder downloads missing PDB coordinates into `data/pdb_cache/`.
 
 The builder resolves STRIDE in this order:
 
@@ -464,8 +472,8 @@ strings, and these aliases:
 - `CLUSTER4` — `CYANA`
 - `CLUSTER5` — `DISCOVER` (standalone `INSIGHT II` rows are included)
 - `CLUSTER6` — `DIANA` or `DYANA`
-- `CLUSTER7` — `XPLOR` (also `X-PLOR`), only when the name does not contain
-  `NIH`
+- `CLUSTER7` — `XPLOR` (also `X-PLOR`), for occurrences outside a recognized
+  XPLOR-NIH name; a compound software field can contain both clusters
 - `CLUSTER8` — `XPLOR_NIH` (also underscore, reversed `NIH-XPLOR`, compact
   `NIHXPLOR`, parenthesized NIH, and the observed `NHI` typo)
 - `CLUSTER9` — `OTHER`, used only when no known cluster matches
@@ -519,9 +527,10 @@ its diagnostic), a missing requested chain, and incomplete residue assignments
 substitute for the requested chain. STRIDE's `-` output label is mapped to a
 blank author chain only when the input actually contains a blank chain.
 
-That stored percentage is `100 * (1 - C)` and includes turns (`T`). Figure 3
-does not use it: the plot computes `100 * (H + G + I + E + B)`, removes values
-outside 0–100%, and takes the arithmetic mean for each year.
+The stored `stride_secondary_structure_percent` is `100 * (1 - C)` and includes
+turns (`T`). Figure 3 does not use it: the plot computes
+`100 * (H + G + I + E + B)`, removes values outside 0–100%, and takes the
+arithmetic mean for each year.
 
 Output:
 
@@ -591,9 +600,9 @@ complete experimental-method list, and only entries whose sole method is
 `X-RAY DIFFRACTION` are retained. X-ray hybrids with any additional method are
 excluded before coordinate evaluation.
 
-For candidates that pass the method check, every polymer-entity chain is tested
-against its first-model coordinates. A candidate remains eligible if at least one
-entity chain contains at least one matching HETATM-free region.
+For candidates that pass the method check, polymer-entity chains are tested
+against their first-model coordinates until a matching HETATM-free region is
+found. One such region in any entity chain makes the candidate eligible.
 
 - The 95% coordinate check runs a local gapped alignment independently in each
   HETATM-free X-ray region; a `HETATM` CA splits the sequence, so an alignment
@@ -615,9 +624,10 @@ homolog.
 Every hit rejected by the method or modeled-core check is written to the
 cutoff-specific `*_rejected.csv` report. Each row records the NMR chain and core,
 X-ray entry/entity and chains, cutoff, and reason. Rows are deduplicated by NMR
-entry, cutoff, and X-ray entity. Metadata or coordinate errors remain
-inconclusive and fail/retry the complete NMR entry rather than creating a normal
-rejection row.
+entry, cutoff, and X-ray entity. Missing candidate metadata, or coordinate errors
+that leave a candidate without either a confirmed match or a complete rejection,
+fail the complete NMR entry rather than creating a normal rejection row. A
+confirmed match in another chain is sufficient even if one chain failed.
 
 Within one NMR seed, the 95% and 100% passes share candidate metadata and the
 first-model X-ray CA cache described above. This avoids duplicate downloads and
@@ -714,7 +724,7 @@ d_e,min = min_h(d_eh)
 d_e,max = max_h(d_eh).
 ```
 
-The yearly minimum-RMSD plot reports:
+The yearly minimum-RMSD median plot reports:
 
 ```text
 Y_y = median_{e: year(e)=y}(d_e,min).
