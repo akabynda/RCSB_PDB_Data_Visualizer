@@ -24,7 +24,6 @@ from src import pdb_plot
 from src.pdb_plot import (
     AXIS_MAJOR_TICK_LENGTH,
     AXIS_MINOR_TICK_LENGTH,
-    AXIS_MINOR_TICK_SUBDIVISIONS,
     MAX_PLOT_YEAR,
     NMR_MONOMER_PROGRAM_CLUSTER_LABELS,
     NMR_WEIGHT_LABELS,
@@ -273,39 +272,54 @@ class PlotInfrastructureTests(unittest.TestCase):
 
     def test_configure_year_axis_formats_only_supported_integral_years(self) -> None:
         fig, ax = plt.subplots()
+        ax.set_xlim(2000, 2005)
         self.plotter._configure_year_axis_ticks(ax)
+        self.plotter._configure_minor_ticks(ax, use_year_x_ticks=True)
         formatter = ax.xaxis.get_major_formatter()
 
         self.assertEqual(formatter(2020.0, 0), "2020")
         self.assertEqual(formatter(float(MAX_PLOT_YEAR), 0), str(MAX_PLOT_YEAR))
         self.assertEqual(formatter(MAX_PLOT_YEAR + 1.0, 0), "")
         self.assertEqual(formatter(2020.25, 0), "")
+        minor_ticks = ax.xaxis.get_minorticklocs()
+        np.testing.assert_allclose(
+            minor_ticks[(minor_ticks > 2000) & (minor_ticks < 2005)],
+            [2001, 2002, 2003, 2004],
+        )
         plt.close(fig)
 
-    def test_configure_minor_ticks_matches_numeric_x_and_y_axes(self) -> None:
-        fig, ax = plt.subplots()
-        ax.set_xlim(0.0, 10.0)
-        ax.set_ylim(-1.0, 1.0)
-        # Fixed visible ticks keep Matplotlib from adding an out-of-range tick
-        # whose Unicode minus sign is not accepted by Python's ``float``.
-        ax.set_xticks([0.0, 5.0, 10.0])
-        ax.set_yticks([-1.0, -0.5, 0.5, 1.0])
+    def test_configure_minor_ticks_uses_readable_numeric_intervals(self) -> None:
+        for major_step, minor_step in (
+            (0.2, 0.05),
+            (0.5, 0.1),
+            (1.0, 0.2),
+            (2.0, 0.5),
+            (2.5, 0.5),
+            (5.0, 1.0),
+            (20.0, 5.0),
+            (200.0, 50.0),
+        ):
+            with self.subTest(major_step=major_step):
+                fig, ax = plt.subplots()
+                ax.set_xlim(0.0, 2 * major_step)
+                ax.set_ylim(0.0, 2 * major_step)
+                ax.set_xticks([0.0, major_step, 2 * major_step])
+                ax.set_yticks([0.0, major_step, 2 * major_step])
+                self.plotter._remove_zero_y_tick(ax)
 
-        self.plotter._configure_minor_ticks(ax, use_year_x_ticks=False)
+                self.plotter._configure_minor_ticks(ax, use_year_x_ticks=False)
 
-        self.assertIsInstance(ax.xaxis.get_minor_locator(), AutoMinorLocator)
-        self.assertIsInstance(ax.yaxis.get_minor_locator(), AutoMinorLocator)
-        self.assertEqual(
-            ax.xaxis.get_minor_locator().ndivs, AXIS_MINOR_TICK_SUBDIVISIONS
-        )
-        self.assertEqual(
-            ax.yaxis.get_minor_locator().ndivs, AXIS_MINOR_TICK_SUBDIVISIONS
-        )
-        self.assertEqual(ax.xaxis.majorTicks[0]._size, AXIS_MAJOR_TICK_LENGTH)
-        self.assertEqual(ax.yaxis.majorTicks[0]._size, AXIS_MAJOR_TICK_LENGTH)
-        self.assertEqual(ax.xaxis.minorTicks[0]._size, AXIS_MINOR_TICK_LENGTH)
-        self.assertEqual(ax.yaxis.minorTicks[0]._size, AXIS_MINOR_TICK_LENGTH)
-        plt.close(fig)
+                for axis in (ax.xaxis, ax.yaxis):
+                    self.assertIsInstance(axis.get_minor_locator(), AutoMinorLocator)
+                    ticks = axis.get_minorticklocs()
+                    inside = ticks[(ticks > minor_step / 2) & (ticks < major_step)]
+                    np.testing.assert_allclose(
+                        inside,
+                        np.arange(1, round(major_step / minor_step)) * minor_step,
+                    )
+                    self.assertEqual(axis.majorTicks[0]._size, AXIS_MAJOR_TICK_LENGTH)
+                    self.assertEqual(axis.minorTicks[0]._size, AXIS_MINOR_TICK_LENGTH)
+                plt.close(fig)
 
         mocked_ax = MagicMock()
         with patch.object(self.plotter, "_visible_major_step", return_value=None):

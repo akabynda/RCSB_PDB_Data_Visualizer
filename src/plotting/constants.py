@@ -69,7 +69,8 @@ YEAR_MAJOR_TICK_STEP: int = 5
 
 YEAR_MINOR_TICK_STEP: int = 1
 
-AXIS_MINOR_TICK_SUBDIVISIONS: int = YEAR_MAJOR_TICK_STEP // YEAR_MINOR_TICK_STEP
+# Choose four or five subdivisions to keep numeric minor steps easy to read.
+AXIS_MINOR_TICK_SUBDIVISIONS: str = "auto"
 
 AXIS_MAJOR_TICK_LENGTH: float = 5.0
 

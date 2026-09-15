@@ -122,7 +122,7 @@ class PlotStyleMixin:
 
     @classmethod
     def _configure_minor_ticks(cls, ax: plt.Axes, use_year_x_ticks: bool) -> None:
-        """Give numeric x and y axes matching major and minor tick marks."""
+        """Use readable decimal minor steps on numeric axes."""
         ax.yaxis.set_minor_locator(AutoMinorLocator(AXIS_MINOR_TICK_SUBDIVISIONS))
         ax.tick_params(axis="y", which="major", length=AXIS_MAJOR_TICK_LENGTH)
         ax.tick_params(
