@@ -813,7 +813,8 @@ The output is still grouped automatically, so this example writes
 
 - `--nmr-monomer-precision-secondary-structure-input PATH`: add core/secondary-structure
   RMSD histogram comparisons to the median precision plot, saved separately as
-  `_with_histogram`, `_comparison_panels`, and `_histogram` figures.
+  `_with_histogram`, `_comparison_panels`, and `_histogram` figures. Histograms use
+  the shared set of structures; the yearly curve uses the original core dataset.
 
 Run `python src/pdb_plot.py --help` to see all plot groups and path options.
 

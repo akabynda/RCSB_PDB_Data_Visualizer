@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
+from unittest.mock import Mock, patch
 
 import numpy as np
 import pandas as pd
 
+from src.plotting.config import PlotConfig
 from src.plotting.plotter import PDBScientificPlotter
 from src.plotting.precision_comparison import HISTOGRAM_EDGES
 
@@ -53,6 +56,43 @@ class PrecisionComparisonTests(unittest.TestCase):
             self.core.assign(residue_selection="core"), self.secondary
         )
         self.assertEqual(len(core), 3)
+
+    def test_public_comparison_pairs_histograms_but_keeps_full_core_trend(self) -> None:
+        plotter = PDBScientificPlotter(PlotConfig())
+
+        def draw_without_saving(**kwargs: object) -> None:
+            kwargs["draw_fn"](Mock())
+
+        with (
+            patch.object(plotter, "_read_csv", side_effect=[self.core, self.secondary]),
+            patch.object(plotter, "_scientific_style"),
+            patch.object(plotter, "_render_figure", side_effect=draw_without_saving),
+            patch.object(plotter, "_draw_precision_histogram") as draw_histogram,
+            patch.object(plotter, "_draw_core_precision_trend") as draw_trend,
+            patch.object(plotter, "_render_precision_comparison_panels") as panels,
+        ):
+            plotter.plot_solution_nmr_monomer_precision_comparison(
+                Path("core.csv"), Path("secondary.csv"),
+                Path("figure4.png"), Path("figure4.svg"),
+            )
+
+        self.assertEqual(draw_histogram.call_count, 2)
+        panels.assert_called_once()
+        histogram_pairs = [
+            call.args[1:3] for call in draw_histogram.call_args_list
+        ]
+        histogram_pairs.append(panels.call_args.args[:2])
+        for core, secondary in histogram_pairs:
+            self.assertEqual(core["entry_id"].tolist(), secondary["entry_id"].tolist())
+            self.assertEqual(set(core["entry_id"]), {"a", "c"})
+            self.assertEqual(len(core), 2)
+            self.assertEqual(len(secondary), 2)
+
+        draw_trend.assert_called_once()
+        for yearly in (draw_trend.call_args.args[1], panels.call_args.args[2]):
+            self.assertAlmostEqual(yearly.loc[2000], 0.7)
+            self.assertAlmostEqual(yearly.loc[2024], 0.6)
+            self.assertEqual(yearly.index.tolist(), [2000, 2024])
 
     def test_rejects_mislabelled_or_missing_secondary_selection(self) -> None:
         cases = (

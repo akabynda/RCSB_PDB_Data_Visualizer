@@ -224,11 +224,16 @@ class PrecisionComparisonPlotsMixin:
         output_png: Path,
         output_svg: Path,
     ) -> None:
-        """Save standalone histograms and two optional Figure 4 layouts."""
+        """Compare matched entries while retaining the full-cohort core trend."""
         core, secondary = self._prepare_precision_comparison_tables(
             self._read_csv(core_data_path), self._read_csv(secondary_data_path)
         )
         yearly = core.groupby("year")["mean_rmsd_angstrom"].median().sort_index()
+        core = (
+            core.set_index("entry_id", drop=False)
+            .loc[secondary["entry_id"]]
+            .reset_index(drop=True)
+        )
         self._scientific_style()
 
         def paths(suffix: str) -> tuple[Path, Path]:
