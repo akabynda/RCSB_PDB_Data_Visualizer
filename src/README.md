@@ -811,6 +811,10 @@ python src/pdb_plot.py \
 The output is still grouped automatically, so this example writes
 `figures/pdb_method_trends/pdb_method_trends.png` and its three PNG variants.
 
+- `--nmr-monomer-precision-secondary-structure-input PATH`: add core/secondary-structure
+  RMSD histogram comparisons to the median precision plot, saved separately as
+  `_with_histogram`, `_comparison_panels`, and `_histogram` figures.
+
 Run `python src/pdb_plot.py --help` to see all plot groups and path options.
 
 ## License

@@ -150,7 +150,23 @@ def parse_args() -> argparse.Namespace:
                 )
             }
         )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.nmr_monomer_precision_secondary_structure_input is not None:
+        if args.rmsd_residue_selection != "core":
+            parser.error(
+                "--nmr-monomer-precision-secondary-structure-input requires "
+                "--rmsd-residue-selection core."
+            )
+        if (
+            PlotKind.SOLUTION_NMR_MONOMER_PRECISION_STRIDE_MODELED_FIRST_MODEL_MEDIAN
+            not in args.plots
+        ):
+            parser.error(
+                "--nmr-monomer-precision-secondary-structure-input requires "
+                "the solution_nmr_monomer_precision_stride_modeled_first_model_median "
+                "plot."
+            )
+    return args
 
 
 def main() -> None:
@@ -267,11 +283,19 @@ def main() -> None:
         PlotKind.SOLUTION_NMR_MONOMER_PRECISION_STRIDE_MODELED_FIRST_MODEL_MEDIAN
         in args.plots
     ):
-        plotter.plot_solution_nmr_monomer_precision_stride_modeled_first_model_median(
-            data_path=args.nmr_monomer_precision_stride_modeled_first_model_input,
-            output_png=args.nmr_monomer_precision_stride_median_output_png,
-            output_svg=args.nmr_monomer_precision_stride_median_output_svg,
-        )
+        if args.nmr_monomer_precision_secondary_structure_input is not None:
+            plotter.plot_solution_nmr_monomer_precision_comparison(
+                core_data_path=args.nmr_monomer_precision_stride_modeled_first_model_input,
+                secondary_data_path=args.nmr_monomer_precision_secondary_structure_input,
+                output_png=args.nmr_monomer_precision_stride_median_output_png,
+                output_svg=args.nmr_monomer_precision_stride_median_output_svg,
+            )
+        else:
+            plotter.plot_solution_nmr_monomer_precision_stride_modeled_first_model_median(
+                data_path=args.nmr_monomer_precision_stride_modeled_first_model_input,
+                output_png=args.nmr_monomer_precision_stride_median_output_png,
+                output_svg=args.nmr_monomer_precision_stride_median_output_svg,
+            )
 
     if PlotKind.SOLUTION_NMR_MONOMER_QUALITY in args.plots:
         plotter.plot_solution_nmr_monomer_quality(

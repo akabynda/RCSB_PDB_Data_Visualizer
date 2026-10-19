@@ -65,6 +65,16 @@ def add_input_arguments(parser: argparse.ArgumentParser) -> None:
         ),
     )
     parser.add_argument(
+        "--nmr-monomer-precision-secondary-structure-input",
+        type=Path,
+        default=None,
+        help=(
+            "Optional secondary-structure precision CSV for Figure 4 histogram "
+            "comparisons. Requires the median precision plot and "
+            "--rmsd-residue-selection core; saves separate figure variants."
+        ),
+    )
+    parser.add_argument(
         "--nmr-monomer-quality-input",
         type=Path,
         default=Path("data/solution_nmr_monomer_quality_metrics.csv"),

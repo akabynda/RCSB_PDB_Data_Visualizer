@@ -102,8 +102,9 @@ class FigureRenderer(PlotStyleMixin, TablePreparationMixin):
         savefig_bbox_inches: str | None = None,
         savefig_pad_inches: float = 0.1,
         height_scale: float = 1.0,
+        force_boxed_axes: bool = False,
     ) -> None:
-        """Draw and save titled, titleless, boxed, and open-axes variants."""
+        """Save title and axes variants, optionally keeping every frame closed."""
 
         def render_variant(
             variant_output_png: Path,
@@ -127,7 +128,7 @@ class FigureRenderer(PlotStyleMixin, TablePreparationMixin):
             ax.set_xlabel(x_label if x_label is not None else self.config.x_label)
             ax.set_ylabel(y_label)
             self._configure_boxed_axes(ax)
-            if open_axes:
+            if open_axes and not force_boxed_axes:
                 self._configure_open_axes(ax)
             ax.margins(x=0)
             self._apply_tight_layout(fig=fig, tight_layout_rect=tight_layout_rect)

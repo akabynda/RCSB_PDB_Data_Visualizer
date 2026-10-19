@@ -183,13 +183,18 @@ def test_resolve_stride_executable_obeys_explicit_path_and_fallbacks(
     with patch.object(
         builder_stride_install.shutil, "which", return_value="/bin/stride"
     ):
-        assert builder.resolve_stride_executable("  ") == "/bin/stride"
+        assert (
+            builder.resolve_stride_executable("  ", install_dir=tmp_path / "managed")
+            == "/bin/stride"
+        )
 
     with (
         patch.object(builder_stride_install.shutil, "which", return_value=None),
         patch.object(builder_stride_install, "LOCAL_STRIDE_CANDIDATE", local),
     ):
-        assert builder.resolve_stride_executable("") == str(local.resolve())
+        assert builder.resolve_stride_executable(
+            "", install_dir=tmp_path / "managed"
+        ) == str(local.resolve())
 
     with (
         patch.object(builder_stride_install.shutil, "which", return_value=None),
@@ -197,7 +202,10 @@ def test_resolve_stride_executable_obeys_explicit_path_and_fallbacks(
             builder_stride_install, "LOCAL_STRIDE_CANDIDATE", tmp_path / "absent"
         ),
     ):
-        assert builder.resolve_stride_executable("") is None
+        assert (
+            builder.resolve_stride_executable("", install_dir=tmp_path / "managed")
+            is None
+        )
         assert builder.resolve_stride_executable(str(tmp_path / "missing")) is None
 
 
