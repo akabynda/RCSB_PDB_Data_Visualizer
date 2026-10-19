@@ -7,3 +7,4 @@ helpers
 htmlcov/
 history
 *.docx
+/experiments

@@ -13,6 +13,7 @@ from src.dataset.config import (
     LOGGER,
 )
 from src.dataset.coordinates import (
+    parse_first_model_ca_residues,
     parse_first_model_modeled_ca_auth_seq_ids,
     parse_models_ca_coords_with_stats,
 )
@@ -32,6 +33,7 @@ from src.dataset.reporting import (
 )
 from src.dataset.stride import (
     compute_stride_core_range_for_modeled_auth_seq_ids_in_first_model,
+    compute_stride_secondary_residue_ids_in_first_model,
 )
 from src.dataset.structures import (
     load_cached_chain_id_map,
@@ -69,6 +71,7 @@ class SolutionNMRMonomerPrecisionBuilder:
         self.config = config
         self.cache_dir = cache_dir
         self.precision_workers = max(1, precision_workers)
+        self.residue_selection = "core"
         self.cache_dir.mkdir(parents=True, exist_ok=True)
 
     def _download_pdb_if_needed(self, entry_id: str) -> Path:
@@ -86,6 +89,7 @@ class SolutionNMRMonomerPrecisionBuilder:
         chain_id: str,
         start_seq_id: ResidueId | int,
         end_seq_id: ResidueId | int,
+        allowed_residue_ids: set[ResidueId] | None = None,
     ) -> tuple[tuple[int, int, int, float] | None, str | None]:
         """Compute ensemble CA RMSD to per-residue mean coordinates."""
         model_maps, raw_ca_counts_per_model = parse_models_ca_coords_with_stats(
@@ -103,6 +107,8 @@ class SolutionNMRMonomerPrecisionBuilder:
         common_resids = set(model_maps[0].keys())
         for model_map in model_maps[1:]:
             common_resids &= set(model_map.keys())
+        if allowed_residue_ids is not None:
+            common_resids &= allowed_residue_ids
         if len(common_resids) < 3:
             return (
                 None,
@@ -146,6 +152,7 @@ class SolutionNMRMonomerPrecisionBuilder:
         core_start_seq_id: ResidueId | int,
         core_end_seq_id: ResidueId | int,
         parsed_chain_id: str | None = None,
+        allowed_residue_ids: set[ResidueId] | None = None,
     ) -> SolutionNMRMonomerPrecisionRecord | None:
         """Build a precision record from a modeled residue core range."""
         result, skip_reason = self._compute_mean_rmsd_to_average(
@@ -153,6 +160,11 @@ class SolutionNMRMonomerPrecisionBuilder:
             chain_id=parsed_chain_id or chain_id,
             start_seq_id=core_start_seq_id,
             end_seq_id=core_end_seq_id,
+            **(
+                {"allowed_residue_ids": allowed_residue_ids}
+                if allowed_residue_ids is not None
+                else {}
+            ),
         )
         if result is None:
             LOGGER.info(
@@ -178,6 +190,7 @@ class SolutionNMRMonomerPrecisionBuilder:
             n_ca_core_used=n_ca_core_used,
             n_ca_core_raw=n_ca_core_raw,
             mean_rmsd_angstrom=mean_rmsd,
+            residue_selection=self.residue_selection,
         )
 
 
@@ -194,6 +207,7 @@ class SolutionNMRMonomerPrecisionStrideModeledFirstModelBuilder(
         precision_workers: int,
         stride_executable: str,
         stride_cache_dir: Path,
+        residue_selection: str = "core",
     ) -> None:
         """Initialize STRIDE-core modeled-first-model precision collection."""
         super().__init__(
@@ -203,8 +217,73 @@ class SolutionNMRMonomerPrecisionStrideModeledFirstModelBuilder(
             precision_workers=precision_workers,
         )
         self.stride_executable = stride_executable
+        if residue_selection not in {"core", "secondary-structure"}:
+            raise ValueError("residue_selection must be core or secondary-structure")
+        self.residue_selection = residue_selection
         self.stride_cache_dir = stride_cache_dir
         self.stride_cache_dir.mkdir(parents=True, exist_ok=True)
+
+    def _selected_residue_ids(
+        self,
+        pdb_path: Path,
+        entry_id: str,
+        chain_id: str,
+        start_seq_id: ResidueId | int,
+        end_seq_id: ResidueId | int,
+    ) -> set[ResidueId] | None:
+        """Keep the established core and select its structured residues only."""
+        if self.residue_selection == "core":
+            return None
+        residues = parse_first_model_ca_residues(
+            pdb_path,
+            chain_id,
+            start_seq_id=start_seq_id,
+            end_seq_id=end_seq_id,
+        )
+        return compute_stride_secondary_residue_ids_in_first_model(
+            pdb_path=pdb_path,
+            entry_id=entry_id,
+            chain_id=chain_id,
+            modeled_auth_seq_ids=[residue.key for residue in residues],
+            stride_executable=self.stride_executable,
+            stride_cache_dir=self.stride_cache_dir,
+        )
+
+    def _recompute_record(
+        self,
+        record: SolutionNMRMonomerPrecisionRecord,
+    ) -> SolutionNMRMonomerPrecisionRecord | None:
+        """Recompute saved core metadata without searching for NMR seeds."""
+        try:
+            pdb_path = self._download_pdb_if_needed(record.entry_id)
+            chain_map = load_cached_chain_id_map(self.cache_dir, record.entry_id)
+            chain_id = chain_map.get(record.chain_id, record.chain_id)
+            return self._build_record_from_core_range(
+                pdb_path=pdb_path,
+                entry_id=record.entry_id,
+                year=record.year,
+                chain_id=record.chain_id,
+                parsed_chain_id=chain_id,
+                core_start_seq_id=record.core_start_seq_id,
+                core_end_seq_id=record.core_end_seq_id,
+                allowed_residue_ids=self._selected_residue_ids(
+                    pdb_path,
+                    record.entry_id,
+                    chain_id,
+                    record.core_start_seq_id,
+                    record.core_end_seq_id,
+                ),
+            )
+        except Exception as exc:
+            LOGGER.warning(
+                "Precision calculation failed for %s: %s", record.entry_id, exc
+            )
+            _record_filtered_structure(
+                record.entry_id,
+                f"precision calculation failed: {exc}",
+                year=record.year,
+            )
+            return None
 
     def _compute_record_from_seed(
         self,
@@ -254,6 +333,13 @@ class SolutionNMRMonomerPrecisionStrideModeledFirstModelBuilder(
                 )
                 return None
             core_start, core_end = core_range
+            selected_ids = self._selected_residue_ids(
+                pdb_path,
+                seed.entry_id,
+                parsed_chain_id,
+                core_start,
+                core_end,
+            )
             return self._build_record_from_core_range(
                 pdb_path=pdb_path,
                 entry_id=seed.entry_id,
@@ -262,6 +348,11 @@ class SolutionNMRMonomerPrecisionStrideModeledFirstModelBuilder(
                 core_start_seq_id=core_start,
                 core_end_seq_id=core_end,
                 parsed_chain_id=parsed_chain_id,
+                **(
+                    {"allowed_residue_ids": selected_ids}
+                    if selected_ids is not None
+                    else {}
+                ),
             )
         except Exception as exc:
             LOGGER.warning(
@@ -280,25 +371,30 @@ class SolutionNMRMonomerPrecisionStrideModeledFirstModelBuilder(
         self,
         skip_entry_ids: set[str] | None = None,
         on_record: Callable[[SolutionNMRMonomerPrecisionRecord], None] | None = None,
+        source_records: list[SolutionNMRMonomerPrecisionRecord] | None = None,
     ) -> list[SolutionNMRMonomerPrecisionRecord]:
         """Collect STRIDE-core precision records for all eligible seeds."""
         skip_entry_ids = skip_entry_ids or set()
-        entry_ids = fetch_solution_nmr_entry_ids(
-            client=self.client,
-            log_label="SOLUTION NMR precision STRIDE modeled-first-model",
-        )
-
-        batches = list(chunked(entry_ids, self.config.graphql_batch_size))
-        seed_records: list[SolutionNMRMonomerModeledFirstModelSeedRecord] = []
-        for batch_seeds in collect_batch_results(
-            batches=batches,
-            max_workers=self.config.max_workers,
-            fetch_fn=(
-                self.client.fetch_solution_nmr_monomer_modeled_first_model_seed_records_for_ids
-            ),
-            progress_label="SOLUTION NMR precision STRIDE modeled-first-model seeds",
-        ):
-            seed_records.extend(batch_seeds)
+        if source_records is None:
+            entry_ids = fetch_solution_nmr_entry_ids(
+                client=self.client,
+                log_label="SOLUTION NMR precision STRIDE modeled-first-model",
+            )
+            batches = list(chunked(entry_ids, self.config.graphql_batch_size))
+            seed_records = []
+            for batch_seeds in collect_batch_results(
+                batches=batches,
+                max_workers=self.config.max_workers,
+                fetch_fn=(
+                    self.client.fetch_solution_nmr_monomer_modeled_first_model_seed_records_for_ids
+                ),
+                progress_label="SOLUTION NMR precision STRIDE modeled-first-model seeds",
+            ):
+                seed_records.extend(batch_seeds)
+            compute_record = self._compute_record_from_seed
+        else:
+            seed_records = source_records
+            compute_record = self._recompute_record
 
         filtered_seeds = [
             record for record in seed_records if record.entry_id not in skip_entry_ids
@@ -312,7 +408,7 @@ class SolutionNMRMonomerPrecisionStrideModeledFirstModelBuilder(
         precision_records: list[SolutionNMRMonomerPrecisionRecord] = []
         with ThreadPoolExecutor(max_workers=self.precision_workers) as executor:
             future_map = {
-                executor.submit(self._compute_record_from_seed, seed): idx
+                executor.submit(compute_record, seed): idx
                 for idx, seed in enumerate(filtered_seeds, start=1)
             }
             total = len(future_map)

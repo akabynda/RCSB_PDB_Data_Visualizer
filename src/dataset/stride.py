@@ -429,3 +429,39 @@ def compute_stride_core_range_for_modeled_auth_seq_ids_in_first_model(
         chain_states=chain_states,
         modeled_auth_seq_ids=modeled_auth_seq_ids,
     )
+
+
+def compute_stride_secondary_residue_ids_in_first_model(
+    pdb_path: Path,
+    entry_id: str,
+    chain_id: str,
+    modeled_auth_seq_ids: Iterable[ResidueId],
+    stride_executable: str,
+    stride_cache_dir: Path,
+) -> set[ResidueId]:
+    """Select modeled H/G/I/E/B residues, preserving full author residue IDs.
+
+    Callers supply residues within the existing core. Missing assignments are
+    an error rather than an implicit coil assignment or a full-core fallback.
+    """
+    modeled_ids = set(modeled_auth_seq_ids)
+    states, _ = load_first_model_stride_state_by_chain(
+        pdb_path=pdb_path,
+        entry_id=entry_id,
+        stride_executable=stride_executable,
+        stride_cache_dir=stride_cache_dir,
+    )
+    chain_states = _select_stride_chain_states(states, chain_id) if states else None
+    if not chain_states:
+        raise ValueError(
+            f"STRIDE assignments missing for {entry_id} chain {chain_id!r}"
+        )
+    missing = modeled_ids.difference(chain_states)
+    if missing:
+        raise ValueError(
+            f"Incomplete STRIDE assignment for {entry_id}: "
+            f"{len(missing)} modeled core residues missing"
+        )
+    return {
+        resid for resid in modeled_ids if chain_states[resid] in STRIDE_CORE_STATE_CODES
+    }

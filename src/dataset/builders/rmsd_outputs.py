@@ -17,6 +17,7 @@ from src.dataset.builders.xray_rmsd import (
     _select_ordinary_xray_rmsd_record,
 )
 from src.dataset.config import (
+    DEFAULT_STRIDE_CACHE_DIR,
     LOGGER,
 )
 from src.dataset.io.homologs import (
@@ -50,6 +51,25 @@ if TYPE_CHECKING:
     )
 
 
+def _validate_rmsd_residue_selection(residue_selection: str) -> None:
+    """Reject unsupported selection modes before opening any output files."""
+    if residue_selection not in {"core", "secondary-structure"}:
+        raise ValueError("residue_selection must be core or secondary-structure")
+
+
+def _check_resume_residue_selection(
+    records: list[Any], output_path: Path, residue_selection: str
+) -> None:
+    """Never resume a new selection with RMSDs calculated on different atoms."""
+    mismatches = {record.residue_selection for record in records} - {residue_selection}
+    if mismatches:
+        raise SystemExit(
+            f"Cannot resume {output_path}: residue_selection is "
+            f"{', '.join(sorted(mismatches))}, requested {residue_selection}. "
+            "Use a separate output path for this atom selection."
+        )
+
+
 def build_solution_nmr_monomer_xray_rmsd_to_csv(
     client: RCSBClient,
     config: DatasetBuildConfig,
@@ -60,8 +80,12 @@ def build_solution_nmr_monomer_xray_rmsd_to_csv(
     sequence_identity_percent: int,
     resume: bool,
     log_label: str,
+    residue_selection: str = "core",
+    stride_executable: str = "",
+    stride_cache_dir: Path = DEFAULT_STRIDE_CACHE_DIR,
 ) -> None:
     """Collect best-match NMR-to-X-ray RMSD records and stream them to CSV."""
+    _validate_rmsd_residue_selection(residue_selection)
     _import_filtered_structures(homolog_input_path)
     existing_records: list[SolutionNMRMonomerXrayRmsdRecord] = []
     valid_existing_records: list[SolutionNMRMonomerXrayRmsdRecord] = []
@@ -81,6 +105,9 @@ def build_solution_nmr_monomer_xray_rmsd_to_csv(
     )
     if resume and output_path.exists():
         existing_records = read_solution_nmr_monomer_xray_rmsd_csv(output_path)
+        _check_resume_residue_selection(
+            existing_records, output_path, residue_selection
+        )
         existing_records = [
             record
             for record in existing_records
@@ -112,6 +139,9 @@ def build_solution_nmr_monomer_xray_rmsd_to_csv(
         rmsd_workers=rmsd_workers,
         homolog_records=homolog_records,
         sequence_identity_percent=sequence_identity_percent,
+        residue_selection=residue_selection,
+        stride_executable=stride_executable,
+        stride_cache_dir=stride_cache_dir,
     )
     valid_existing_records = sorted(
         valid_existing_records, key=lambda r: (r.year, r.entry_id)
@@ -153,8 +183,12 @@ def build_solution_nmr_monomer_xray_rmsd_extremes_to_csv(
     sequence_identity_percent: int,
     resume: bool,
     log_label: str,
+    residue_selection: str = "core",
+    stride_executable: str = "",
+    stride_cache_dir: Path = DEFAULT_STRIDE_CACHE_DIR,
 ) -> None:
     """Collect NMR-to-X-ray RMSD extremes and stream them to CSV."""
+    _validate_rmsd_residue_selection(residue_selection)
     _import_filtered_structures(homolog_input_path)
     existing_records: list[SolutionNMRMonomerXrayRmsdExtremesRecord] = []
     valid_existing_records: list[SolutionNMRMonomerXrayRmsdExtremesRecord] = []
@@ -174,6 +208,9 @@ def build_solution_nmr_monomer_xray_rmsd_extremes_to_csv(
     )
     if resume and output_path.exists():
         existing_records = read_solution_nmr_monomer_xray_rmsd_extremes_csv(output_path)
+        _check_resume_residue_selection(
+            existing_records, output_path, residue_selection
+        )
         existing_records = [
             record
             for record in existing_records
@@ -202,6 +239,9 @@ def build_solution_nmr_monomer_xray_rmsd_extremes_to_csv(
         rmsd_workers=rmsd_workers,
         homolog_records=homolog_records,
         sequence_identity_percent=sequence_identity_percent,
+        residue_selection=residue_selection,
+        stride_executable=stride_executable,
+        stride_cache_dir=stride_cache_dir,
     )
     valid_existing_records = sorted(
         valid_existing_records, key=lambda r: (r.year, r.entry_id)
@@ -249,8 +289,12 @@ def build_solution_nmr_monomer_xray_rmsd_outputs_to_csv(
     rmsd_workers: int,
     sequence_identity_percent: int,
     resume: bool = False,
+    residue_selection: str = "core",
+    stride_executable: str = "",
+    stride_cache_dir: Path = DEFAULT_STRIDE_CACHE_DIR,
 ) -> None:
     """Build selected ordinary/extremes/current/historical CSVs in one pass."""
+    _validate_rmsd_residue_selection(residue_selection)
     output_specs: dict[str, tuple[Path, str, bool]] = {}
     if ordinary_output_path is not None:
         output_specs["ordinary_current"] = (
@@ -361,6 +405,7 @@ def build_solution_nmr_monomer_xray_rmsd_outputs_to_csv(
             loaded: list[Any]
             if is_extremes:
                 loaded = read_solution_nmr_monomer_xray_rmsd_extremes_csv(output_path)
+                _check_resume_residue_selection(loaded, output_path, residue_selection)
                 existing = [
                     record
                     for record in loaded
@@ -370,6 +415,7 @@ def build_solution_nmr_monomer_xray_rmsd_outputs_to_csv(
                 ]
             else:
                 loaded = read_solution_nmr_monomer_xray_rmsd_csv(output_path)
+                _check_resume_residue_selection(loaded, output_path, residue_selection)
                 existing = [
                     record
                     for record in loaded
@@ -511,6 +557,9 @@ def build_solution_nmr_monomer_xray_rmsd_outputs_to_csv(
                 rmsd_workers=rmsd_workers,
                 homolog_records=merged_homolog_records,
                 sequence_identity_percent=sequence_identity_percent,
+                residue_selection=residue_selection,
+                stride_executable=stride_executable,
+                stride_cache_dir=stride_cache_dir,
             )
             rmsd_builder.build_candidate_sets(on_candidate_set=_on_candidate_set)
 

@@ -270,8 +270,16 @@ one of these states in the first model:
 - `B`: isolated beta bridge
 
 The STRIDE summary can retain an entry with no core states, but precision and
-homology datasets cannot. Core calculations include all modeled CA positions
-between the endpoints.
+homology datasets cannot. By default, core calculations include all modeled CA
+positions between the endpoints. With `--rmsd-residue-selection
+secondary-structure`, precision and X-ray RMSD use only the `H/G/I/E/B` positions
+within that same span; turns (`T`) and coils (`C`) are excluded. The selection
+comes from the first NMR model, and its matching X-ray positions are used
+without requiring a separate X-ray STRIDE assignment. Both rigid-body fitting
+and RMSD use the selected atoms. Precision additionally intersects these
+positions across all ensemble models. At least three selected CA atoms must
+remain. X-ray sequence matching and homolog eligibility still use the full core,
+and all saved candidates are evaluated before choosing the new minimum.
 The span follows coordinate-record order, including insertion codes, rather
 than numeric or lexical sorting. The first model defines its full set of IDs;
 a missing endpoint in another model cannot change that span.
@@ -349,6 +357,15 @@ Long-running calculations:
 - `--xray-rmsd-workers`: worker count for X-ray RMSD calculations.
 - `--xray-rmsd-sequence-identity {95,100}`: choose which homolog CSV is used by
   the X-ray RMSD datasets (default: `100`).
+- `--rmsd-residue-selection {core,secondary-structure}`: select the atoms used
+  for precision and X-ray RMSD (default: `core`). The secondary-structure mode
+  changes default precision/RMSD CSV paths to `*_secondary_structure.csv`;
+  explicitly supplied paths take precedence. The plot CLI accepts the same
+  switch and selects matching default inputs and figure paths.
+- `--precision-input PATH`: reuse an existing precision CSV's entries, chains
+  and core ranges to avoid NMR seed discovery and metadata requests. RMSD is
+  recomputed from cached coordinates for the selected atoms; only entries in
+  that input are considered. Input and output paths must differ.
 
 The homolog completion checkpoint is written beside the 95% output as
 `<95%-output-stem>.resume.tsv`. With `--resume`, valid paired 95%/100% rows are
@@ -362,6 +379,10 @@ each selected RMSD output reuse valid existing rows independently, so a
 completed ordinary CSV does not suppress missing extremes or historical rows.
 Resume should be used only with the same inputs and calculation settings as the
 interrupted run.
+Precision and X-ray RMSD CSVs include `residue_selection`; older CSVs without
+this column are read as `core`. Resume rejects a different selection before
+rewriting the dataset, and Figure 7 rejects inputs that disagree with the
+requested selection.
 
 ## Recommended Run Order
 

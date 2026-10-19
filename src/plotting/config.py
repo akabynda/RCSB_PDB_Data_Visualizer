@@ -61,6 +61,7 @@ class PlotConfig:
     )
     titleless_suffix: str = "_no_title"
     open_axes_suffix: str = "_open_axes"
+    rmsd_residue_selection: str = "core"
     dpi: int = 600
     x_label: str = "Deposition year"
     annual_title: str = (

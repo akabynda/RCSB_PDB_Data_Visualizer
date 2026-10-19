@@ -193,6 +193,7 @@ def read_solution_nmr_monomer_precision_csv(
                     n_ca_core_used=int(str(n_ca_core_used_raw)),
                     n_ca_core_raw=int(str(n_ca_core_raw_raw)),
                     mean_rmsd_angstrom=float(row["mean_rmsd_angstrom"]),
+                    residue_selection=row.get("residue_selection") or "core",
                 )
             )
     return records
@@ -208,6 +209,7 @@ SOLUTION_NMR_MONOMER_PRECISION_HEADER: tuple[str, ...] = (
     "n_ca_core_used",
     "n_ca_core_raw",
     "mean_rmsd_angstrom",
+    "residue_selection",
 )
 
 
@@ -225,6 +227,7 @@ def _solution_nmr_monomer_precision_csv_row(
         record.n_ca_core_used,
         record.n_ca_core_raw,
         f"{record.mean_rmsd_angstrom:.6f}",
+        record.residue_selection,
     )
 
 

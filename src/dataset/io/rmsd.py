@@ -68,6 +68,7 @@ def read_solution_nmr_monomer_xray_rmsd_csv(
                     xray_resolution_angstrom=float(row["xray_resolution_angstrom"]),
                     n_common_ca=int(row["n_common_ca"]),
                     rmsd_ca_angstrom=float(row["rmsd_ca_angstrom"]),
+                    residue_selection=str(row.get("residue_selection") or "core"),
                 )
             )
     return records
@@ -90,6 +91,7 @@ SOLUTION_NMR_MONOMER_XRAY_RMSD_HEADER: tuple[str, ...] = (
     "xray_resolution_angstrom",
     "n_common_ca",
     "rmsd_ca_angstrom",
+    "residue_selection",
 )
 
 
@@ -122,6 +124,7 @@ def _solution_nmr_monomer_xray_rmsd_csv_row(
         f"{record.xray_resolution_angstrom:.4f}",
         record.n_common_ca,
         f"{record.rmsd_ca_angstrom:.4f}",
+        record.residue_selection,
     )
 
 
@@ -163,6 +166,7 @@ SOLUTION_NMR_MONOMER_XRAY_RMSD_EXTREMES_HEADER: tuple[str, ...] = (
     "worst_n_common_ca",
     "worst_rmsd_ca_angstrom",
     "rmsd_delta_angstrom",
+    "residue_selection",
 )
 
 
@@ -217,6 +221,7 @@ def _solution_nmr_monomer_xray_rmsd_extremes_csv_row(
         record.worst_n_common_ca,
         f"{record.worst_rmsd_ca_angstrom:.4f}",
         f"{record.rmsd_delta_angstrom:.4f}",
+        record.residue_selection,
     )
 
 
@@ -300,6 +305,7 @@ def read_solution_nmr_monomer_xray_rmsd_extremes_csv(
                     worst_n_common_ca=int(row["worst_n_common_ca"]),
                     worst_rmsd_ca_angstrom=float(row["worst_rmsd_ca_angstrom"]),
                     rmsd_delta_angstrom=float(row["rmsd_delta_angstrom"]),
+                    residue_selection=str(row.get("residue_selection") or "core"),
                 )
             )
     return records

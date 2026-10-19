@@ -77,6 +77,25 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--rmsd-residue-selection",
+        choices=("core", "secondary-structure"),
+        default="core",
+        help=(
+            "Use all core CA atoms (default) or only first-NMR-model STRIDE "
+            "H/G/I/E/B residues for precision and X-ray RMSD. Secondary-structure "
+            "outputs default to separate *_secondary_structure.csv files."
+        ),
+    )
+    parser.add_argument(
+        "--precision-input",
+        type=Path,
+        help=(
+            "Reuse entry IDs, chains and core ranges from an existing precision "
+            "CSV instead of repeating the NMR search and metadata collection. "
+            "RMSDs are recomputed for the selected residues."
+        ),
+    )
+    parser.add_argument(
         "--counts-output",
         type=Path,
         default=Path("data/pdb_method_counts_by_year.csv"),
@@ -361,4 +380,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--log-level", default="INFO", help="Logging level (DEBUG/INFO/WARNING/ERROR)."
     )
+    selection_parser = argparse.ArgumentParser(add_help=False)
+    selection_parser.add_argument("--rmsd-residue-selection", default="core")
+    selection, _ = selection_parser.parse_known_args()
+    if selection.rmsd_residue_selection == "secondary-structure":
+        for destination in (
+            "solution_nmr_monomer_precision_stride_modeled_first_model_output",
+            "solution_nmr_monomer_xray_rmsd_output",
+            "solution_nmr_monomer_xray_rmsd_historical_output",
+            "solution_nmr_monomer_xray_rmsd_extremes_output",
+            "solution_nmr_monomer_xray_rmsd_extremes_historical_output",
+        ):
+            default_path = parser.get_default(destination)
+            parser.set_defaults(
+                **{
+                    destination: default_path.with_stem(
+                        default_path.stem + "_secondary_structure"
+                    )
+                }
+            )
     return parser.parse_args()

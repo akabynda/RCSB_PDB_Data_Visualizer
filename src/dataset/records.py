@@ -235,6 +235,7 @@ class SolutionNMRMonomerPrecisionRecord:
     n_ca_core_used: int
     n_ca_core_raw: int
     mean_rmsd_angstrom: float
+    residue_selection: str = "core"
 
 
 @dataclass(frozen=True)
@@ -320,6 +321,7 @@ class SolutionNMRMonomerXrayRmsdRecord:
     xray_resolution_angstrom: float
     n_common_ca: int
     rmsd_ca_angstrom: float
+    residue_selection: str = "core"
 
 
 @dataclass(frozen=True)
@@ -352,6 +354,7 @@ class SolutionNMRMonomerXrayRmsdExtremesRecord:
     worst_n_common_ca: int
     worst_rmsd_ca_angstrom: float
     rmsd_delta_angstrom: float
+    residue_selection: str = "core"
 
 
 @dataclass(frozen=True)

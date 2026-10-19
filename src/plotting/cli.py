@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 
 import numpy as np
 
@@ -71,8 +72,21 @@ def parse_positive_float(raw_value: str) -> float:
 
 def parse_args() -> argparse.Namespace:
     """Parse plot selections, dataset paths, and figure output options."""
+    selection_parser = argparse.ArgumentParser(add_help=False)
+    selection_parser.add_argument(
+        "--rmsd-residue-selection",
+        choices=("core", "secondary-structure"),
+        default="core",
+        help=(
+            "Residues used in the input precision and X-ray RMSD datasets. "
+            "secondary-structure selects default CSV and figure filenames with "
+            "the _secondary_structure suffix (STRIDE H/G/I/E/B CA atoms). "
+            "Explicit input and output paths override these defaults."
+        ),
+    )
     parser = argparse.ArgumentParser(
-        description="Plot publication-ready figures from PDB CSV datasets."
+        description="Plot publication-ready figures from PDB CSV datasets.",
+        parents=[selection_parser],
     )
     parser.add_argument(
         "--plots",
@@ -120,6 +134,22 @@ def parse_args() -> argparse.Namespace:
         ),
     )
 
+    selection_args, _ = selection_parser.parse_known_args()
+    if selection_args.rmsd_residue_selection == "secondary-structure":
+        # Set defaults before parsing explicit paths, including paths that equal
+        # the ordinary core defaults. Homolog and other plot paths stay shared.
+        defaults = vars(parser.parse_args([]))
+        parser.set_defaults(
+            **{
+                name: path.with_name(f"{path.stem}_secondary_structure{path.suffix}")
+                for name, path in defaults.items()
+                if isinstance(path, Path)
+                and (
+                    name.startswith("nmr_monomer_precision_")
+                    or (name.startswith("nmr_monomer_xray_") and "rmsd" in name)
+                )
+            }
+        )
     return parser.parse_args()
 
 
@@ -127,7 +157,10 @@ def main() -> None:
     """Generate every plot selected through command-line arguments."""
     args = parse_args()
     plotter = PDBScientificPlotter(
-        config=PlotConfig(aspect_ratio=args.aspect_ratio),
+        config=PlotConfig(
+            aspect_ratio=args.aspect_ratio,
+            rmsd_residue_selection=args.rmsd_residue_selection,
+        ),
         generate_svg=args.svg,
     )
 

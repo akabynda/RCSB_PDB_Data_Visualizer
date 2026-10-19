@@ -14,6 +14,7 @@ from src.dataset.ca_cache import (
     load_cached_first_model_ca_data,
 )
 from src.dataset.config import (
+    DEFAULT_STRIDE_CACHE_DIR,
     LOGGER,
 )
 from src.dataset.coordinates import (
@@ -42,6 +43,7 @@ from src.dataset.reporting import (
 from src.dataset.structures import (
     load_cached_chain_id_map,
 )
+from src.dataset.stride import compute_stride_secondary_residue_ids_in_first_model
 from src.dataset.utils import (
     chunked,
     collect_batch_results,
@@ -156,6 +158,7 @@ def _build_xray_rmsd_extremes_record_from_candidates(
         worst_n_common_ca=worst.n_common_ca,
         worst_rmsd_ca_angstrom=worst.rmsd_ca_angstrom,
         rmsd_delta_angstrom=worst.rmsd_ca_angstrom - best.rmsd_ca_angstrom,
+        residue_selection=best.residue_selection,
     )
 
 
@@ -170,16 +173,24 @@ class SolutionNMRMonomerXrayRmsdBuilder:
         rmsd_workers: int,
         homolog_records: list[SolutionNMRMonomerXrayHomologRecord],
         sequence_identity_percent: int = 100,
+        residue_selection: str = "core",
+        stride_executable: str = "",
+        stride_cache_dir: Path = DEFAULT_STRIDE_CACHE_DIR,
     ) -> None:
         """Initialize NMR-to-X-ray RMSD collection."""
         if sequence_identity_percent not in {95, 100}:
             raise ValueError("sequence_identity_percent must be 95 or 100")
+        if residue_selection not in {"core", "secondary-structure"}:
+            raise ValueError("residue_selection must be core or secondary-structure")
         self.client = client
         self.config = config
         self.cache_dir = cache_dir
         self.rmsd_workers = max(1, rmsd_workers)
         self.homolog_records = homolog_records
         self.sequence_identity_percent = sequence_identity_percent
+        self.residue_selection = residue_selection
+        self.stride_executable = stride_executable
+        self.stride_cache_dir = stride_cache_dir
         self.cache_dir.mkdir(parents=True, exist_ok=True)
 
     def _download_pdb_if_needed(self, entry_id: str) -> Path:
@@ -199,6 +210,7 @@ class SolutionNMRMonomerXrayRmsdBuilder:
         parsed_nmr_chain_id: str,
         prepared_nmr_core: PreparedNMRCoreData,
         candidate: XrayPolymerEntityCandidateRecord,
+        allowed_nmr_residue_ids: set[ResidueId] | None = None,
     ) -> SolutionNMRMonomerXrayRmsdRecord | None:
         """Compute RMSD metrics for one NMR and X-ray candidate pair."""
         best_chain_result: tuple[str, int, float, int, int, int, int] | None = None
@@ -237,6 +249,7 @@ class SolutionNMRMonomerXrayRmsdBuilder:
                     xray_chain_id=parsed_xray_chain_id,
                     sequence_identity_percent=self.sequence_identity_percent,
                     prepared_nmr_core=prepared_nmr_core,
+                    allowed_nmr_residue_ids=allowed_nmr_residue_ids,
                 )
             except Exception as exc:
                 LOGGER.debug(
@@ -304,6 +317,7 @@ class SolutionNMRMonomerXrayRmsdBuilder:
             xray_resolution_angstrom=candidate.resolution_angstrom,
             n_common_ca=n_common_ca,
             rmsd_ca_angstrom=rmsd_ca,
+            residue_selection=self.residue_selection,
         )
 
     @staticmethod
@@ -346,6 +360,7 @@ class SolutionNMRMonomerXrayRmsdBuilder:
         xray_chain_id: str,
         sequence_identity_percent: int,
         prepared_nmr_core: PreparedNMRCoreData | None = None,
+        allowed_nmr_residue_ids: set[ResidueId] | None = None,
     ) -> (
         tuple[int, float, ResidueId | int, ResidueId | int, ResidueId, ResidueId] | None
     ):
@@ -388,7 +403,12 @@ class SolutionNMRMonomerXrayRmsdBuilder:
             rmsd_pairs = [
                 (nmr_record.key, xray_record.key)
                 for nmr_record, xray_record in matched_pairs
-                if nmr_record.is_standard_atom and xray_record.is_standard_atom
+                if nmr_record.is_standard_atom
+                and xray_record.is_standard_atom
+                and (
+                    allowed_nmr_residue_ids is None
+                    or nmr_record.key in allowed_nmr_residue_ids
+                )
             ]
             if len(rmsd_pairs) < 3:
                 continue
@@ -461,6 +481,30 @@ class SolutionNMRMonomerXrayRmsdBuilder:
                 )
                 return tuple()
 
+            allowed_nmr_residue_ids = None
+            if self.residue_selection == "secondary-structure":
+                # Keep the entire core for sequence matching. Mask only the atoms
+                # used for fitting/scoring, using the first NMR model's assignment.
+                allowed_nmr_residue_ids = (
+                    compute_stride_secondary_residue_ids_in_first_model(
+                        pdb_path=nmr_pdb_path,
+                        entry_id=homolog.entry_id,
+                        chain_id=parsed_nmr_chain_id,
+                        modeled_auth_seq_ids=[
+                            record.key for record in prepared_nmr_core[0]
+                        ],
+                        stride_executable=self.stride_executable,
+                        stride_cache_dir=self.stride_cache_dir,
+                    )
+                )
+                if len(allowed_nmr_residue_ids) < 3:
+                    _record_filtered_structure(
+                        homolog.entry_id,
+                        "fewer than 3 secondary-structure CA atoms inside the NMR core",
+                        year=homolog.year,
+                    )
+                    return tuple()
+
             candidate_records: list[SolutionNMRMonomerXrayRmsdRecord] = []
             for candidate in candidates:
                 record = self._compute_candidate_record(
@@ -470,6 +514,7 @@ class SolutionNMRMonomerXrayRmsdBuilder:
                     parsed_nmr_chain_id=parsed_nmr_chain_id,
                     prepared_nmr_core=prepared_nmr_core,
                     candidate=candidate,
+                    allowed_nmr_residue_ids=allowed_nmr_residue_ids,
                 )
                 if record is not None:
                     candidate_records.append(record)

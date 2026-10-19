@@ -18,8 +18,28 @@ class CorrelationPlotsMixin:
         cls,
         precision_df: pd.DataFrame,
         extremes_df: pd.DataFrame,
+        residue_selection: str = "core",
     ) -> pd.DataFrame:
         """Merge precision and minimum X-ray RMSD values by entry identifier."""
+        for dataset_name, frame in (
+            ("Monomer precision CSV", precision_df),
+            ("X-ray RMSD extremes CSV", extremes_df),
+        ):
+            if frame.empty:
+                continue
+            selections = (
+                set(frame["residue_selection"].fillna("core").astype(str))
+                if "residue_selection" in frame.columns
+                else {"core"}
+            )
+            if selections != {residue_selection}:
+                raise ValueError(
+                    f"{dataset_name} residue_selection is "
+                    f"{', '.join(sorted(selections))!r}; expected "
+                    f"{residue_selection!r}. Use matching precision and X-ray "
+                    "RMSD datasets with --rmsd-residue-selection. "
+                    "A missing residue_selection column denotes legacy core data."
+                )
         precision = cls._prepare_monomer_precision_table(precision_df)[
             ["entry_id", "year", "mean_rmsd_angstrom"]
         ].copy()
@@ -56,12 +76,22 @@ class CorrelationPlotsMixin:
         table = self._prepare_xray_rmsd_precision_correlation_table(
             precision_df=self._read_csv(precision_data_path),
             extremes_df=self._read_csv(extremes_data_path),
+            residue_selection=self.config.rmsd_residue_selection,
         )
         if table.empty:
             raise ValueError(
                 "No overlapping entries between precision and X-ray RMSD extremes CSVs."
             )
         self._scientific_style()
+        secondary_structure = (
+            self.config.rmsd_residue_selection == "secondary-structure"
+        )
+        title_suffix = (
+            "\nSecondary-structure CA atoms (STRIDE H/G/I/E/B)"
+            if secondary_structure
+            else ""
+        )
+        axis_suffix = "\nSecondary-structure CA atoms" if secondary_structure else ""
 
         pearson = float(table["precision_rmsd"].corr(table["min_xray_rmsd"]))
         spearman = float(
@@ -138,9 +168,12 @@ class CorrelationPlotsMixin:
         self._render_figure(
             output_png=scatter_output_png,
             output_svg=scatter_output_svg,
-            title=self.config.nmr_monomer_xray_rmsd_precision_scatter_title,
-            y_label=r"RMSD$_{\mathrm{NMR,X\!-\!ray}}$ (Å)",
-            x_label=r"RMSD$_{\mathrm{NMR}}$ (Å)",
+            title=(
+                self.config.nmr_monomer_xray_rmsd_precision_scatter_title
+                + title_suffix
+            ),
+            y_label=r"RMSD$_{\mathrm{NMR,X\!-\!ray}}$ (Å)" + axis_suffix,
+            x_label=r"RMSD$_{\mathrm{NMR}}$ (Å)" + axis_suffix,
             draw_fn=draw_scatter,
             use_year_x_ticks=False,
             height_scale=self.config.aspect_ratio,
@@ -177,7 +210,10 @@ class CorrelationPlotsMixin:
         self._render_figure(
             output_png=yearly_correlation_output_png,
             output_svg=yearly_correlation_output_svg,
-            title=self.config.nmr_monomer_xray_rmsd_precision_yearly_corr_title,
+            title=(
+                self.config.nmr_monomer_xray_rmsd_precision_yearly_corr_title
+                + title_suffix
+            ),
             y_label="Pearson correlation",
             draw_fn=draw_yearly_corr,
         )
@@ -214,7 +250,10 @@ class CorrelationPlotsMixin:
         self._render_figure(
             output_png=cumulative_correlation_output_png,
             output_svg=cumulative_correlation_output_svg,
-            title=self.config.nmr_monomer_xray_rmsd_precision_cumulative_corr_title,
+            title=(
+                self.config.nmr_monomer_xray_rmsd_precision_cumulative_corr_title
+                + title_suffix
+            ),
             y_label="Pearson correlation",
             draw_fn=draw_cumulative_corr,
         )

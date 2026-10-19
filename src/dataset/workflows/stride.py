@@ -80,10 +80,30 @@ def run_precision(
     precision_stride_output_path = Path(
         args.solution_nmr_monomer_precision_stride_modeled_first_model_output
     )
+    residue_selection = getattr(args, "rmsd_residue_selection", "core")
+    source_records = None
+    precision_input = getattr(args, "precision_input", None)
+    if precision_input is not None:
+        precision_input = Path(precision_input)
+        if precision_input.resolve() == precision_stride_output_path.resolve():
+            raise ValueError("--precision-input must differ from the precision output")
+        source_records = read_solution_nmr_monomer_precision_csv(precision_input)
+        if not source_records:
+            raise ValueError(f"No precision records found in {precision_input}")
+        LOGGER.info(
+            "Reusing %d precision cores from %s", len(source_records), precision_input
+        )
     if args.resume and precision_stride_output_path.exists():
         existing_records = read_solution_nmr_monomer_precision_csv(
             precision_stride_output_path
         )
+        if any(
+            record.residue_selection != residue_selection for record in existing_records
+        ):
+            raise ValueError(
+                "Cannot resume precision with a different residue selection; "
+                "use a separate output CSV."
+            )
         skip_entry_ids = {record.entry_id for record in existing_records}
         LOGGER.info(
             "SOLUTION NMR precision STRIDE modeled-first-model: loaded %d existing records for resume",
@@ -98,6 +118,11 @@ def run_precision(
             precision_workers=args.precision_workers,
             stride_executable=precision_stride_executable,
             stride_cache_dir=Path(args.stride_cache_dir),
+            **(
+                {"residue_selection": residue_selection}
+                if residue_selection != "core"
+                else {}
+            ),
         )
     )
     existing_records = sorted(existing_records, key=lambda r: (r.year, r.entry_id))
@@ -121,6 +146,9 @@ def run_precision(
         new_records = precision_stride_builder.build(
             skip_entry_ids=skip_entry_ids,
             on_record=_on_precision_stride_record,
+            **(
+                {"source_records": source_records} if source_records is not None else {}
+            ),
         )
 
     LOGGER.info(
