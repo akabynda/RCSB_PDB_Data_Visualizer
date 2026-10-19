@@ -103,6 +103,7 @@ class FigureRenderer(PlotStyleMixin, TablePreparationMixin):
         savefig_pad_inches: float = 0.1,
         height_scale: float = 1.0,
         force_boxed_axes: bool = False,
+        auto_minor_ticks: bool = True,
     ) -> None:
         """Save title and axes variants, optionally keeping every frame closed."""
 
@@ -122,7 +123,8 @@ class FigureRenderer(PlotStyleMixin, TablePreparationMixin):
             if y_bottom < 0.0:
                 ax.set_ylim(bottom=0.0)
             self._remove_zero_y_tick(ax)
-            self._configure_minor_ticks(ax=ax, use_year_x_ticks=use_year_x_ticks)
+            if auto_minor_ticks:
+                self._configure_minor_ticks(ax=ax, use_year_x_ticks=use_year_x_ticks)
             if with_title:
                 self._set_title(ax=ax, title=title)
             ax.set_xlabel(x_label if x_label is not None else self.config.x_label)

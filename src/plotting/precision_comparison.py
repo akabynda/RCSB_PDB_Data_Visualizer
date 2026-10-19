@@ -7,12 +7,17 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from matplotlib.ticker import AutoMinorLocator, MaxNLocator
+from matplotlib.colors import to_rgba
+from matplotlib.patches import Patch
+from matplotlib.ticker import FixedLocator, MaxNLocator, MultipleLocator
+
+from .constants import AXIS_MAJOR_TICK_LENGTH, AXIS_MINOR_TICK_LENGTH
 
 
 CORE_COLOR = "#CC79A7"
 SECONDARY_COLOR = "#0072B2"
 HISTOGRAM_EDGES = np.linspace(0.0, 3.0, 31)
+HISTOGRAM_TITLE = "Histogram of ensemble RMSD of NMR structures"
 RMSD_LABEL = r"RMSD$_{\mathrm{NMR}}$ (Å)"
 
 
@@ -81,17 +86,26 @@ class PrecisionComparisonPlotsMixin:
         core: pd.DataFrame,
         secondary: pd.DataFrame,
         *,
-        fontsize: float = 8.0,
+        fontsize: float | None = None,
     ) -> None:
         """Overlay counts with a visibly separated, explicitly pooled tail."""
         ax.set_facecolor("white")
         ax.axvspan(3.05, 3.32, color="#f2f2f2", zorder=0)
+        legend_handles = []
         for table, color, label in (
-            (core, CORE_COLOR, "Core"),
-            (secondary, SECONDARY_COLOR, "Sec. struc."),
+            (core, CORE_COLOR, r"$[n_1; n_2]$ core Cα atoms"),
+            (secondary, SECONDARY_COLOR, "secondary-structure Cα atoms"),
         ):
             counts, overflow = self._precision_histogram_counts(
                 table["mean_rmsd_angstrom"].to_numpy()
+            )
+            legend_handles.append(
+                Patch(
+                    facecolor=to_rgba(color, 0.25),
+                    edgecolor=color,
+                    linewidth=1.1,
+                    label=label,
+                )
             )
             ax.stairs(
                 counts,
@@ -107,7 +121,7 @@ class PrecisionComparisonPlotsMixin:
                 HISTOGRAM_EDGES,
                 color=color,
                 linewidth=1.1,
-                label=f"{label} (n = {len(table):,})",
+                label=label,
                 zorder=3,
             )
             ax.bar(3.18, overflow, width=0.18, color=color, alpha=0.25, zorder=2)
@@ -125,15 +139,23 @@ class PrecisionComparisonPlotsMixin:
         ax.set_ylim(bottom=0)
         ax.set_xticks([0, 1, 2, 3.18], ["0", "1", "2", "≥3"])
         ax.yaxis.set_major_locator(MaxNLocator(nbins=4, integer=True))
-        ax.xaxis.set_minor_locator(AutoMinorLocator(2))
-        ax.tick_params(axis="both", which="major", labelsize=fontsize, length=3)
-        ax.tick_params(axis="both", which="minor", length=2)
-        ax.set_xlabel(RMSD_LABEL, fontsize=fontsize, labelpad=2)
-        ax.set_ylabel("Number of structures", fontsize=fontsize, labelpad=3)
+        # The pooled tail is a category; numeric minor ticks stop at 3 Å.
+        ax.xaxis.set_minor_locator(FixedLocator(HISTOGRAM_EDGES))
+        ax.yaxis.set_minor_locator(MultipleLocator(100))
+        tick_style = {"labelsize": fontsize} if fontsize is not None else {}
+        text_style = {"fontsize": fontsize} if fontsize is not None else {}
+        ax.tick_params(
+            axis="both", which="major", length=AXIS_MAJOR_TICK_LENGTH, **tick_style
+        )
+        ax.tick_params(axis="both", which="minor", length=AXIS_MINOR_TICK_LENGTH)
+        ax.set_xlabel(RMSD_LABEL, **text_style)
+        ax.set_ylabel("Number of structures", **text_style)
         ax.grid(axis="x", visible=False)
         ax.grid(axis="y", alpha=0.18)
         ax.legend(
+            handles=legend_handles,
             loc="upper right",
+            bbox_to_anchor=(0.90, 1.0),
             frameon=False,
             fontsize=fontsize,
             handlelength=1.8,
@@ -181,7 +203,7 @@ class PrecisionComparisonPlotsMixin:
             self._configure_minor_ticks(trend, use_year_x_ticks=True)
             trend.set_xlabel(self.config.x_label)
             trend.set_ylabel(self.config.nmr_monomer_precision_stride_median_y_label)
-            self._draw_precision_histogram(histogram, core, secondary, fontsize=10.0)
+            self._draw_precision_histogram(histogram, core, secondary)
             for ax, label in ((trend, "A"), (histogram, "B")):
                 self._configure_boxed_axes(ax)
                 if open_axes and ax is trend:
@@ -199,9 +221,7 @@ class PrecisionComparisonPlotsMixin:
                 self._set_title(
                     trend, self.config.nmr_monomer_precision_stride_median_title
                 )
-                self._set_title(
-                    histogram, "Core and secondary-structure RMSD distributions"
-                )
+                self._set_title(histogram, HISTOGRAM_TITLE)
             png, svg = output_png, output_svg
             if not with_title:
                 png, svg = (
@@ -246,7 +266,7 @@ class PrecisionComparisonPlotsMixin:
             self._draw_core_precision_trend(ax, yearly)
             ax.set_ylim(0, max(1.6, float(yearly.max()) * 1.17))
             inset = ax.inset_axes([0.29, 0.56, 0.68, 0.39])
-            self._draw_precision_histogram(inset, core, secondary)
+            self._draw_precision_histogram(inset, core, secondary, fontsize=8.0)
 
         png, svg = paths("_with_histogram")
         self._render_figure(
@@ -260,14 +280,13 @@ class PrecisionComparisonPlotsMixin:
         self._render_figure(
             output_png=png,
             output_svg=svg,
-            title="Core and secondary-structure RMSD distributions",
+            title=HISTOGRAM_TITLE,
             y_label="Number of structures",
             x_label=RMSD_LABEL,
             use_year_x_ticks=False,
             force_boxed_axes=True,
-            draw_fn=lambda ax: self._draw_precision_histogram(
-                ax, core, secondary, fontsize=11.0
-            ),
+            auto_minor_ticks=False,
+            draw_fn=lambda ax: self._draw_precision_histogram(ax, core, secondary),
         )
         png, svg = paths("_comparison_panels")
         self._render_precision_comparison_panels(core, secondary, yearly, png, svg)
