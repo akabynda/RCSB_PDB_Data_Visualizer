@@ -452,76 +452,122 @@ Outputs:
 
 ### `solution_nmr_membrane_proteins`
 
-Collects an entry-level cohort from the RCSB Search and Data APIs with these
-criteria:
+The RCSB Search/Data API cohort requires:
 
-1. Contains at least one polypeptide chain (`polypeptide(L)` or `polypeptide(D)`).
-2. Solved exclusively by `SOLUTION NMR`; mixed solution/solid-state records are excluded.
-3. At least one protein entity has an annotation in
-   `rcsb_polymer_entity_annotation.type` equal to `OPM`, `PDBTM`, `MemProtMD`, or `mpstruc`.
-4. Optionally, more than one deposited model (`rcsb_entry_info.deposited_model_count > 1`).
-   This filter is **off by default**.
+1. At least one `polypeptide(L)` or `polypeptide(D)` chain.
+2. Experimental method set exactly `{SOLUTION NMR}`.
+3. At least one protein entity with `rcsb_polymer_entity_annotation.type` equal
+   to any of `OPM`, `PDBTM`, `MemProtMD`, `mpstruc`.
+4. More than one deposited model (`rcsb_entry_info.deposited_model_count > 1`).
+   Missing/invalid model counts are excluded with a separate reason.
 
-The membrane marker is an external annotation exposed by RCSB. A UniProt
-membrane annotation alone does not select an entry. There are no restrictions
-on HETATM, oligomeric state, length, core, or deposition year. Models within an
-ensemble are not counted as independent entries. The collector does not run
-TM prediction or assign full-length/fragment classes.
+A UniProt membrane annotation alone does not select an entry. There are no
+HETATM, oligomeric-state, length, core or deposition-year restrictions. The
+unit is a PDB entry, not a unique protein or an independent biological replicate.
+No full-length/fragment assignment is made.
 
 ```bash
 python src/pdb_dataset_builder.py --datasets solution_nmr_membrane_proteins
-python src/pdb_plot.py --plots solution_nmr_membrane_proteins --svg
+python src/pdb_plot.py --plots solution_nmr_membrane_proteins
 ```
 
-The main CSV is `data/solution_nmr_membrane_proteins.csv`, one row per PDB entry.
-Companion files use the same stem:
+**Coordinate calculation.** The existing shared PDB downloader/cache is used
+(`data/pdb_cache`, configurable with `--solution-nmr-monomer-cache-dir`), including
+its alternative-conformer normalization and mmCIF-to-PDB fallback with chain-ID
+mapping. The first coordinate model is extracted without a core crop or use of
+unmodeled SEQRES residues. All its ATOM/HETATM coordinates are submitted to TmDet;
+the program applies its own atom/chain eligibility rules. The coordinate file
+must also contain more than one model. No assembly expansion is requested.
+
+The managed build uses [TmDet](https://github.com/brgenzim/TmDet) revision
+`311af38c09b1ec8636810b6f9d7ab532adaa846e` (XML version 4.1.4), Gemmi 0.7.0,
+Eigen 3.4.0, nlohmann/json 3.11.3 and pugixml 1.14, with archive SHA-256 checks.
+CMake and a C++20 compiler are required. Builds and logs live under
+`data/tmdet/<revision>/<platform>/`; `--tmdet-executable` selects an existing binary.
+The managed build includes `<span>` explicitly, makes the abstract `SideDetector`
+and `Optimizer` destructors virtual, and replaces invalid `erase(end())` with
+`pop_back()` in PDB-to-CIF export. These compatibility fixes do not alter scoring,
+optimization or region-assignment formulas. Source archives, patched sources,
+build commands and binary hash are retained in the installation directory.
+
+Arguments are `-pi input.pdb -x result.xml -po transformed.cif -m 0 -nc`, with
+an explicit environment file. `0` is the first model's zero-based index. Default
+planar-membrane settings are used; curved, double-membrane and fragment-analysis
+options are not enabled. `-nc` disables TmDet's sequence-only surface cache.
+The default per-entry timeout is 600 seconds (`--tmdet-timeout-seconds`).
+Only required chemical components are retrieved from RCSB CCD, plus its real
+`ZZZ.cif` record used by TmDet to recognize an installed CCD directory; component
+URLs, retrieval times and hashes are retained.
+
+**Residue mapping and counts.** XML boundaries are mapped through PDB chain IDs,
+author residue numbers and insertion codes onto the observed coordinate order.
+Numbering gaps do not create residues. Each polypeptide residue with at least
+one modeled atom is counted once; polymer HETATM membership follows the shared
+SEQRES/MODRES or converted-mmCIF metadata. Counts include all protein chains in
+the entry, including partners; `is_membrane` remains available per chain/residue.
+The chain table's RCSB `modeled_residue_count` is separate from the measured
+`tmdet_modeled_residue_count`.
+
+All [TmDet region codes](https://tmdet.unitmp.org/usage) and original XML attributes
+are retained, including unknown future codes. For the current summary,
+`N_TM = N_H + N_B` and `f_TM = N_TM / N_modeled`. Other modeled residues are
+`N_modeled - N_TM`; they can include re-entrant loops and interfacial helices,
+so this quantity is not a count of strictly extramembrane residues.
+
+| Status | Interpretation in the tables |
+| --- | --- |
+| `membrane_detected` | Every modeled protein residue has an XML region assignment. |
+| `partial_annotation` | Positive result with unassigned modeled residues; TM count is the assigned H/B count, but fraction and other-residue count are blank. |
+| `no_membrane_detected` | Valid negative TmDet result; detected TM count and fraction are zero, without fabricating residue region labels. This is algorithmic non-detection. |
+| `no_analyzable_protein` | TmDet reports `Noprotein`; TM count/fraction are blank. |
+| `not_in_model` | Chain absent from the first coordinate model; chain TM count/fraction are blank. |
+| `error` | Download, execution, timeout or mapping failure; TM count/fraction are blank and the reason is saved. |
+
+The main CSV is `data/solution_nmr_membrane_proteins.csv`. Companions share its stem:
 
 | Suffix | Unit and contents |
 | --- | --- |
-| `_entities.csv` | Protein entity: annotations, deposited sequence and hash, UniProt identifiers. |
-| `_chains.csv` | Protein chain instance: label/auth chain IDs, modeled residue count, PDBTM availability. |
-| `_segments.csv` | PDBTM `MEMBRANE_SEGMENT` interval, with raw positions and validation status. |
-| `_duplicate_candidates.csv` | One-model/ensemble pair with identical deposited protein sequence multisets (including chain multiplicity) and a shared DOI, positive PubMed ID, or explicit related-PDB link. Candidates are not automatically removed. |
+| `_entities.csv` | Protein entity: annotations, deposited sequence/hash, UniProt IDs. |
+| `_chains.csv` | Protein chain: label/auth IDs, PDBTM availability and TmDet counts. |
+| `_segments.csv` | Original RCSB PDBTM interval, raw positions and validity. |
+| `_tmdet_regions.csv` | Every XML region, author boundaries and modeled residue count. |
+| `_tmdet_residues.csv` | Every modeled protein residue, all region codes and assignment status. |
+| `_duplicate_candidates.csv` | One-model/ensemble audit; normally empty with criterion 4 enabled. |
 | `_filtered.csv` | Excluded entry ID, deposition year and reason. |
-| `_manifest.json` | Query/source provenance, parameters, sequential filter counts, IDs, output hashes, command, code hashes and software versions. |
+| `_manifest.json` | Source/run provenance, parameters, filter counts, status/category statistics, hashes, command and software versions. |
 
-Unannotated partner chains remain in the tables with `is_membrane=false`.
-`has_pdbtm_annotation` records the entity-level PDBTM marker separately from
-chain-level residue intervals. Intervals use one-based `label_seq_id` positions
-in the deposited polymer sequence. Bounds must be positive integers, ordered,
-and within the sequence length when available. Invalid intervals remain in the
-segment table with an explanation; they are not clipped or counted as valid.
-For entry-level `pdbtm_segment_status`, `complete` means every membrane-marked
-protein chain has at least one valid interval and no invalid intervals;
-`partial` means some valid intervals exist but chain coverage or interval
-validity is incomplete; `missing` means no valid interval is available.
-These states describe annotation availability, not biological completeness.
-Missing model counts stay blank; enabling criterion 4 rejects them with a
-separate reason. No sequence matching to a full source protein is done here.
+Original PDBTM segment bounds use one-based `label_seq_id` in the deposited
+sequence. Bounds must be positive integers, ordered and within known sequence
+length. Invalid intervals remain in the table with their reasons. The PDBTM
+`complete/partial/missing` status describes annotation availability, not biological
+completeness. This stored annotation is not substituted for a TmDet calculation.
 
-Raw JSON responses are cached under
-`data/rcsb_cache/solution_nmr_membrane_proteins/`, keyed by URL, exact request
-and schema version. Response bodies use SHA-256 filenames; refreshes preserve
-previous bodies. The default validation interval is 24 hours; set
-`--solution-nmr-membrane-cache-validation-hours 0` to refresh. Failed requests
-raise an error rather than returning an empty or stale successful result.
-CSV files are replaced atomically, and the manifest is published last with
-their hashes. Immutable copies of run manifests are kept in the cache.
+**Caching and retries.** Raw API bodies remain in
+`data/rcsb_cache/solution_nmr_membrane_proteins/`, keyed by URL/request/schema,
+with SHA-256 and a 24-hour validation interval. Set
+`--solution-nmr-membrane-cache-validation-hours 0` to revalidate.
+TmDet bundles are in `data/tmdet_cache/<PDB ID>/<input hash>/` (configurable with
+`--tmdet-cache-dir`), keyed by PDB/first-model/binary/CCD hashes, schema and arguments.
+Every successful bundle preserves input PDB, full XML, optional transformed CIF,
+stdout/stderr, native logs and a hash manifest. A valid negative result normally
+has no transformed CIF. Hash validation precedes reuse. Failed attempts and
+corrupt bundles remain available; errors are retried by the same command.
+Tables are written atomically and their manifest is published last. A run with
+calculation errors publishes the error rows and exits unsuccessfully.
+Deleting published tables/figures does not invalidate compatible raw caches.
 
-To inspect the optional filter without replacing the unfiltered cohort:
+**Plots.** The family reads the entry CSV (`--nmr-membrane-input`) and applies the
+project-wide deposition-year cutoff of 2024. It writes the usual title/frame PNG
+variants for `solution_nmr_membrane_proteins_by_year`,
+`solution_nmr_membrane_tmdet_status` and `solution_nmr_membrane_tmdet_residues`.
+The scatter uses only complete positive/valid negative results; the omitted count
+is printed and all statuses appear in the status plot. Unknown years are reported
+and omitted. Counts are descriptive; no hypothesis tests, confidence intervals,
+sequence deduplication or inference across proteins are applied.
 
-```bash
-python src/pdb_dataset_builder.py --datasets solution_nmr_membrane_proteins \
-  --solution-nmr-membrane-require-multiple-models \
-  --solution-nmr-membrane-output data/solution_nmr_membrane_multiple_models.csv
-```
-
-The plot family reads the entry CSV (`--nmr-membrane-input`) and uses the common
-plot cutoff of deposition year 2024. It writes
-`solution_nmr_membrane_proteins_by_year` (one, multiple, unknown model counts)
-and `solution_nmr_membrane_pdbtm_coverage` (PDBTM label/interval availability)
-with the standard title/frame variants. Counts are PDB entries, not unique
-proteins. Unknown years are reported and omitted from year-limited plots.
+Procedure/figure review uses Scientific Agent Skills: Kassis, T., Agarwal, V.,
+He, Y., Patel, D., & Brueckner, A. M. (2026),
+[Scientific Agent Skills: A Library of Procedural Knowledge for Research Agents](https://doi.org/10.48550/arXiv.2609.00065).
 
 ### `solution_nmr_program_counts`
 

@@ -15,6 +15,9 @@ Run the complete test suite:
 python -m pytest -q
 ```
 
+Discovery is limited to `test/`; downloaded native dependency sources and
+ignored analysis directories are not part of the application test suite.
+
 Measure branch coverage for the application code:
 
 ```bash
@@ -34,6 +37,8 @@ python -m pytest -q \
 The tests use temporary files and mocked APIs, while STRIDE bootstrap tests also
 mock Git and GNU Make; no repository dataset or figure is modified, and STRIDE is
 never downloaded or compiled.
+TmDet tests similarly use temporary executable fixtures and mocked downloads;
+they do not build or run the managed native installation.
 
 ## License
 

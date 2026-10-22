@@ -57,6 +57,8 @@ class MembraneBuildResult:
     entity_rows: list[dict[str, Any]] = field(default_factory=list)
     chain_rows: list[dict[str, Any]] = field(default_factory=list)
     segment_rows: list[dict[str, Any]] = field(default_factory=list)
+    tmdet_region_rows: list[dict[str, Any]] = field(default_factory=list)
+    tmdet_residue_rows: list[dict[str, Any]] = field(default_factory=list)
     duplicate_candidate_rows: list[dict[str, Any]] = field(default_factory=list)
     excluded: list[dict[str, Any]] = field(default_factory=list)
     filter_counts: dict[str, int] = field(default_factory=dict)
@@ -181,7 +183,7 @@ class SolutionNMRMembraneBuilder:
     """Apply the cohort rules to raw GraphQL records, without network or file IO."""
 
     def build_from_entries(
-        self, entries: list[dict[str, Any]], require_multiple_models: bool = False,
+        self, entries: list[dict[str, Any]], require_multiple_models: bool = True,
     ) -> MembraneBuildResult:
         result = MembraneBuildResult()
         counts: Counter[str] = Counter(

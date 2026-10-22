@@ -212,6 +212,8 @@ def main() -> None:
             annual_output_svg=args.nmr_membrane_annual_output_svg,
             coverage_output_png=args.nmr_membrane_coverage_output_png,
             coverage_output_svg=args.nmr_membrane_coverage_output_svg,
+            residues_output_png=args.nmr_membrane_residues_output_png,
+            residues_output_svg=args.nmr_membrane_residues_output_svg,
         )
 
     if PlotKind.SOLUTION_NMR_PROGRAM_COUNTS in args.plots:

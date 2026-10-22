@@ -18,6 +18,7 @@ from src.dataset.reporting import (
     _set_active_dataset_filtered_csvs,
 )
 from src.dataset.workflows.membrane import run_solution_nmr_membrane
+from src.dataset.workflows import membrane as membrane_workflow
 
 
 def _args(monkeypatch, tmp_path, *extra):
@@ -51,8 +52,14 @@ def _network(url, payload):
     return {"data": {"entries": [_entry()]}}
 
 
-def test_cohort_workflow_cache_replay_and_optional_filter(monkeypatch, tmp_path):
+def test_cohort_workflow_cache_replay_and_default_filter(monkeypatch, tmp_path):
     args = _args(monkeypatch, tmp_path)
+    def annotate(result, *args):
+        for row in result.entry_rows:
+            row.update(tmdet_status="no_membrane_detected", tmdet_tm_residue_count=0)
+        return []
+    monkeypatch.setattr(membrane_workflow, "annotate_membrane_cohort", annotate)
+    args.solution_nmr_membrane_require_multiple_models = False
     config = DatasetBuildConfig(max_workers=1)
     client = RCSBClient(config)
     request = Mock(side_effect=_network)
@@ -103,7 +110,7 @@ def test_failed_fetch_does_not_publish_empty_success(monkeypatch, tmp_path):
 
 def test_membrane_kind_dispatch_and_model_filter_defaults(monkeypatch, tmp_path):
     args = _args(monkeypatch, tmp_path)
-    assert not args.solution_nmr_membrane_require_multiple_models
+    assert args.solution_nmr_membrane_require_multiple_models
     assert DatasetKind.SOLUTION_NMR_MEMBRANE_PROTEINS in parse_dataset_kinds("all")
     runner = Mock()
     monkeypatch.setattr(cli, "parse_args", lambda: args)
@@ -116,3 +123,27 @@ def test_membrane_kind_dispatch_and_model_filter_defaults(monkeypatch, tmp_path)
     cli.main()
     runner.assert_called_once()
     assert _args(monkeypatch, tmp_path, "--solution-nmr-membrane-require-multiple-models").solution_nmr_membrane_require_multiple_models
+
+
+def test_default_filter_is_applied_before_native_stage_and_errors_remain_visible(monkeypatch, tmp_path):
+    args = _args(monkeypatch, tmp_path)
+    client = RCSBClient(DatasetBuildConfig())
+    entries = [_entry(), _entry()]
+    entries[1]['rcsb_id'] = '2ABC'
+    entries[1]['rcsb_entry_info']['deposited_model_count'] = 20
+    monkeypatch.setattr(client, 'fetch_solution_nmr_membrane_entry_ids', lambda cache: ['1ABC', '2ABC'])
+    monkeypatch.setattr(client, 'fetch_membrane_entries_for_ids', lambda batch, cache: entries)
+    def annotate(result, *args):
+        assert [row['entry_id'] for row in result.entry_rows] == ['2ABC']
+        result.entry_rows[0].update(tmdet_status='error', tmdet_error='native failure')
+        return []
+    monkeypatch.setattr(membrane_workflow, 'annotate_membrane_cohort', annotate)
+    with pytest.raises(RuntimeError, match='calculations failed'):
+        run_solution_nmr_membrane(args, client, client.config)
+    rows = list(csv.DictReader(args.solution_nmr_membrane_output.open()))
+    assert rows[0]['tmdet_status'] == 'error'
+    assert rows[0]['tmdet_tm_residue_count'] == ''
+    manifest = json.loads((tmp_path / 'cohort_manifest.json').read_text())
+    assert manifest['summary']['tmdet_status'] == {'error': 1}
+    assert manifest['filters']['require_multiple_models'] is True
+    _set_active_dataset_filtered_csvs(())

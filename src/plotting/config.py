@@ -77,8 +77,9 @@ class PlotConfig:
         "Solution NMR membrane protein entries by deposition year"
     )
     nmr_membrane_coverage_title: str = (
-        "PDBTM segment coverage of solution NMR membrane protein entries"
+        "TmDet results for solution NMR membrane protein entries"
     )
+    nmr_membrane_residues_title: str = "Delineation of NMR structures of membrane proteins"
     membrane_cumulative_title: str = (
         "Cumulative number of membrane protein structures in PDB by deposition year"
     )

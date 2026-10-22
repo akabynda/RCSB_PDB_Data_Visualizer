@@ -13,6 +13,9 @@ from src.dataset.builders.membrane import (
     MembraneBuildResult,
 )
 from src.dataset.io.common import _atomic_write_csv_rows
+from src.dataset.tmdet_annotations import (
+    TMDET_ENTRY_COLUMNS, TMDET_SUMMARY_COLUMNS, TMDET_REGION_COLUMNS, TMDET_RESIDUE_COLUMNS,
+)
 
 
 def membrane_output_paths(output_path: Path) -> dict[str, Path]:
@@ -22,7 +25,7 @@ def membrane_output_paths(output_path: Path) -> dict[str, Path]:
         "entries": output_path,
         **{
             name: output_path.with_name(f"{output_path.stem}_{name}.csv")
-            for name in ("entities", "chains", "segments", "duplicate_candidates")
+            for name in ("entities", "chains", "segments", "duplicate_candidates", "tmdet_regions", "tmdet_residues")
         },
     }
 
@@ -33,11 +36,13 @@ def write_solution_nmr_membrane_csvs(
     """Write one row per stated unit; None becomes blank and booleans true/false."""
     paths = membrane_output_paths(output_path)
     tables = (
-        ("entries", ENTRY_COLUMNS, result.entry_rows),
+        ("entries", (*ENTRY_COLUMNS, *TMDET_ENTRY_COLUMNS), result.entry_rows),
         ("entities", ENTITY_COLUMNS, result.entity_rows),
-        ("chains", CHAIN_COLUMNS, result.chain_rows),
+        ("chains", (*CHAIN_COLUMNS, *TMDET_SUMMARY_COLUMNS), result.chain_rows),
         ("segments", SEGMENT_COLUMNS, result.segment_rows),
         ("duplicate_candidates", DUPLICATE_CANDIDATE_COLUMNS, result.duplicate_candidate_rows),
+        ("tmdet_regions", TMDET_REGION_COLUMNS, result.tmdet_region_rows),
+        ("tmdet_residues", TMDET_RESIDUE_COLUMNS, result.tmdet_residue_rows),
     )
     for name, columns, rows in tables:
         _atomic_write_csv_rows(
@@ -45,8 +50,11 @@ def write_solution_nmr_membrane_csvs(
             header=columns,
             rows=(
                 tuple(
-                    str(row[column]).lower() if isinstance(row[column], bool) else row[column]
-                    for column in columns
+                    str(value).lower() if isinstance(value, bool) else value
+                    for value in (
+                        row.get(column) if column.startswith("tmdet_") else row[column]
+                        for column in columns
+                    )
                 )
                 for row in rows
             ),

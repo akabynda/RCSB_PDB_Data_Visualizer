@@ -107,9 +107,9 @@ def test_polypeptide_d_is_allowed_and_missing_protein_chain_is_excluded():
 
 
 @pytest.mark.parametrize("models", [None, 0, -1, 1.5, True, "unknown"])
-def test_unknown_model_count_is_retained_by_default_and_excluded_only_with_option(models):
+def test_unknown_model_count_is_excluded_by_default(models):
     entry = _entry(models=models)
-    result = _build([entry])
+    result = _build([entry], require_multiple_models=False)
     assert result.entry_rows[0]["deposited_model_count"] is None
     assert result.entry_rows[0]["model_count_status"] == "unknown"
     filtered = _build([entry], require_multiple_models=True)
@@ -117,10 +117,10 @@ def test_unknown_model_count_is_retained_by_default_and_excluded_only_with_optio
     assert filtered.excluded[0]["reason"] == "deposited model count is missing or invalid"
 
 
-def test_multiple_models_filter_is_off_by_default_and_counts_exclusions():
+def test_multiple_models_filter_is_on_by_default_and_counts_exclusions():
     entries = [_entry("2ABC", models=2), _entry("1ABC", models=1)]
-    assert [row["entry_id"] for row in _build(entries).entry_rows] == ["1ABC", "2ABC"]
-    result = _build(entries, require_multiple_models=True)
+    assert [row["entry_id"] for row in _build(entries, require_multiple_models=False).entry_rows] == ["1ABC", "2ABC"]
+    result = _build(entries)
     assert [row["entry_id"] for row in result.entry_rows] == ["2ABC"]
     assert result.excluded == [{"entry_id": "1ABC", "year": 2026, "reason": "not more than one deposited model"}]
     assert result.filter_counts["retained_entries"] == 1
@@ -185,7 +185,7 @@ def test_duplicate_candidates_require_whole_protein_copy_multiset_and_citation_o
     linked = _entry("6ABC", models=20)
     linked["rcsb_primary_citation"] = None
     linked["pdbx_database_related"] = [{"db_name": "PDB", "db_id": "1abc", "details": "average structure"}]
-    result = _build([single, same, other_sequence, other_copies, no_citation, linked])
+    result = _build([single, same, other_sequence, other_copies, no_citation, linked], require_multiple_models=False)
     assert len(result.entry_rows) == 6
     assert [(row["single_model_entry_id"], row["ensemble_entry_id"]) for row in result.duplicate_candidate_rows] == [("1ABC", "2ABC"), ("1ABC", "6ABC")]
     assert result.duplicate_candidate_rows[0]["shared_doi"] == "10.1000/example"
@@ -204,7 +204,7 @@ def test_missing_pubmed_sentinel_cannot_support_a_duplicate_candidate():
 def test_results_match_csv_headers_and_input_is_not_modified():
     entries = [_entry("1ABC", models=1), _entry("2ABC", models=20)]
     original = deepcopy(entries)
-    result = _build(entries)
+    result = _build(entries, require_multiple_models=False)
     for rows, columns in ((result.entry_rows, ENTRY_COLUMNS), (result.entity_rows, ENTITY_COLUMNS),
                           (result.chain_rows, CHAIN_COLUMNS), (result.segment_rows, SEGMENT_COLUMNS),
                           (result.duplicate_candidate_rows, DUPLICATE_CANDIDATE_COLUMNS)):

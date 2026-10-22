@@ -184,20 +184,21 @@ python src/pdb_plot.py \
 
 ## Solution-NMR Membrane Cohort
 
-Collect membrane-annotated entries determined exclusively by solution NMR, then
-plot deposition counts and PDBTM annotation coverage:
+Collect membrane-annotated solution-NMR entries with more than one deposited
+model and run TmDet on the first PDB coordinate model:
 
 ```bash
 python src/pdb_dataset_builder.py --datasets solution_nmr_membrane_proteins
-python src/pdb_plot.py --plots solution_nmr_membrane_proteins --svg
+python src/pdb_plot.py --plots solution_nmr_membrane_proteins
 ```
 
-The entry CSV, chain/entity/segment tables, duplicate-candidate audit, and
-provenance manifest share the stem `data/solution_nmr_membrane_proteins`.
-The optional filter requiring more than one deposited model is off by default.
-See the [cohort criteria and cache reference](src/README.md#solution_nmr_membrane_proteins)
-for the exact annotation field, filters, output meanings, and an independent
-run with the optional filter enabled.
+The standard collector installs a pinned local TmDet build when needed (CMake
+and a C++20 compiler are required), caches calculations, and saves all region
+categories and raw outputs. Existing binaries can be supplied with
+`--tmdet-executable /path/to/tmdet`. The entry CSV, companion tables and manifest
+share the stem `data/solution_nmr_membrane_proteins`. PNG figures show deposition
+counts, calculation status and modeled residue counts inside H/B versus elsewhere.
+See the [protocol and cache reference](src/README.md#solution_nmr_membrane_proteins).
 
 ## Long-Running Builds
 

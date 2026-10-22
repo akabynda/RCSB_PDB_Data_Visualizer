@@ -20,6 +20,7 @@ from src.dataset.config import LOGGER, MEMBRANE_ANNOTATION_TYPES, DatasetBuildCo
 from src.dataset.io.membrane import write_solution_nmr_membrane_csvs
 from src.dataset.reporting import _record_filtered_structure, _set_active_dataset_filtered_csvs
 from src.dataset.utils import chunked, collect_batch_results
+from src.dataset.tmdet import annotate_membrane_cohort
 
 
 def _code_provenance() -> dict:
@@ -46,7 +47,7 @@ def _code_provenance() -> dict:
 def run_solution_nmr_membrane(
     args: argparse.Namespace, client: RCSBClient, config: DatasetBuildConfig
 ) -> None:
-    """Rebuild tables from verified cached API data, without coordinate prediction."""
+    """Collect the cohort and annotate its first coordinate models with TmDet."""
     if config.graphql_batch_size < 1 or config.max_workers < 1:
         raise ValueError("Membrane batch size and worker count must be positive")
     output_path = Path(args.solution_nmr_membrane_output)
@@ -70,6 +71,7 @@ def run_solution_nmr_membrane(
     )
     for excluded in result.excluded:
         _record_filtered_structure(excluded["entry_id"], excluded["reason"], excluded["year"])
+    tmdet_sources = annotate_membrane_cohort(result, args, client, config)
     paths = write_solution_nmr_membrane_csvs(result, output_path)
     rows = result.entry_rows
     summary = {
@@ -85,9 +87,13 @@ def run_solution_nmr_membrane(
         )),
         "missing_deposition_year": sum(row["year"] is None for row in rows),
         "duplicate_candidate_pairs": len(result.duplicate_candidate_rows),
+        "tmdet_status": dict(Counter(row["tmdet_status"] for row in rows)),
+        "tmdet_region_residue_counts": dict(Counter(
+            row["region_type"] for row in result.tmdet_residue_rows if row["region_type"] is not None
+        )),
     }
     manifest = {
-        "schema_version": "solution-nmr-membrane-v1",
+        "schema_version": "solution-nmr-membrane-v2",
         "started_at": started_at,
         "completed_at": _utc_now_iso(),
         "command": shlex.join([sys.executable, *sys.argv]),
@@ -116,6 +122,14 @@ def run_solution_nmr_membrane(
         "excluded": result.excluded,
         "summary": summary,
         "sources": cache.sources,
+        "tmdet": {
+            "model_index": 0, "input": "first PDB coordinate model, no core crop",
+            "count_unit": "modeled polypeptide residues across all protein chains in each PDB entry",
+            "tm_region_codes": ["H", "B"], "preserved_region_codes": "all",
+            "cache_directory": str(Path(args.tmdet_cache_dir).resolve()),
+            "timeout_seconds": args.tmdet_timeout_seconds,
+            "sources": tmdet_sources,
+        },
         "outputs": {
             name: {"path": str(path.resolve()), "sha256": _sha256_file(path)}
             for name, path in paths.items()
@@ -128,3 +142,5 @@ def run_solution_nmr_membrane(
     _atomic_write_json(cache.cache_dir / "manifests" / f"{manifest_hash}.json", manifest)
     LOGGER.info("Membrane cohort summary: %s", summary)
     LOGGER.info("Saved membrane CSVs to %s; manifest %s", output_path, manifest_path)
+    if summary["tmdet_status"].get("error", 0):
+        raise RuntimeError("Some TmDet calculations failed; rows and raw logs were saved. Rerun to retry failed entries.")

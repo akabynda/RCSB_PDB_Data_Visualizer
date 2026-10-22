@@ -12,26 +12,32 @@ def add_nmr_output_arguments(parser: argparse.ArgumentParser) -> None:
         "--nmr-membrane-annual-output-png",
         type=Path,
         default=Path("figures/solution_nmr_membrane_proteins_by_year.png"),
-        help="Output PNG for SOLUTION NMR membrane entries by year and model count.",
+        help="Output PNG for SOLUTION NMR membrane entries by deposition year.",
     )
     parser.add_argument(
         "--nmr-membrane-annual-output-svg",
         type=Path,
         default=Path("figures/solution_nmr_membrane_proteins_by_year.svg"),
-        help="Output SVG for SOLUTION NMR membrane entries by year and model count.",
+        help="Output SVG for SOLUTION NMR membrane entries by deposition year.",
     )
     parser.add_argument(
         "--nmr-membrane-coverage-output-png",
         type=Path,
-        default=Path("figures/solution_nmr_membrane_pdbtm_coverage.png"),
-        help="Output PNG for PDBTM segment availability in the SOLUTION NMR membrane cohort.",
+        default=Path("figures/solution_nmr_membrane_tmdet_status.png"),
+        help="Output PNG for TmDet calculation status in the SOLUTION NMR membrane cohort.",
     )
     parser.add_argument(
         "--nmr-membrane-coverage-output-svg",
         type=Path,
-        default=Path("figures/solution_nmr_membrane_pdbtm_coverage.svg"),
-        help="Output SVG for PDBTM segment availability in the SOLUTION NMR membrane cohort.",
+        default=Path("figures/solution_nmr_membrane_tmdet_status.svg"),
+        help="Output SVG for TmDet calculation status in the SOLUTION NMR membrane cohort.",
     )
+    for extension in ("png", "svg"):
+        parser.add_argument(
+            f"--nmr-membrane-residues-output-{extension}", type=Path,
+            default=Path(f"figures/solution_nmr_membrane_tmdet_residues.{extension}"),
+            help=f"Output {extension.upper()} for first-model TmDet residue counts.",
+        )
     parser.add_argument(
         "--nmr-avg-output-png",
         type=Path,
