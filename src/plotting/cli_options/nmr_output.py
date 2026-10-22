@@ -9,6 +9,30 @@ from pathlib import Path
 def add_nmr_output_arguments(parser: argparse.ArgumentParser) -> None:
     """Register molecular-weight, secondary-structure, and quality output paths."""
     parser.add_argument(
+        "--nmr-membrane-annual-output-png",
+        type=Path,
+        default=Path("figures/solution_nmr_membrane_proteins_by_year.png"),
+        help="Output PNG for SOLUTION NMR membrane entries by year and model count.",
+    )
+    parser.add_argument(
+        "--nmr-membrane-annual-output-svg",
+        type=Path,
+        default=Path("figures/solution_nmr_membrane_proteins_by_year.svg"),
+        help="Output SVG for SOLUTION NMR membrane entries by year and model count.",
+    )
+    parser.add_argument(
+        "--nmr-membrane-coverage-output-png",
+        type=Path,
+        default=Path("figures/solution_nmr_membrane_pdbtm_coverage.png"),
+        help="Output PNG for PDBTM segment availability in the SOLUTION NMR membrane cohort.",
+    )
+    parser.add_argument(
+        "--nmr-membrane-coverage-output-svg",
+        type=Path,
+        default=Path("figures/solution_nmr_membrane_pdbtm_coverage.svg"),
+        help="Output SVG for PDBTM segment availability in the SOLUTION NMR membrane cohort.",
+    )
+    parser.add_argument(
         "--nmr-avg-output-png",
         type=Path,
         default=Path("figures/solution_nmr_mean_weight_by_year.png"),

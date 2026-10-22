@@ -27,6 +27,12 @@ def add_input_arguments(parser: argparse.ArgumentParser) -> None:
         help="Input CSV for membrane-protein counts split by experimental method.",
     )
     parser.add_argument(
+        "--nmr-membrane-input",
+        type=Path,
+        default=Path("data/solution_nmr_membrane_proteins.csv"),
+        help="Input entry-level CSV for SOLUTION NMR membrane cohort plots.",
+    )
+    parser.add_argument(
         "--nmr-weights-input",
         type=Path,
         default=Path("data/solution_nmr_structure_weights.csv"),

@@ -268,6 +268,8 @@ from src.dataset.programs import (
     extract_refinement_programs_from_pdb,
     extract_solution_nmr_program_clusters,
 )
+from src.dataset.builders.membrane import MembraneBuildResult, SolutionNMRMembraneBuilder
+from src.dataset.io.membrane import write_solution_nmr_membrane_csvs
 from src.dataset.records import (
     CAResidueRecord,
     ResidueId,

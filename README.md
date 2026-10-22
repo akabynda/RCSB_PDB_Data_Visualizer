@@ -10,6 +10,7 @@ This README contains the steps required to reproduce those results.
 - [Setup](#setup)
 - [Reproduce All Article Figures](#reproduce-all-article-figures)
 - [Reproduce Individual Article Figures](#reproduce-individual-article-figures)
+- [Solution-NMR Membrane Cohort](#solution-nmr-membrane-cohort)
 - [Long-Running Builds](#long-running-builds)
 - [Technical Reference](#technical-reference)
 - [License](#license)
@@ -180,6 +181,23 @@ python src/pdb_dataset_builder.py \
 python src/pdb_plot.py \
   --plots solution_nmr_monomer_quality,solution_nmr_monomer_program_clusters
 ```
+
+## Solution-NMR Membrane Cohort
+
+Collect membrane-annotated entries determined exclusively by solution NMR, then
+plot deposition counts and PDBTM annotation coverage:
+
+```bash
+python src/pdb_dataset_builder.py --datasets solution_nmr_membrane_proteins
+python src/pdb_plot.py --plots solution_nmr_membrane_proteins --svg
+```
+
+The entry CSV, chain/entity/segment tables, duplicate-candidate audit, and
+provenance manifest share the stem `data/solution_nmr_membrane_proteins`.
+The optional filter requiring more than one deposited model is off by default.
+See the [cohort criteria and cache reference](src/README.md#solution_nmr_membrane_proteins)
+for the exact annotation field, filters, output meanings, and an independent
+run with the optional filter enabled.
 
 ## Long-Running Builds
 

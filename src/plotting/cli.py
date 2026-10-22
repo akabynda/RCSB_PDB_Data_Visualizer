@@ -22,6 +22,7 @@ def parse_plot_kinds(raw_value: str) -> list[PlotKind]:
         return [
             PlotKind.METHOD_COUNTS,
             PlotKind.MEMBRANE_PROTEIN_COUNTS,
+            PlotKind.SOLUTION_NMR_MEMBRANE_PROTEINS,
             PlotKind.SOLUTION_NMR_PROGRAM_COUNTS,
             PlotKind.SOLUTION_NMR_MONOMER_PROGRAM_CLUSTERS,
             PlotKind.SOLUTION_NMR_WEIGHT_STATS,
@@ -94,6 +95,7 @@ def parse_args() -> argparse.Namespace:
         default=[
             PlotKind.METHOD_COUNTS,
             PlotKind.MEMBRANE_PROTEIN_COUNTS,
+            PlotKind.SOLUTION_NMR_MEMBRANE_PROTEINS,
             PlotKind.SOLUTION_NMR_PROGRAM_COUNTS,
             PlotKind.SOLUTION_NMR_MONOMER_PROGRAM_CLUSTERS,
             PlotKind.SOLUTION_NMR_WEIGHT_STATS,
@@ -112,7 +114,7 @@ def parse_args() -> argparse.Namespace:
             PlotKind.SOLUTION_NMR_MONOMER_XRAY_RMSD_HISTORICAL,
             PlotKind.SOLUTION_NMR_MONOMER_XRAY_RMSD_PRECISION_CORRELATION,
         ],
-        help="Comma-separated plot kinds or 'all'. Available: method_counts, membrane_protein_counts, solution_nmr_program_counts, solution_nmr_monomer_program_clusters, solution_nmr_weight_stats, solution_nmr_period_boxplot, solution_nmr_period_area, solution_nmr_period_area_share, solution_nmr_period_area_cumulative_share, solution_nmr_monomer_stride_modeled_first_model, solution_nmr_monomer_precision_stride_modeled_first_model_mean, solution_nmr_monomer_precision_stride_modeled_first_model_median, solution_nmr_monomer_quality, solution_nmr_monomer_xray_homologs, solution_nmr_monomer_xray_homologs_historical, solution_nmr_monomer_xray_homolog_timing_share, solution_nmr_monomer_xray_rmsd, solution_nmr_monomer_xray_rmsd_historical, solution_nmr_monomer_xray_rmsd_precision_correlation (default: all).",
+        help="Comma-separated plot kinds or 'all'. Available: method_counts, membrane_protein_counts, solution_nmr_membrane_proteins, solution_nmr_program_counts, solution_nmr_monomer_program_clusters, solution_nmr_weight_stats, solution_nmr_period_boxplot, solution_nmr_period_area, solution_nmr_period_area_share, solution_nmr_period_area_cumulative_share, solution_nmr_monomer_stride_modeled_first_model, solution_nmr_monomer_precision_stride_modeled_first_model_mean, solution_nmr_monomer_precision_stride_modeled_first_model_median, solution_nmr_monomer_quality, solution_nmr_monomer_xray_homologs, solution_nmr_monomer_xray_homologs_historical, solution_nmr_monomer_xray_homolog_timing_share, solution_nmr_monomer_xray_rmsd, solution_nmr_monomer_xray_rmsd_historical, solution_nmr_monomer_xray_rmsd_precision_correlation (default: all).",
     )
     add_input_arguments(parser)
     add_count_output_arguments(parser)
@@ -201,6 +203,15 @@ def main() -> None:
             method_annual_output_svg=args.membrane_method_annual_output_svg,
             method_cumulative_output_png=args.membrane_method_cumulative_output_png,
             method_cumulative_output_svg=args.membrane_method_cumulative_output_svg,
+        )
+
+    if PlotKind.SOLUTION_NMR_MEMBRANE_PROTEINS in args.plots:
+        plotter.plot_solution_nmr_membrane_proteins(
+            data_path=args.nmr_membrane_input,
+            annual_output_png=args.nmr_membrane_annual_output_png,
+            annual_output_svg=args.nmr_membrane_annual_output_svg,
+            coverage_output_png=args.nmr_membrane_coverage_output_png,
+            coverage_output_svg=args.nmr_membrane_coverage_output_svg,
         )
 
     if PlotKind.SOLUTION_NMR_PROGRAM_COUNTS in args.plots:

@@ -16,6 +16,7 @@ class PlotKind(str, Enum):
 
     METHOD_COUNTS = "method_counts"
     MEMBRANE_PROTEIN_COUNTS = "membrane_protein_counts"
+    SOLUTION_NMR_MEMBRANE_PROTEINS = "solution_nmr_membrane_proteins"
     SOLUTION_NMR_PROGRAM_COUNTS = "solution_nmr_program_counts"
     SOLUTION_NMR_MONOMER_PROGRAM_CLUSTERS = "solution_nmr_monomer_program_clusters"
     SOLUTION_NMR_WEIGHT_STATS = "solution_nmr_weight_stats"
@@ -72,6 +73,12 @@ class PlotConfig:
         "Number of membrane protein structures in PDB by deposition year"
     )
     membrane_annual_y_label: str = "Number of membrane protein structures"
+    nmr_membrane_annual_title: str = (
+        "Solution NMR membrane protein entries by deposition year"
+    )
+    nmr_membrane_coverage_title: str = (
+        "PDBTM segment coverage of solution NMR membrane protein entries"
+    )
     membrane_cumulative_title: str = (
         "Cumulative number of membrane protein structures in PDB by deposition year"
     )

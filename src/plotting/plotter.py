@@ -5,6 +5,7 @@ from __future__ import annotations
 from .correlation import CorrelationPlotsMixin
 from .counts import CountPlotsMixin
 from .homologs import HomologPlotsMixin
+from .membrane import MembranePlotsMixin
 from .precision_comparison import PrecisionComparisonPlotsMixin
 from .programs import ProgramPlotsMixin
 from .quality import QualityPlotsMixin
@@ -15,6 +16,7 @@ from .weights import WeightPlotsMixin
 
 class PDBScientificPlotter(
     CountPlotsMixin,
+    MembranePlotsMixin,
     ProgramPlotsMixin,
     WeightPlotsMixin,
     QualityPlotsMixin,

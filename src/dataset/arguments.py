@@ -20,6 +20,7 @@ def parse_dataset_kinds(raw_value: str) -> list[DatasetKind]:
         return [
             DatasetKind.METHOD_COUNTS,
             DatasetKind.MEMBRANE_PROTEIN_COUNTS,
+            DatasetKind.SOLUTION_NMR_MEMBRANE_PROTEINS,
             DatasetKind.SOLUTION_NMR_PROGRAM_COUNTS,
             DatasetKind.SOLUTION_NMR_MONOMER_PROGRAM_CLUSTERS,
             DatasetKind.SOLUTION_NMR_WEIGHTS,
@@ -114,6 +115,29 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Output CSV path for membrane protein counts split by experimental method."
         ),
+    )
+    parser.add_argument(
+        "--solution-nmr-membrane-output",
+        type=Path,
+        default=Path("data/solution_nmr_membrane_proteins.csv"),
+        help="Entry-level membrane cohort CSV; entity, chain, segment and audit files use the same stem.",
+    )
+    parser.add_argument(
+        "--solution-nmr-membrane-cache-dir",
+        type=Path,
+        default=Path("data/rcsb_cache/solution_nmr_membrane_proteins"),
+        help="Cache of raw Search and GraphQL JSON responses for the membrane cohort.",
+    )
+    parser.add_argument(
+        "--solution-nmr-membrane-cache-validation-hours",
+        type=float,
+        default=24.0,
+        help="Reuse verified membrane API responses for this many hours (0 refreshes every request).",
+    )
+    parser.add_argument(
+        "--solution-nmr-membrane-require-multiple-models",
+        action="store_true",
+        help="Require deposited_model_count > 1 for the membrane cohort (OFF by default).",
     )
     parser.add_argument(
         "--solution-nmr-output",

@@ -815,6 +815,9 @@ class BuilderMainDispatchTests(unittest.TestCase):
                     patch.object(dataset_cli, "parse_args", return_value=args)
                 )
                 stack.enter_context(patch.object(dataset_cli, "RCSBClient"))
+                membrane_run = stack.enter_context(
+                    patch.object(dataset_cli, "run_solution_nmr_membrane")
+                )
                 ensure_stride = stack.enter_context(
                     patch.object(
                         homolog_workflows,
@@ -886,6 +889,7 @@ class BuilderMainDispatchTests(unittest.TestCase):
             self.assertEqual(ensure_stride.call_count, 3)
             ensure_stride.assert_called_with("", Path(args.stride_install_dir))
             rmsd_build.assert_called_once()
+            membrane_run.assert_called_once()
 
 
 if __name__ == "__main__":

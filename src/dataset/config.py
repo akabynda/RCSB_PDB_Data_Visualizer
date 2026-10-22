@@ -105,6 +105,7 @@ class DatasetKind(str, Enum):
 
     METHOD_COUNTS = "method_counts"
     MEMBRANE_PROTEIN_COUNTS = "membrane_protein_counts"
+    SOLUTION_NMR_MEMBRANE_PROTEINS = "solution_nmr_membrane_proteins"
     SOLUTION_NMR_PROGRAM_COUNTS = "solution_nmr_program_counts"
     SOLUTION_NMR_MONOMER_PROGRAM_CLUSTERS = "solution_nmr_monomer_program_clusters"
     SOLUTION_NMR_WEIGHTS = "solution_nmr_weights"

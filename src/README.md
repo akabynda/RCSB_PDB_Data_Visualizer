@@ -18,6 +18,7 @@ noted otherwise, run every command below from the repository root.
 - [Dataset Reference](#dataset-reference)
   - [`method_counts`](#method_counts)
   - [`membrane_protein_counts`](#membrane_protein_counts)
+  - [`solution_nmr_membrane_proteins`](#solution_nmr_membrane_proteins)
   - [`solution_nmr_program_counts`](#solution_nmr_program_counts)
   - [`solution_nmr_monomer_program_clusters`](#solution_nmr_monomer_program_clusters)
   - [`solution_nmr_weights`](#solution_nmr_weights)
@@ -46,7 +47,7 @@ The implementation is organized by responsibility under `src/dataset/` and
 | `dataset/client/` | HTTP transport, RCSB searches, metadata, NMR records, and homology API access. |
 | `dataset/structures.py`, `dataset/coordinates.py`, `dataset/matching.py`, `dataset/geometry.py` | Coordinate conversion and parsing, sequence matching, and RMSD calculations. |
 | `dataset/pdb_normalization.py` | Shared conformer selection and polypeptide-membership metadata used by coordinate consumers. |
-| `dataset/cache.py`, `dataset/downloads.py`, `dataset/ca_cache.py` | Coordinate downloads, cache validation and locking, and first-model CA caches. |
+| `dataset/cache.py`, `dataset/downloads.py`, `dataset/ca_cache.py`, `dataset/api_cache.py` | Coordinate downloads, cache validation and locking, first-model CA caches, and raw membrane API response caching. |
 | `dataset/stride.py`, `dataset/stride_install.py` | STRIDE execution, state caching, and managed executable installation. |
 | `dataset/programs.py`, `dataset/program_statistics.py`, `dataset/history.py` | Refinement-program parsing and summaries, and historical homolog filtering. |
 | `dataset/builders/` | Dataset-specific collection and computation, including shared RMSD output generation. |
@@ -54,7 +55,7 @@ The implementation is organized by responsibility under `src/dataset/` and
 | `dataset/arguments.py`, `dataset/cli.py`, `dataset/workflows/` | CLI flags, execution order, and per-dataset workflows; homolog resume validation is separate from streaming output. |
 | `plotting/config.py`, `plotting/constants.py`, `plotting/tables.py` | Plot settings, shared constants, CSV caching, and tabular data preparation. |
 | `plotting/style.py`, `plotting/rendering.py` | Figure styling, shared rendering functions, and output variants. |
-| `plotting/counts.py`, `weights.py`, `quality.py`, `programs.py`, `homologs.py`, `rmsd.py`, `correlation.py` | Plot families, each in its own module under `plotting/`. |
+| `plotting/counts.py`, `membrane.py`, `weights.py`, `quality.py`, `programs.py`, `homologs.py`, `rmsd.py`, `correlation.py` | Plot families, each in its own module under `plotting/`. |
 | `plotting/plotter.py`, `plotting/cli.py`, `plotting/cli_options/` | Composition of `PDBScientificPlotter`, plot dispatch, and grouped command-line options. |
 
 Build dependencies from shared foundations toward orchestration:
@@ -448,6 +449,79 @@ Outputs:
 
 - `data/membrane_protein_counts_by_year.csv`
 - `data/membrane_protein_method_counts_by_year.csv`
+
+### `solution_nmr_membrane_proteins`
+
+Collects an entry-level cohort from the RCSB Search and Data APIs with these
+criteria:
+
+1. Contains at least one polypeptide chain (`polypeptide(L)` or `polypeptide(D)`).
+2. Solved exclusively by `SOLUTION NMR`; mixed solution/solid-state records are excluded.
+3. At least one protein entity has an annotation in
+   `rcsb_polymer_entity_annotation.type` equal to `OPM`, `PDBTM`, `MemProtMD`, or `mpstruc`.
+4. Optionally, more than one deposited model (`rcsb_entry_info.deposited_model_count > 1`).
+   This filter is **off by default**.
+
+The membrane marker is an external annotation exposed by RCSB. A UniProt
+membrane annotation alone does not select an entry. There are no restrictions
+on HETATM, oligomeric state, length, core, or deposition year. Models within an
+ensemble are not counted as independent entries. The collector does not run
+TM prediction or assign full-length/fragment classes.
+
+```bash
+python src/pdb_dataset_builder.py --datasets solution_nmr_membrane_proteins
+python src/pdb_plot.py --plots solution_nmr_membrane_proteins --svg
+```
+
+The main CSV is `data/solution_nmr_membrane_proteins.csv`, one row per PDB entry.
+Companion files use the same stem:
+
+| Suffix | Unit and contents |
+| --- | --- |
+| `_entities.csv` | Protein entity: annotations, deposited sequence and hash, UniProt identifiers. |
+| `_chains.csv` | Protein chain instance: label/auth chain IDs, modeled residue count, PDBTM availability. |
+| `_segments.csv` | PDBTM `MEMBRANE_SEGMENT` interval, with raw positions and validation status. |
+| `_duplicate_candidates.csv` | One-model/ensemble pair with identical deposited protein sequence multisets (including chain multiplicity) and a shared DOI, positive PubMed ID, or explicit related-PDB link. Candidates are not automatically removed. |
+| `_filtered.csv` | Excluded entry ID, deposition year and reason. |
+| `_manifest.json` | Query/source provenance, parameters, sequential filter counts, IDs, output hashes, command, code hashes and software versions. |
+
+Unannotated partner chains remain in the tables with `is_membrane=false`.
+`has_pdbtm_annotation` records the entity-level PDBTM marker separately from
+chain-level residue intervals. Intervals use one-based `label_seq_id` positions
+in the deposited polymer sequence. Bounds must be positive integers, ordered,
+and within the sequence length when available. Invalid intervals remain in the
+segment table with an explanation; they are not clipped or counted as valid.
+For entry-level `pdbtm_segment_status`, `complete` means every membrane-marked
+protein chain has at least one valid interval and no invalid intervals;
+`partial` means some valid intervals exist but chain coverage or interval
+validity is incomplete; `missing` means no valid interval is available.
+These states describe annotation availability, not biological completeness.
+Missing model counts stay blank; enabling criterion 4 rejects them with a
+separate reason. No sequence matching to a full source protein is done here.
+
+Raw JSON responses are cached under
+`data/rcsb_cache/solution_nmr_membrane_proteins/`, keyed by URL, exact request
+and schema version. Response bodies use SHA-256 filenames; refreshes preserve
+previous bodies. The default validation interval is 24 hours; set
+`--solution-nmr-membrane-cache-validation-hours 0` to refresh. Failed requests
+raise an error rather than returning an empty or stale successful result.
+CSV files are replaced atomically, and the manifest is published last with
+their hashes. Immutable copies of run manifests are kept in the cache.
+
+To inspect the optional filter without replacing the unfiltered cohort:
+
+```bash
+python src/pdb_dataset_builder.py --datasets solution_nmr_membrane_proteins \
+  --solution-nmr-membrane-require-multiple-models \
+  --solution-nmr-membrane-output data/solution_nmr_membrane_multiple_models.csv
+```
+
+The plot family reads the entry CSV (`--nmr-membrane-input`) and uses the common
+plot cutoff of deposition year 2024. It writes
+`solution_nmr_membrane_proteins_by_year` (one, multiple, unknown model counts)
+and `solution_nmr_membrane_pdbtm_coverage` (PDBTM label/interval availability)
+with the standard title/frame variants. Counts are PDB entries, not unique
+proteins. Unknown years are reported and omitted from year-limited plots.
 
 ### `solution_nmr_program_counts`
 

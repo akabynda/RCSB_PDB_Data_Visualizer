@@ -24,6 +24,7 @@ from src.dataset.workflows.counts import (
 )
 from src.dataset.workflows.historical_homologs import run_historical_homologs
 from src.dataset.workflows.homologs import run_homologs
+from src.dataset.workflows.membrane import run_solution_nmr_membrane
 from src.dataset.workflows.nmr import (
     run_experiments,
     run_program_counts,
@@ -49,6 +50,9 @@ def _selected_dataset_output_paths(
         DatasetKind.MEMBRANE_PROTEIN_COUNTS: (
             Path(args.membrane_counts_output),
             Path(args.membrane_method_counts_output),
+        ),
+        DatasetKind.SOLUTION_NMR_MEMBRANE_PROTEINS: (
+            Path(args.solution_nmr_membrane_output),
         ),
         DatasetKind.SOLUTION_NMR_PROGRAM_COUNTS: (
             Path(args.solution_nmr_program_counts_output),
@@ -130,6 +134,7 @@ def main() -> None:
     runners = (
         (DatasetKind.METHOD_COUNTS, run_method_counts),
         (DatasetKind.MEMBRANE_PROTEIN_COUNTS, run_membrane_counts),
+        (DatasetKind.SOLUTION_NMR_MEMBRANE_PROTEINS, run_solution_nmr_membrane),
         (DatasetKind.SOLUTION_NMR_PROGRAM_COUNTS, run_program_counts),
         (DatasetKind.SOLUTION_NMR_WEIGHTS, run_weights),
         (DatasetKind.SOLUTION_NMR_MONOMER_EXPERIMENTS, run_experiments),
