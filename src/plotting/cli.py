@@ -215,6 +215,15 @@ def main() -> None:
             residues_output_png=args.nmr_membrane_residues_output_png,
             residues_output_svg=args.nmr_membrane_residues_output_svg,
         )
+        plotter.plot_solution_nmr_membrane_trends(
+            data_path=args.nmr_membrane_input,
+            composition_output_png=args.nmr_membrane_composition_output_png,
+            composition_output_svg=args.nmr_membrane_composition_output_svg,
+            fraction_output_png=args.nmr_membrane_fraction_output_png,
+            fraction_output_svg=args.nmr_membrane_fraction_output_svg,
+            period_output_png=args.nmr_membrane_period_output_png,
+            period_output_svg=args.nmr_membrane_period_output_svg,
+        )
 
     if PlotKind.SOLUTION_NMR_PROGRAM_COUNTS in args.plots:
         plotter.plot_solution_nmr_program_counts(

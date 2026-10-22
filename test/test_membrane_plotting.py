@@ -11,6 +11,7 @@ import pytest
 
 from src.pdb_plot import PDBScientificPlotter, PlotConfig
 from src.plotting.membrane import TMDET_STATUSES
+from src.plotting.membrane_statistics import _fraction_statistics, membrane_time_statistics
 
 
 def cohort_table():
@@ -81,7 +82,9 @@ def test_all_standard_variants_and_data_counts(plotter, empty):
         ax = kwargs['fig'].axes[0]
         name = kwargs['output_png'].name
         rendered.append(name)
-        if name.startswith(('annual', 'status')):
+        if name.startswith('annual'):
+            assert sum(p.get_data().values.sum() for p in ax.patches) == (0 if empty else 5)
+        elif name.startswith('status'):
             assert sum(p.get_height() for p in ax.patches) == (0 if empty else 5)
         else:
             assert sum(len(c.get_offsets()) for c in ax.collections) == (0 if empty else 2)
@@ -91,3 +94,99 @@ def test_all_standard_variants_and_data_counts(plotter, empty):
             for stem in ('annual', 'status', 'residues') for ext in ('png', 'svg')])
     assert len(rendered) == 12
     assert plt.get_fignums() == []
+
+
+def test_fraction_statistics_weight_entries_and_preserve_missing_years(plotter):
+    table = plotter._prepare_solution_nmr_membrane_table(cohort_table())
+    counts, fractions = membrane_time_statistics(table)
+    assert counts['period_start'].tolist() == [2022, 2023, 2024]
+    assert counts['n_entries'].tolist() == [3, 0, 2]
+    assert counts['n_usable'].tolist() == [2, 0, 0]
+    assert counts['n_with_tm'].tolist() == [1, 0, 0]
+    assert counts['n_without_tm'].tolist() == [1, 0, 0]
+    assert counts['n_unavailable'].tolist() == [1, 0, 2]
+    assert counts[list(TMDET_STATUSES)].sum(axis=1).tolist() == [3, 0, 2]
+    all_entries = fractions.loc[fractions['group'] == 'all_usable'].set_index('period_start')
+    positive = fractions.loc[fractions['group'] == 'with_tm'].set_index('period_start')
+    # Mean of 25/100 and 0/80, not the pooled residue fraction 25/180.
+    assert all_entries.loc[2022, 'mean'] == .125
+    assert all_entries.loc[2022, ['q1', 'med', 'q3']].tolist() == [.0625, .125, .1875]
+    assert positive.loc[2022, 'mean'] == .25
+    assert all_entries.loc[[2023, 2024], 'mean'].isna().all()
+    assert positive.loc[[2023, 2024], 'mean'].isna().all()
+
+
+def test_zero_fraction_is_observed_but_positive_subgroup_is_empty(plotter):
+    table = plotter._prepare_solution_nmr_membrane_table(cohort_table().iloc[[1]])
+    counts, fractions = membrane_time_statistics(table)
+    assert counts['n_without_tm'].tolist() == [1]
+    assert fractions['n'].tolist() == [1, 0]
+    assert fractions.iloc[0]['mean'] == 0
+    assert np.isnan(fractions.iloc[1]['mean'])
+
+
+def test_five_year_calendar_boundaries_and_empty_bins(plotter):
+    table = cohort_table().iloc[:3].copy()
+    table['year'] = [1999, 2000, 2010]
+    counts, fractions = membrane_time_statistics(
+        plotter._prepare_solution_nmr_membrane_table(table), period_years=5)
+    assert counts['period_start'].tolist() == [1995, 2000, 2005, 2010]
+    assert counts['period_end'].tolist() == [1999, 2004, 2009, 2014]
+    assert counts['n_entries'].tolist() == [1, 1, 0, 1]
+    assert counts['n_unavailable'].tolist() == [0, 0, 0, 1]
+    assert fractions.loc[fractions['period_start'].isin([2005, 2010]), 'mean'].isna().all()
+
+
+def test_box_summary_includes_extreme_observations_and_zero_iqr():
+    # Known quartiles: Q1=Q2=Q3=0; the positive observation remains a flier.
+    stats = _fraction_statistics([0, 0, 0, 0, 1])
+    assert stats == dict(n=5, mean=.2, q1=0, med=0, q3=0,
+                         whislo=0, whishi=0, fliers=[1])
+    equal = _fraction_statistics([.5, .5, .5])
+    assert equal['whislo'] == equal['whishi'] == .5
+    assert equal['fliers'] == []
+
+
+@pytest.mark.parametrize('empty', [False, True])
+def test_trend_exports_include_samples_and_omit_unknown_fractions(plotter, tmp_path, empty):
+    data = cohort_table().iloc[:0] if empty else cohort_table()
+    rendered = []
+
+    def inspect(**kwargs):
+        ax = kwargs['fig'].axes[0]
+        name = kwargs['output_png'].name
+        rendered.append(name)
+        if name.startswith('composition'):
+            assert np.nansum([p.get_data().values for p in ax.patches]) == (0 if empty else 200)
+            if not empty:
+                assert all(np.isnan(p.get_data().values[1]) for p in ax.patches)
+        elif name.startswith('fraction'):
+            assert len(ax.patches) == (0 if empty else 2)
+            if not empty:
+                np.testing.assert_equal(ax.patches[0].get_data().values, [12.5, np.nan, np.nan])
+                np.testing.assert_equal(ax.patches[1].get_data().values, [25, np.nan, np.nan])
+                np.testing.assert_equal(ax.patches[0].get_data().edges, [2021.5, 2022.5, 2023.5, 2024.5])
+        else:
+            assert len(ax.patches) == (0 if empty else 2)
+        assert ax.get_ylim()[0] == 0
+
+    with patch.object(plotter, '_read_csv', return_value=data), patch.object(
+        plotter, '_save_figure_files', side_effect=inspect,
+    ):
+        plotter.plot_solution_nmr_membrane_trends(Path('data.csv'), *[
+            tmp_path / f'{stem}.{ext}' for stem in ('composition', 'fraction', 'period')
+            for ext in ('png', 'svg')])
+    assert len(rendered) == 12
+    assert plt.get_fignums() == []
+    assert len(list(tmp_path.rglob('*.csv'))) == 3
+    annual = pd.read_csv(tmp_path / 'fraction/fraction.csv')
+    period = pd.read_csv(tmp_path / 'period/period.csv')
+    if empty:
+        assert annual.empty and period.empty
+    else:
+        assert annual['n'].sum() == 3
+        assert annual['mean'].isna().sum() == 4
+        assert period['period_start'].tolist() == [2020, 2020]
+        assert period['n_entries'].tolist() == [5, 5]
+        assert period['n_unavailable'].tolist() == [3, 3]
+        assert period['fliers'].tolist() == ['[]', '[]']

@@ -80,6 +80,9 @@ class PlotConfig:
         "TmDet results for solution NMR membrane protein entries"
     )
     nmr_membrane_residues_title: str = "Delineation of NMR structures of membrane proteins"
+    nmr_membrane_composition_title: str = "TM-region detection in solution NMR entries by year"
+    nmr_membrane_fraction_title: str = "TM residue fraction in solution NMR entries by year"
+    nmr_membrane_period_title: str = "Distribution of TM residue fractions by deposition period"
     membrane_cumulative_title: str = (
         "Cumulative number of membrane protein structures in PDB by deposition year"
     )

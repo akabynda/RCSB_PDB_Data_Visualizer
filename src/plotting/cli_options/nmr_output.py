@@ -38,6 +38,17 @@ def add_nmr_output_arguments(parser: argparse.ArgumentParser) -> None:
             default=Path(f"figures/solution_nmr_membrane_tmdet_residues.{extension}"),
             help=f"Output {extension.upper()} for first-model TmDet residue counts.",
         )
+    for name, stem in (
+        ("composition", "solution_nmr_membrane_tmdet_composition_by_year"),
+        ("fraction", "solution_nmr_membrane_tmdet_fraction_by_year"),
+        ("period", "solution_nmr_membrane_tmdet_fraction_by_period"),
+    ):
+        for extension in ("png", "svg"):
+            parser.add_argument(
+                f"--nmr-membrane-{name}-output-{extension}", type=Path,
+                default=Path(f"figures/{stem}.{extension}"),
+                help=f"Output {extension.upper()} for TmDet {name} statistics; CSV accompanies PNG.",
+            )
     parser.add_argument(
         "--nmr-avg-output-png",
         type=Path,

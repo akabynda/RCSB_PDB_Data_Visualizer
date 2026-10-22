@@ -197,7 +197,8 @@ and a C++20 compiler are required), caches calculations, and saves all region
 categories and raw outputs. Existing binaries can be supplied with
 `--tmdet-executable /path/to/tmdet`. The entry CSV, companion tables and manifest
 share the stem `data/solution_nmr_membrane_proteins`. PNG figures show deposition
-counts, calculation status and modeled residue counts inside H/B versus elsewhere.
+counts, calculation status, modeled residue counts, annual TM fractions and
+five-year fraction distributions. Time-summary CSVs accompany the corresponding PNGs.
 See the [protocol and cache reference](src/README.md#solution_nmr_membrane_proteins).
 
 ## Long-Running Builds
