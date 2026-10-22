@@ -567,7 +567,7 @@ export their source statistics as CSV beside the PNG variants:
 | Stem (after `solution_nmr_membrane_tmdet_`) | Statistic |
 | --- | --- |
 | `composition_by_year` | Annual shares with H/B residues, with zero H/B residues, and with incomplete/unavailable results; denominator: all entries in that year |
-| `fraction_by_year` | Annual mean H/B fraction, separately for all usable entries and entries with H/B residues |
+| `fraction_by_year` | Annual mean H/B fraction, separately for entries with complete TmDet results and the subset with H/B residues |
 | `fraction_by_period` | Distributions of the same fractions in calendar periods 1990–1994, 1995–1999, etc. |
 
 The fraction is `(H + B residues) / modeled protein residues` in the first model,
@@ -575,8 +575,10 @@ summed over chains of each PDB entry. Entries have equal weight. Valid negative
 results contribute zero; incomplete/unavailable results are excluded from fraction
 statistics. The CSV fractions use 0–1; figures use percent. Boxplots show linear
 25th/50th/75th percentiles, Tukey whiskers (1.5 IQR), all outliers and group sizes;
-CSV `fliers` cells contain JSON arrays. Annual curves use the same centered steps
-as `pdb_method_trends`; years with no denominator remain gaps. Unknown years are
+CSV `fliers` cells contain JSON arrays. Annual composition and fraction plots use
+lines with markers; the deposition-count plot uses centered steps as in
+`pdb_method_trends`. Group sizes and excluded counts are recorded in the CSVs.
+Years with no denominator remain gaps. Unknown years are
 reported and omitted. Summaries are descriptive; repeated proteins are not
 deduplicated, and no hypothesis tests or confidence intervals are applied.
 

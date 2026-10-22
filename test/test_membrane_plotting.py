@@ -157,15 +157,15 @@ def test_trend_exports_include_samples_and_omit_unknown_fractions(plotter, tmp_p
         name = kwargs['output_png'].name
         rendered.append(name)
         if name.startswith('composition'):
-            assert np.nansum([p.get_data().values for p in ax.patches]) == (0 if empty else 200)
+            assert np.nansum([line.get_ydata() for line in ax.lines]) == (0 if empty else 200)
             if not empty:
-                assert all(np.isnan(p.get_data().values[1]) for p in ax.patches)
+                assert all(np.isnan(line.get_ydata()[1]) for line in ax.lines)
         elif name.startswith('fraction'):
-            assert len(ax.patches) == (0 if empty else 2)
+            assert len(ax.lines) == (0 if empty else 2)
             if not empty:
-                np.testing.assert_equal(ax.patches[0].get_data().values, [12.5, np.nan, np.nan])
-                np.testing.assert_equal(ax.patches[1].get_data().values, [25, np.nan, np.nan])
-                np.testing.assert_equal(ax.patches[0].get_data().edges, [2021.5, 2022.5, 2023.5, 2024.5])
+                np.testing.assert_equal(ax.lines[0].get_ydata(), [12.5, np.nan, np.nan])
+                np.testing.assert_equal(ax.lines[1].get_ydata(), [25, np.nan, np.nan])
+                np.testing.assert_equal(ax.lines[0].get_xdata(), [2022, 2023, 2024])
         else:
             assert len(ax.patches) == (0 if empty else 2)
         assert ax.get_ylim()[0] == 0

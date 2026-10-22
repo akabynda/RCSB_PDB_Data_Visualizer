@@ -96,7 +96,6 @@ class MembranePlotsMixin:
             if not use_year_ticks:
                 ax.set_xticks(annual.index)
             ax.yaxis.set_major_locator(MaxNLocator(integer=True))
-            ax.text(.02, .95, f'n = {len(table)} PDB entries', transform=ax.transAxes, va='top', fontsize=11)
 
         def draw_status(ax):
             bars = ax.bar(range(len(statuses)), statuses.to_numpy(), color=colors, edgecolor='black', linewidth=.8)
@@ -144,7 +143,7 @@ class MembranePlotsMixin:
         annual, annual_fractions = membrane_time_statistics(table)
         _, period_fractions = membrane_time_statistics(table, period_years=5)
         colors = ('#0072B2', '#D55E00')
-        labels = ('All usable entries (including zeros)', 'Entries with TM residues')
+        labels = ('Entries with complete TmDet results', 'Entries with detected TM regions')
         use_year_ticks = not annual.empty and annual['period_start'].max() - annual['period_start'].min() >= YEAR_MAJOR_TICK_STEP
 
         def year_axis(ax):
@@ -155,42 +154,41 @@ class MembranePlotsMixin:
 
         def draw_composition(ax):
             total = annual['n_entries'].replace(0, np.nan).to_numpy(dtype=float)
-            for column, label, color, line in zip(
+            for column, label, color, line, marker in zip(
                 ('n_with_tm', 'n_without_tm', 'n_unavailable'),
-                ('TM residues present', 'Zero TM residues', 'Incomplete / unavailable'),
+                ('TM regions detected', 'No TM regions detected', 'Incomplete / unavailable'),
                 ('#0072B2', '#E69F00', '#777777'), ('-', '--', ':'),
+                ('o', 's', '^'),
             ):
                 if len(annual):
-                    ax.stairs(annual[column].to_numpy(dtype=float) / total * 100,
-                              self._step_edges(annual['period_start']), baseline=None,
-                              linewidth=2.0, color=color, linestyle=line, label=label)
-            for row in annual.itertuples():
-                ax.text(row.period_start, 103, str(row.n_entries), ha='center', fontsize=7)
-            ax.text(.01, .98, 'n = PDB entries per year', transform=ax.transAxes, va='top', fontsize=9)
-            ax.set_ylim(0, 125)
+                    ax.plot(annual['period_start'].to_numpy(dtype=int),
+                            annual[column].to_numpy(dtype=float) / total * 100,
+                            linewidth=1.3, color=color, linestyle=line, marker=marker,
+                            markersize=4, markerfacecolor='white', markeredgewidth=.9,
+                            label=label, clip_on=False)
+            ax.set_ylim(0, 100)
             ax.set_yticks([0, 20, 40, 60, 80, 100])
             year_axis(ax)
             if len(annual):
                 self._add_legend(ax, loc='upper center', bbox_to_anchor=(.5, -.17), ncol=3, fontsize=8)
 
         def draw_fraction(ax):
-            for group, label, color, line in zip(
+            for group, label, color, line, marker, size in zip(
                 FRACTION_GROUPS, labels, colors, ('-', '--'),
+                ('o', 's'), (5, 3.5),
             ):
                 rows = annual_fractions.loc[annual_fractions['group'] == group]
                 if len(rows):
-                    ax.stairs(rows['mean'].to_numpy(dtype=float) * 100,
-                              self._step_edges(rows['period_start']), baseline=None,
-                              color=color, linestyle=line, linewidth=2.0,
-                              label=f'{label} (n = {int(rows["n"].sum())})', clip_on=False)
+                    ax.plot(rows['period_start'].to_numpy(dtype=int),
+                            rows['mean'].to_numpy(dtype=float) * 100,
+                            color=color, linestyle=line, linewidth=1.3, marker=marker,
+                            markersize=size, markerfacecolor='white', markeredgewidth=.9,
+                            label=label, clip_on=False)
             ax.set_ylim(0, 100)
             ax.set_yticks([0, 20, 40, 60, 80, 100])
             year_axis(ax)
             if len(annual):
                 self._add_legend(ax, loc='upper left', fontsize=9)
-            omitted = int(annual['n_unavailable'].sum())
-            ax.text(.98, .03, f'Equal weight per entry; {omitted} incomplete/unavailable omitted',
-                    transform=ax.transAxes, ha='right', fontsize=8)
 
         def draw_period(ax):
             periods = period_fractions['period_start'].drop_duplicates().tolist()
