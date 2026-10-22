@@ -220,7 +220,7 @@ class MembranePlotsMixin:
             if not use_year_ticks:
                 ax.set_xticks(annual['period_start'].to_numpy(dtype=int))
             if ax.collections:
-                self._add_legend(ax, loc='upper left', fontsize=10)
+                self._add_legend(ax, loc='lower right', fontsize=10)
 
         def draw_period(ax):
             periods = period_fractions['period_start'].drop_duplicates().tolist()
@@ -249,7 +249,7 @@ class MembranePlotsMixin:
             ax.set_yticks([0, 20, 40, 60, 80, 100])
             handles = [Patch(facecolor=color, edgecolor='black', alpha=.45, hatch=hatch, label=label)
                        for color, hatch, label in zip(colors, ('//', ''), labels)]
-            self._add_legend(ax, handles=handles, loc='upper center', bbox_to_anchor=(.5, -.23), fontsize=9)
+            self._add_legend(ax, handles=handles, loc='upper center', fontsize=9)
 
         for output, summary in ((composition_output_png, annual),
                                 (fraction_output_png, annual_fractions),
