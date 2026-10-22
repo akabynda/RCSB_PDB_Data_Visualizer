@@ -15,9 +15,6 @@ Run the complete test suite:
 python -m pytest -q
 ```
 
-Discovery is limited to `test/`; downloaded native dependency sources and
-ignored analysis directories are not part of the application test suite.
-
 Measure branch coverage for the application code:
 
 ```bash
