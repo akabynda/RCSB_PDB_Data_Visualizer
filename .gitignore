@@ -8,5 +8,5 @@ htmlcov/
 history
 *.docx
 /experiments
-/AGENT.md
+/AGENTS.md
 /analysis/membrane_nmr/
