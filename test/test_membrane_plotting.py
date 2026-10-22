@@ -153,19 +153,33 @@ def test_trend_exports_include_samples_and_omit_unknown_fractions(plotter, tmp_p
     rendered = []
 
     def inspect(**kwargs):
-        ax = kwargs['fig'].axes[0]
+        axes = kwargs['fig'].axes
+        ax = axes[0]
         name = kwargs['output_png'].name
         rendered.append(name)
         if name.startswith('composition'):
-            assert np.nansum([line.get_ydata() for line in ax.lines]) == (0 if empty else 200)
+            assert len(ax.collections) == (0 if empty else 6)
             if not empty:
-                assert all(np.isnan(line.get_ydata()[1]) for line in ax.lines)
+                # Three shares sum to 100%; the empty 2023 bin remains entirely blank.
+                for area, x_bounds, y_bounds in zip(ax.collections,
+                    [(2021.5, 2022.5)] * 3 + [(2023.5, 2024.5)] * 3,
+                    [(0, 100 / 3), (100 / 3, 200 / 3), (200 / 3, 100),
+                     (0, 0), (0, 0), (0, 100)],
+                ):
+                    vertices = area.get_paths()[0].vertices
+                    np.testing.assert_equal([vertices[:, 0].min(), vertices[:, 0].max()], x_bounds)
+                    # Only rounding in conversion to percent is tolerated.
+                    np.testing.assert_allclose([vertices[:, 1].min(), vertices[:, 1].max()],
+                                               y_bounds, rtol=0, atol=1e-12)
         elif name.startswith('fraction'):
-            assert len(ax.lines) == (0 if empty else 2)
-            if not empty:
-                np.testing.assert_equal(ax.lines[0].get_ydata(), [12.5, np.nan, np.nan])
-                np.testing.assert_equal(ax.lines[1].get_ydata(), [25, np.nan, np.nan])
-                np.testing.assert_equal(ax.lines[0].get_xdata(), [2022, 2023, 2024])
+            assert len(axes) == 2
+            for panel, tm_fraction in zip(axes, (12.5, 25)):
+                assert len(panel.collections) == (0 if empty else 2)
+                for area, bounds in zip(panel.collections, [(0, tm_fraction), (tm_fraction, 100)]):
+                    vertices = area.get_paths()[0].vertices
+                    np.testing.assert_equal([vertices[:, 0].min(), vertices[:, 0].max()], [2021.5, 2022.5])
+                    np.testing.assert_equal([vertices[:, 1].min(), vertices[:, 1].max()], bounds)
+                assert panel.spines['top'].get_visible() == ('open_axes' not in name)
         else:
             assert len(ax.patches) == (0 if empty else 2)
         assert ax.get_ylim()[0] == 0
