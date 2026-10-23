@@ -1,114 +1,70 @@
 # RCSB PDB Data Visualizer
 
-RCSB PDB Data Visualizer downloads the structural data needed for the
-accompanying article, builds its CSV datasets, and renders the article figures.
-This README contains the steps required to reproduce those results.
+Downloads structural data from RCSB PDB, builds CSV datasets, and generates the
+figures for the accompanying article. Plots include deposition years through
+2024; rebuilding queries the RCSB records available at the time of the run.
 
 ## Table of Contents
 
 - [Requirements](#requirements)
 - [Setup](#setup)
-- [Reproduce All Article Figures](#reproduce-all-article-figures)
-- [Reproduce Individual Article Figures](#reproduce-individual-article-figures)
-- [Solution-NMR Membrane Cohort](#solution-nmr-membrane-cohort)
-- [Long-Running Builds](#long-running-builds)
-- [Technical Reference](#technical-reference)
+- [Reproduce All Figures](#reproduce-all-figures)
+- [Reproduce Individual Figures](#reproduce-individual-figures)
+  - [Figure 1](#figure-1)
+  - [Figure 2](#figure-2)
+  - [Figure 3](#figure-3)
+  - [Figure 4](#figure-4)
+  - [Figure 5](#figure-5)
+  - [Figure 6](#figure-6)
+  - [Figure 7](#figure-7)
+  - [Figure 8](#figure-8)
+  - [Figure 99](#figure-99)
+- [Outputs](#outputs)
+- [Reference](#reference)
 - [License](#license)
 
 ## Requirements
 
-- Python 3.10 or newer.
-- Network access for dataset builds. Budget about 100 GiB of free disk space
-  for a full build, including coordinate caches and temporary files; actual
-  usage depends on the selected datasets and downloaded structures.
-- Git, GNU Make, and a C compiler (`gcc`, `cc`, or `clang`) for the first
-  automatic STRIDE build used by Figures 3–7. These tools are not needed when a
-  working STRIDE executable is already installed or supplied explicitly.
-
-Run every command below from the repository root.
+- Python 3.10 or newer and network access.
+- Sufficient disk space for downloaded coordinates and calculations; a full
+  build can require about 100 GiB.
+- Figures 3–7: STRIDE, or Git, GNU Make and a C compiler for its automatic
+  installation on macOS/Linux. On Windows, use WSL or supply a prebuilt STRIDE.
+- Figure 99: TmDet, or CMake and a C++20 compiler for its automatic installation.
 
 ## Setup
-
-Clone the [source repository][repository] if it is not already available:
 
 ```bash
 git clone https://github.com/akabynda/RCSB_PDB_Data_Visualizer.git
 cd RCSB_PDB_Data_Visualizer
-```
-
-Create and activate a virtual environment, then install the pinned Python
-dependencies:
-
-```bash
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -r requirements.txt
 ```
 
-Figures 3–7 also require STRIDE. On macOS and Linux, the first dependent command
-uses an installed or managed executable when available; otherwise it downloads
-the pinned [upstream source][stride-repository] and builds it under `data/stride/`.
-Later commands on the same platform reuse that executable. The first automatic
-build also needs GitHub access.
+Run the following commands from the repository root with this environment
+active. The builder installs STRIDE and TmDet when needed. To use existing
+executables, pass `--solution-nmr-monomer-stride-executable /path/to/stride` or
+`--tmdet-executable /path/to/tmdet` to the builder.
 
-If STRIDE is installed elsewhere, pass its executable explicitly. An invalid
-explicit path is reported as an error and does not trigger an automatic
-download:
-
-```text
---solution-nmr-monomer-stride-executable /path/to/stride
-```
-
-Use `--stride-install-dir /another/directory` to change the root of the managed
-installation. Native Windows users should run the builder in WSL or provide a
-prebuilt executable explicitly. See the [technical STRIDE
-reference](src/README.md#stride) for executable lookup, installation, and cache details.
-
-## Reproduce All Article Figures
-
-Build every dataset in dependency order, including the additional analyses beyond the article figures:
+## Reproduce All Figures
 
 ```bash
 python src/pdb_dataset_builder.py --datasets all
-```
-
-This is a long-running operation. It downloads coordinate files, queries RCSB
-PDB, installs and runs STRIDE when necessary, searches for X-ray homologs, and
-calculates RMSD values.
-
-After the datasets have been created in `data/`, render all figures:
-
-```bash
 python src/pdb_plot.py --plots all
 ```
 
-Each figure is written to its own directory under `figures/`. The base PNG has
-the same name as its directory, with a title and a closed frame. Three additional
-variants use the suffixes `_no_title`, `_open_axes`, and `_no_title_open_axes`.
-The article uses the titled `_open_axes.png` variants for Figures 1–6 and 8,
-and the base PNG with a closed frame for Figure 7.
+This runs all supported analyses, including those beyond the article figures.
+The full build downloads coordinates, searches for homologs and calculates
+structural comparisons, so it can take a long time.
 
-## Reproduce Individual Article Figures
+The builder writes CSV datasets to `data/`; the plotter reads them and writes
+PNGs under `figures/`. See [Outputs](#outputs) to locate each figure. Input/output
+path options are listed by `--help`; add `--svg` to export SVGs as well.
+For individual figures, run the commands below. Figures 6 and 7 use homologs
+selected at 100% sequence identity.
 
-Run only the commands for the required figure to avoid building unrelated
-datasets. Figures 6 and 7 use X-ray homologs at 100% sequence identity.
-
-The main output stems are listed below.
-
-| Figure | Main output stem(s) |
-| --- | --- |
-| 1 | `pdb_method_trends` |
-| 2A | `solution_nmr_mean_weight_by_year` |
-| 2B | `solution_nmr_area_share_by_weight_category` |
-| 3 | `solution_nmr_monomer_stride_modeled_first_model_by_year` |
-| 4 | `solution_nmr_monomer_precision_stride_modeled_first_model_median_rmsd_by_year` |
-| 5 | `solution_nmr_monomer_xray_homologs_95_timing_share_by_year` |
-| 6 | `solution_nmr_monomer_xray_min_median_rmsd_by_year` |
-| 7 | `solution_nmr_monomer_xray_min_rmsd_precision_correlation` |
-| 8A | `solution_nmr_monomer_quality_clashscore_by_year` |
-| 8B | `solution_nmr_monomer_quality_ramachandran_outliers_by_year` |
-| 8C | `solution_nmr_monomer_quality_sidechain_outliers_by_year` |
-| 8D | `solution_nmr_monomer_program_cluster_share_by_year` |
+## Reproduce Individual Figures
 
 ### Figure 1
 
@@ -142,20 +98,6 @@ python src/pdb_dataset_builder.py \
 python src/pdb_plot.py \
   --plots solution_nmr_monomer_precision_stride_modeled_first_model_median
 ```
-
-To add the core/secondary-structure RMSD histogram comparison, use the existing
-secondary-structure dataset:
-
-```bash
-python src/pdb_plot.py \
-  --plots solution_nmr_monomer_precision_stride_modeled_first_model_median \
-  --nmr-monomer-precision-secondary-structure-input data/solution_nmr_monomer_precision_stride_modeled_first_model_secondary_structure.csv
-```
-
-The `_histogram` figure directory also contains a CSV with one row per plotted
-PDB entry, both RMSD values in Å, and atom/model counts. Rows are sorted by core
-RMSD, largest first; the values represented by the `≥3 Å` bin remain unrounded
-and unpooled in the CSV. The comparison panels use the same table.
 
 ### Figure 5
 
@@ -196,66 +138,59 @@ python src/pdb_plot.py \
   --plots solution_nmr_monomer_quality,solution_nmr_monomer_program_clusters
 ```
 
-## Solution-NMR Membrane Cohort
+### Figure 99
 
-Collect membrane-annotated solution-NMR entries with more than one deposited
-model and run TmDet on the first PDB coordinate model:
+Temporary figure number: the residue-count map of modeled transmembrane versus
+other modeled protein residues in solution-NMR entries. Generate it with the
+membrane plot group:
 
 ```bash
 python src/pdb_dataset_builder.py --datasets solution_nmr_membrane_proteins
 python src/pdb_plot.py --plots solution_nmr_membrane_proteins
 ```
 
-The standard collector installs a pinned local TmDet build when needed (CMake
-and a C++20 compiler are required), caches calculations, and saves all region
-categories and raw outputs. Existing binaries can be supplied with
-`--tmdet-executable /path/to/tmdet`. The entry CSV, companion tables and manifest
-share the stem `data/solution_nmr_membrane_proteins`. PNG figures show deposition
-counts, calculation status, a residue-count map with marginal histograms, annual
-TM fractions and five-year fraction distributions. The map uses complete TmDet
-results, including zero TM counts; it does not classify full-length proteins or
-fragments. Histograms count entries in ten-residue bins on each axis.
+## Outputs
 
-For sharing the membrane data, use
-`figures/solution_nmr_membrane_tmdet_residues/solution_nmr_membrane_tmdet_residues.csv`:
-it contains all entries through 2024, their TmDet status, residue counts and the
-`included_in_residue_plot` flag. Incomplete results remain in this CSV and are
-excluded from the map and both marginal histograms. Time-summary CSVs also
-accompany the corresponding PNGs; the full collection remains in `data/`.
-See the [protocol and cache reference](src/README.md#solution_nmr_membrane_proteins).
+Dataset CSVs are saved in `data/`; their names and contents are listed in the
+[dataset reference](src/README.md#dataset-reference).
 
-## Long-Running Builds
+Each figure has a directory `figures/<stem>/` containing `<stem>.png` and
+variants with suffixes `_no_title`, `_open_axes` and `_no_title_open_axes`.
+Figures 1–6 and 8 use the titled `_open_axes.png` version; Figure 7 uses the
+base PNG with a closed frame.
 
-- Downloaded coordinates, the managed STRIDE source/binary, and STRIDE results
-  are cached in `data/` and reused when their validation checks pass. See the
-  [cache reference](src/README.md#dataset-builder) for revalidation and concurrent
-  access behavior.
-- Dataset CSVs are rebuilt by default. Add `--resume` to continue homolog,
-  precision, and X-ray RMSD calculations from existing results; see the
-  [resume rules](src/README.md#useful-options) before reusing a previous run.
-- Use `python src/pdb_dataset_builder.py --help` and
-  `python src/pdb_plot.py --help` for optional input/output paths, worker
-  counts, resume behavior, and SVG generation.
+| Figure | Main output stem(s) |
+| --- | --- |
+| 1 | `pdb_method_trends` |
+| 2A | `solution_nmr_mean_weight_by_year` |
+| 2B | `solution_nmr_area_share_by_weight_category` |
+| 3 | `solution_nmr_monomer_stride_modeled_first_model_by_year` |
+| 4 | `solution_nmr_monomer_precision_stride_modeled_first_model_median_rmsd_by_year` |
+| 5 | `solution_nmr_monomer_xray_homologs_95_timing_share_by_year` |
+| 6 | `solution_nmr_monomer_xray_min_median_rmsd_by_year` |
+| 7 | `solution_nmr_monomer_xray_min_rmsd_precision_correlation` |
+| 8A | `solution_nmr_monomer_quality_clashscore_by_year` |
+| 8B | `solution_nmr_monomer_quality_ramachandran_outliers_by_year` |
+| 8C | `solution_nmr_monomer_quality_sidechain_outliers_by_year` |
+| 8D | `solution_nmr_monomer_program_cluster_share_by_year` |
+| 99 | `solution_nmr_membrane_tmdet_residues` |
 
-## Technical Reference
+Figure 99 is only the residue-count map in
+`figures/solution_nmr_membrane_tmdet_residues/`. The membrane plot group also
+produces separate count, status and time-summary figures.
 
-Implementation details, filtering rules, dataset definitions, cache behavior,
-and RMSD formulas are documented in [`src/README.md`](src/README.md).
-The implementation is split into focused modules under `src/dataset/` and
-`src/plotting/`; see the [source organization guide](src/README.md#source-organization)
-for responsibilities and import conventions. The command-line entry points and
-Python APIs are available through `src.pdb_dataset_builder` and `src.pdb_plot`.
-Test and coverage commands are documented in [`test/README.md`](test/README.md).
+## Reference
+
+- [Dataset definitions, filtering, RMSD, output variants and resume options](src/README.md).
+- [Test and coverage commands](test/README.md).
+- Full command-line options:
+
+```bash
+python src/pdb_dataset_builder.py --help
+python src/pdb_plot.py --help
+```
 
 ## License
 
-No open-source license is granted for this repository. See [`LICENSE`](LICENSE)
-for the applicable terms. STRIDE and all Python dependencies remain subject to
-their own licenses. In particular, the [STRIDE license][stride-license] permits
-academic use subject to its notice, citation, and bug-reporting conditions;
-commercial use requires a separate written license. Automatic installation does
-not change those terms.
-
-[stride-repository]: https://github.com/MDAnalysis/stride
-[stride-license]: https://github.com/MDAnalysis/stride/blob/867a5eb0f2479cb16615512a53ee472c54649505/LICENSE
-[repository]: https://github.com/akabynda/RCSB_PDB_Data_Visualizer
+See [`LICENSE`](LICENSE) for the repository terms. STRIDE, TmDet and Python
+dependencies are subject to their own licenses.

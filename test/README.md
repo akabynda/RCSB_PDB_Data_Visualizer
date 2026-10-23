@@ -1,21 +1,20 @@
 # Tests
 
-Run tests from the repository root after completing the setup in the
+Run from the repository root in the environment configured in the
 [main README](../README.md).
-
-Install the test runner and coverage reporter:
 
 ```bash
 python -m pip install pytest coverage
-```
-
-Run the complete test suite:
-
-```bash
 python -m pytest -q
 ```
 
-Measure branch coverage for the application code:
+Run a single test file:
+
+```bash
+python -m pytest -q test/test_pdb_cache.py
+```
+
+Measure branch coverage:
 
 ```bash
 python -m coverage erase
@@ -23,20 +22,6 @@ python -m coverage run --branch --source=src -m pytest -q
 python -m coverage report -m
 ```
 
-Run one test file or one test method:
-
-```bash
-python -m pytest -q test/test_pdb_cache.py
-python -m pytest -q \
-  test/test_pdb_cache.py::SafePDBCacheTests::test_fresh_metadata_avoids_another_remote_request
-```
-
-The tests use temporary files and mocked APIs, while STRIDE bootstrap tests also
-mock Git and GNU Make; no repository dataset or figure is modified, and STRIDE is
-never downloaded or compiled.
-TmDet tests similarly use temporary executable fixtures and mocked downloads;
-they do not build or run the managed native installation.
-
-## License
-
-See the root [`LICENSE`](../LICENSE) file for the applicable terms.
+Tests use temporary files, mocked APIs and executable fixtures. STRIDE and TmDet
+installation tests mock downloads and build commands. Patch dependencies in the
+module that consumes them, rather than in the public entry-point module.

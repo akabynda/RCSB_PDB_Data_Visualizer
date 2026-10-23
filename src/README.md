@@ -1,9 +1,8 @@
 # Source Pipeline Reference
 
-This document is the technical reference for the dataset and plotting packages
-in `src/` and their two command-line entry points. For installation and the
-article reproduction workflow, see the [project README](../README.md). Unless
-noted otherwise, run every command below from the repository root.
+Implementation and methodology for the dataset builder and plotter.
+See the [main README](../README.md) for installation and figure commands,
+and the [test README](../test/README.md) for checks.
 
 ## Table of Contents
 
@@ -13,8 +12,7 @@ noted otherwise, run every command below from the repository root.
 - [Modeled Part](#modeled-part)
 - [Core Region](#core-region)
 - [STRIDE](#stride)
-- [Useful Options](#useful-options)
-- [Recommended Run Order](#recommended-run-order)
+- [Calculation Options](#calculation-options)
 - [Dataset Reference](#dataset-reference)
   - [`method_counts`](#method_counts)
   - [`membrane_protein_counts`](#membrane_protein_counts)
@@ -33,154 +31,79 @@ noted otherwise, run every command below from the repository root.
   - [`solution_nmr_monomer_xray_rmsd_extremes`](#solution_nmr_monomer_xray_rmsd_extremes)
   - [`solution_nmr_monomer_xray_rmsd_extremes_historical`](#solution_nmr_monomer_xray_rmsd_extremes_historical)
 - [Plot Generation](#plot-generation)
-- [License](#license)
 
 ## Source Organization
 
-The implementation is organized by responsibility under `src/dataset/` and
-`src/plotting/`. Paths in this table are relative to `src/`.
+Paths below are relative to `src/`; grouped filenames share the first path's
+directory.
 
-| Module or directory | Responsibility |
+| Modules | Responsibility |
 | --- | --- |
-| `pdb_dataset_builder.py`, `pdb_plot.py` | Command-line entry points and public Python exports. |
-| `dataset/config.py`, `dataset/records.py`, `dataset/errors.py` | Build settings, dataset kinds, typed records, and domain exceptions. |
-| `dataset/client/` | HTTP transport, RCSB searches, metadata, NMR records, and homology API access. |
-| `dataset/structures.py`, `dataset/coordinates.py`, `dataset/matching.py`, `dataset/geometry.py` | Coordinate conversion and parsing, sequence matching, and RMSD calculations. |
-| `dataset/pdb_normalization.py` | Shared conformer selection and polypeptide-membership metadata used by coordinate consumers. |
-| `dataset/cache.py`, `dataset/downloads.py`, `dataset/ca_cache.py`, `dataset/api_cache.py` | Coordinate downloads, cache validation and locking, first-model CA caches, and raw membrane API response caching. |
-| `dataset/stride.py`, `dataset/stride_install.py` | STRIDE execution, state caching, and managed executable installation. |
-| `dataset/programs.py`, `dataset/program_statistics.py`, `dataset/history.py` | Refinement-program parsing and summaries, and historical homolog filtering. |
-| `dataset/builders/` | Dataset-specific collection and computation, including shared RMSD output generation. |
-| `dataset/io/`, `dataset/reporting.py` | CSV schemas and serialization, resume checkpoints, warning logs, and filtered-structure reports. |
-| `dataset/arguments.py`, `dataset/cli.py`, `dataset/workflows/` | CLI flags, execution order, and per-dataset workflows; homolog resume validation is separate from streaming output. |
-| `plotting/config.py`, `plotting/constants.py`, `plotting/tables.py` | Plot settings, shared constants, CSV caching, and tabular data preparation. |
-| `plotting/style.py`, `plotting/rendering.py` | Figure styling, shared rendering functions, and output variants. |
-| `plotting/counts.py`, `membrane.py`, `weights.py`, `quality.py`, `programs.py`, `homologs.py`, `rmsd.py`, `correlation.py` | Plot families, each in its own module under `plotting/`. |
-| `plotting/plotter.py`, `plotting/cli.py`, `plotting/cli_options/` | Composition of `PDBScientificPlotter`, plot dispatch, and grouped command-line options. |
-
-Build dependencies from shared foundations toward orchestration:
-`config/records → parsing/cache/API services → builders and CSV I/O → workflows/CLI`.
-Higher layers import the lower-level functionality they need; shared modules
-must not import the CLI or the entry-point modules. Plot families use
-shared table and rendering functions, and `plotter.py` composes their public API.
-
-The command-line entry points are `python src/pdb_dataset_builder.py ...` and
-`python src/pdb_plot.py ...`. Public Python exports are available from
-`src.pdb_dataset_builder` and `src.pdb_plot`. Implementation code imports the
-owning module directly, for example `src.dataset.client.RCSBClient` or
-`src.plotting.config.PlotConfig`.
-
-Tests patch a dependency where it is consumed. For example, patch
-`src.dataset.workflows.homologs.ensure_stride_executable` when testing the
-homolog workflow; patching its entry-point export does not replace the
-workflow's local import.
+| `pdb_dataset_builder.py`, `pdb_plot.py` | CLI entry points and public Python exports. |
+| `dataset/config.py`, `records.py`, `errors.py` | Dataset kinds, settings, records and exceptions. |
+| `dataset/client/` | RCSB search, metadata, NMR and homology requests. |
+| `dataset/structures.py`, `coordinates.py`, `pdb_normalization.py` | Coordinate conversion, parsing and conformer selection. |
+| `dataset/matching.py`, `geometry.py` | Sequence matching, superposition and RMSD. |
+| `dataset/cache.py`, `downloads.py`, `ca_cache.py`, `api_cache.py` | Coordinate/API retrieval and cache validation. |
+| `dataset/stride.py`, `stride_install.py` | STRIDE installation and assignments. |
+| `dataset/tmdet.py`, `tmdet_install.py`, `tmdet_annotations.py` | TmDet installation, execution and residue mapping. |
+| `dataset/programs.py`, `program_statistics.py`, `history.py` | Software-name parsing, weighted summaries and homolog date filtering. |
+| `dataset/builders/`, `io/`, `reporting.py` | Calculations, CSV schemas, checkpoints and exclusions. |
+| `dataset/arguments.py`, `cli.py`, `workflows/` | CLI options, execution order and dataset orchestration. |
+| `plotting/config.py`, `constants.py`, `tables.py` | Plot settings and table preparation. |
+| `plotting/style.py`, `rendering.py` | Styling and output variants. |
+| Other plot-family modules in `plotting/` | Counts, weights, quality, software, homolog, RMSD and membrane plots. |
+| `plotting/plotter.py`, `cli.py`, `cli_options/` | Public plotter API and CLI dispatch. |
 
 ## Dataset Builder
 
-`src/pdb_dataset_builder.py` builds the CSV datasets used by the plots. It
-writes tabular outputs to `data/`, stores downloaded PDB and mmCIF coordinate
-files in `data/pdb_cache/`, and reuses first-model STRIDE assignments from
-`data/stride_cache/` when needed. Large datasets require network access and
-enough disk space for the coordinate cache. Metadata is obtained from the [RCSB
-PDB Data and Search APIs][rcsb-apis].
+`--datasets` accepts one kind, a comma-separated list, or `all`. Metadata comes
+from the RCSB Search and Data APIs. Selecting several kinds runs their workflows
+in dependency order; unselected prerequisites must already be available.
+CSV paths in the dataset reference are defaults for `core` residue selection.
 
-Show all available options:
+Required inputs:
 
-```bash
-python src/pdb_dataset_builder.py --help
-```
+| Derived dataset | Required dataset |
+| --- | --- |
+| `solution_nmr_monomer_program_clusters` | `solution_nmr_monomer_quality` |
+| `solution_nmr_monomer_xray_homologs_historical` | Both 95% and 100% current homolog datasets |
+| Current X-ray RMSD variants | Current homolog dataset at the selected cutoff |
+| Historical X-ray RMSD variants | Historical homolog dataset at the selected cutoff |
 
-Use `--datasets` with one dataset kind, a comma-separated list, or `all`. Valid
-kinds are the entries in the [Dataset Reference](#dataset-reference).
+Coordinate downloads try RCSB, wwPDB, PDBe and the EBI archive. A failed native
+PDB download with at least one HTTP 404 permits an RCSB mmCIF conversion fallback.
+X-ray calculations can instead convert only requested mmCIF chains, retaining
+an author-chain mapping. Converted coordinates preserve NMR software metadata.
+All coordinate consumers use the same conformer normalization described below.
 
-```bash
-python src/pdb_dataset_builder.py --datasets method_counts
-python src/pdb_dataset_builder.py --datasets all
-```
+Coordinate validation checks checksums and remote validators, with a default
+24-hour interval. Chain subsets additionally require matching source hashes and
+requested chains. First-model X-ray CA records are reused only while the source
+PDB hash matches. Updates are atomic and locked per PDB entry, including between
+processes on POSIX.
 
-Building `all` can take a long time because some datasets download coordinates,
-run STRIDE, and compute RMSD values.
+Each primary `name.csv` has a warning/error log `name.log` and an exclusion
+table `name_filtered.csv` containing `entry_id`, deposition `year` and `reason`.
+Missing years remain empty; duplicate
+entry/reason pairs are suppressed. Exclusions cover entries considered after
+the initial API search. Derived datasets import upstream exclusions. Homolog
+outputs also record individual rejected X-ray candidates separately from
+excluded NMR entries.
 
-Native PDB downloads try RCSB, wwPDB, PDBe, and the EBI archive mirror. When
-those attempts fail and at least one source reports HTTP 404, the full-structure
-fallback downloads mmCIF from RCSB and converts it to PDB.
-Validated coordinate-cache entries have a `.cache.json` sidecar with their
-checksum, size, modification time, and available remote validators. An
-intermediate `.cif` retained after the mmCIF-to-PDB conversion fallback does not
-have its own sidecar; validation metadata is stored for the converted `.pdb`.
-Cache entries are revalidated after 24 hours by default. Set
-`--pdb-cache-validation-hours 0` to validate them on every access.
+Default storage paths can be changed with the corresponding CLI options:
 
-X-ray homology and RMSD calculations also support a separate chain-subset
-route. It reuses a full PDB when possible; otherwise, or for multicharacter
-chain IDs, it downloads mmCIF through the four mirrors and converts only the
-requested chains to PDB. This handles entries too large for full PDB conversion.
-The cache stores the resulting chain-ID mapping. Per-chain subset PDBs and
-chain-ID mappings are installed through unique temporary files and atomic
-replacement.
+| Contents | Default path | Option |
+| --- | --- | --- |
+| Coordinates for monomer eligibility and membrane calculations | `data/pdb_cache/` | `--solution-nmr-monomer-cache-dir` |
+| First-model STRIDE assignments | `data/stride_cache/` | `--stride-cache-dir` |
+| Managed STRIDE build | `data/stride/` | `--stride-install-dir` |
+| Membrane API responses | `data/rcsb_cache/solution_nmr_membrane_proteins/` | `--solution-nmr-membrane-cache-dir` |
+| Managed TmDet build | `data/tmdet/` | `--tmdet-install-dir` |
+| TmDet inputs and results | `data/tmdet_cache/` | `--tmdet-cache-dir` |
 
-Both full mmCIF-to-PDB conversions and per-chain subsets write NMR software
-names and versions into `REMARK 210 SOFTWARE USED` before the coordinates.
-Software metadata can therefore be extracted from the resulting PDB without
-the source mmCIF.
-
-Before any coordinate consumer runs, native and converted PDB files are
-normalized to one conformer per residue in each model. Cached coordinate
-files undergo the same normalization under the cache lock, with recalculated
-checksums when their bytes change. Direct parser calls use the same normalized
-view without modifying caller-owned files. STRIDE, Bio.PDB parsing, and CA
-parsers therefore see the same selected atoms.
-
-A per-chain subset is reused only when its requested chain set and source mmCIF
-SHA-256 still match. Its chain-ID mapping is also embedded in the metadata
-transaction, so an absent or truncated mapping cannot be combined with an
-otherwise valid subset. Remote revalidation uses `ETag` and `Last-Modified`
-when available.
-
-All coordinate artifacts for one PDB ID—PDB, mmCIF, converted subsets,
-chain maps, and metadata—share one keyed lock. Cache state is checked again
-after acquiring the lock. A transaction revision lets concurrent waiters reuse
-the result even with `--pdb-cache-validation-hours 0`; a later sequential call
-still performs the requested validation. Locks are per entry, so unrelated PDB
-downloads remain parallel. On POSIX, persistent lock files in
-`data/pdb_cache/.locks/` also protect the cache between builder processes.
-
-First-model X-ray CA residues and coordinates are cached beside each parsed PDB
-as `*.pdb.first_model_ca.npz`. One cold pass parses every chain and records
-residue order, full author IDs (number plus insertion code), identity,
-`ATOM`/`HETATM` flags, and selected coordinates. The pickle-free payload is
-accepted only when the source PDB SHA-256 matches. A changed source or damaged
-NPZ triggers reparsing and atomic cache replacement. The cache is shared by
-95%/100% homology checks and all X-ray RMSD views.
-
-Each primary dataset CSV receives a sibling `.log` file containing warnings and
-errors from that build. Logs are recreated at the start of a run; multi-output
-datasets send shared warnings and errors to each affected log. An empty log
-means no warnings or errors were logged; eligibility exclusions may still be
-present in the filtered report.
-
-Each primary dataset `name.csv` also receives a paired `name_filtered.csv`. The
-paired file has three columns:
-
-- `entry_id`: the RCSB PDB entry rejected from that output;
-- `year`: the structure deposition year;
-- `reason`: the recorded metadata, eligibility, coordinate, STRIDE, homology,
-  historical-date, or RMSD exclusion reason.
-
-The `year` cell is empty when no valid deposition date is available. One entry
-can have several rows if it fails independent checks. Duplicate
-`entry_id`/`reason` rows are suppressed. A header-only file means no exclusions
-were recorded after the initial API search; entries outside that search are not
-listed. Builds without resume recreate the report. A resumed
-homolog build preserves its recorded exclusions, while a derived dataset imports
-upstream exclusions and then appends its own. Shared multi-output exclusions are
-written to every affected report; output-specific exclusions stay in their own
-report.
-
-The 95% and 100% X-ray homolog outputs additionally receive sibling
-`*_rejected.csv` reports. These record reasons for rejecting individual X-ray
-candidates; `*_filtered.csv` records exclusions of NMR structures. Their schema
-and rejection rules are described in the dataset reference below.
+Precision, X-ray RMSD and software workflows have separate coordinate-cache
+options listed by `--help`; each also defaults to `data/pdb_cache/`.
 
 ## Important Filtering Rules
 
@@ -280,144 +203,56 @@ without requiring a separate X-ray STRIDE assignment. Both rigid-body fitting
 and RMSD use the selected atoms. Precision additionally intersects these
 positions across all ensemble models. At least three selected CA atoms must
 remain. X-ray sequence matching and homolog eligibility still use the full core,
-and all saved candidates are evaluated before choosing the new minimum.
+and all saved candidates are evaluated before choosing the minimum RMSD.
 The span follows coordinate-record order, including insertion codes, rather
 than numeric or lexical sorting. The first model defines its full set of IDs;
 a missing endpoint in another model cannot change that span.
 
 ## STRIDE
 
-The following datasets require a STRIDE executable:
+STRIDE is required by the modeled-state, ensemble-precision and homolog-search
+builders. Executable lookup order is the explicit
+`--solution-nmr-monomer-stride-executable`, `stride` in `PATH`, the managed build,
+`/tmp/stride_src/src/stride`, then automatic installation. An invalid explicit
+path fails without falling back.
 
-- `solution_nmr_monomer_stride_modeled_first_model`
-- `solution_nmr_monomer_precision_stride_modeled_first_model`
-- `solution_nmr_monomer_xray_homologs`
+Automatic installation on macOS/Linux uses STRIDE revision
+`867a5eb0f2479cb16615512a53ee472c54649505` and requires Git, GNU Make, a C compiler
+and GitHub access. Installation is serialized; each revision/platform has its
+own build. `--stride-install-dir` sets the installation root.
 
-The builder resolves STRIDE in this order:
+First-model assignments are reused when the SHA-1 of the first-model coordinate
+text matches. The executable version is not part of this key: changing STRIDE
+requires clearing its assignment cache or selecting another location with
+`--stride-cache-dir`.
 
-1. the path passed with `--solution-nmr-monomer-stride-executable`;
-2. an executable named `stride` in `PATH`;
-3. the versioned, platform-specific managed build under `data/stride/`;
-4. the local build at `/tmp/stride_src/src/stride`;
-5. an automatic managed installation.
+## Calculation Options
 
-The automatic path is used only when no explicit value was supplied. A bad
-explicit path fails instead of silently selecting or downloading another
-binary. To pass an explicit executable path:
+Run `python src/pdb_dataset_builder.py --help` for all paths and defaults.
 
-```bash
-python src/pdb_dataset_builder.py \
-  --datasets solution_nmr_monomer_stride_modeled_first_model \
-  --solution-nmr-monomer-stride-executable /path/to/stride
-```
+| Option | Effect |
+| --- | --- |
+| `--workers`, `--precision-workers`, `--xray-rmsd-workers` | Concurrency for collection, precision and X-ray RMSD. |
+| `--batch-size`, `--page-size` | GraphQL batch and Search API page sizes. |
+| `--log-level` | Logging verbosity. |
+| `--pdb-cache-validation-hours` | Coordinate revalidation interval; `0` validates every access. |
+| `--xray-rmsd-sequence-identity {95,100}` | Homolog input cutoff; default `100`. |
+| `--rmsd-residue-selection {core,secondary-structure}` | Atom selection; default `core`. The plotter accepts the same switch. |
+| `--precision-input PATH` | Reuse entries, chains and core ranges from a precision CSV and recompute RMSD. Input and output must differ. |
+| `--resume` | Retain completed homolog, precision and X-ray RMSD results. |
 
-For a first-time managed installation on macOS or Linux, the builder clones the
-[STRIDE repository][stride-repository], checks out the fixed revision
-`867a5eb0f2479cb16615512a53ee472c54649505`, runs
-`make -C <checkout>/src stride`, validates the resulting executable, and
-publishes the completed checkout at
-`data/stride/867a5eb0f2479cb16615512a53ee472c54649505/<system>-<architecture>/`.
-Clone/build commands use argument lists rather than a shell, each have a
-five-minute timeout, and are serialized across threads and POSIX processes. A
-failed first installation is not published; the next run can retry cleanly. If
-an existing versioned checkout has lost its binary, its Git revision and tracked
-files are verified before its Makefile is run again.
+Secondary-structure selection adds `_secondary_structure` to default
+precision/RMSD CSV and figure stems; explicit paths override those defaults.
+Resume requires the same inputs and calculation settings. Precision and RMSD
+rows record `residue_selection`; an
+absent field means `core`. Resume and the precision-correlation plot reject
+incompatible selections.
 
-Automatic setup requires Git, GNU Make, a C compiler (`gcc`, `cc`, or `clang`),
-and GitHub access. Use `--stride-install-dir` to change the managed installation
-root. Native Windows users should use WSL or pass a prebuilt executable. Each
-pinned revision uses a separate installation directory.
-
-First-model STRIDE state maps are cached by structure in `data/stride_cache/` by
-default and reused across STRIDE-based datasets. A cache entry requires a
-matching SHA-1 of the complete first-model coordinate text. The STRIDE path and
-version are not part of that key, so clear
-this cache after changing STRIDE. Use `--stride-cache-dir` to change the cache
-location.
-
-## Useful Options
-
-- `--workers`: parallel workers for API, coordinate, STRIDE, and homology work.
-- `--batch-size`: GraphQL batch size.
-- `--page-size`: RCSB Search API page size.
-- `--log-level`: logging level, for example `INFO` or `DEBUG`.
-- `--solution-nmr-monomer-cache-dir`: PDB cache used by the base monomer
-  model-length filter and coordinate-level monomer datasets.
-- `--pdb-cache-validation-hours`: remote PDB/mmCIF validation interval; `0`
-  validates every access.
-- `--stride-install-dir`: root for the pinned, automatically built STRIDE
-  checkout (default: `data/stride`).
-- `--stride-cache-dir`: cache for per-structure STRIDE assignments; this is
-  separate from the managed source and executable.
-
-Long-running calculations:
-
-- `--resume`: retain existing homolog, precision, and selected X-ray RMSD
-  results and process unfinished entries.
-- `--precision-workers`: worker count for precision RMSD calculations.
-- `--xray-rmsd-workers`: worker count for X-ray RMSD calculations.
-- `--xray-rmsd-sequence-identity {95,100}`: choose which homolog CSV is used by
-  the X-ray RMSD datasets (default: `100`).
-- `--rmsd-residue-selection {core,secondary-structure}`: select the atoms used
-  for precision and X-ray RMSD (default: `core`). The secondary-structure mode
-  changes default precision/RMSD CSV paths to `*_secondary_structure.csv`;
-  explicitly supplied paths take precedence. The plot CLI accepts the same
-  switch and selects matching default inputs and figure paths.
-- `--precision-input PATH`: reuse an existing precision CSV's entries, chains
-  and core ranges to avoid NMR seed discovery and metadata requests. RMSD is
-  recomputed from cached coordinates for the selected atoms; only entries in
-  that input are considered. Input and output paths must differ.
-
-The homolog completion checkpoint is written beside the 95% output as
-`<95%-output-stem>.resume.tsv`. With `--resume`, valid paired 95%/100% rows are
-retained only after their rejected-candidate reports were checkpointed; entries
-checkpointed as `ineligible` are also retained. Unfinished or failed pairs, and
-pairs without checkpointed rejection reports, are retried. Without the flag,
-the homolog CSV pair, rejected reports, and checkpoint are rebuilt.
-
-Every selected dataset is rebuilt by default. With `--resume`, precision and
-each selected RMSD output reuse valid existing rows independently, so a
-completed ordinary CSV does not suppress missing extremes or historical rows.
-Resume should be used only with the same inputs and calculation settings as the
-interrupted run.
-Precision and X-ray RMSD CSVs include `residue_selection`; older CSVs without
-this column are read as `core`. Resume rejects a different selection before
-rewriting the dataset, and Figure 7 rejects inputs that disagree with the
-requested selection.
-
-## Recommended Run Order
-
-Some datasets read CSV files produced by earlier datasets. A practical run order
-is:
-
-```bash
-python src/pdb_dataset_builder.py \
-  --datasets method_counts,membrane_protein_counts,solution_nmr_weights
-
-python src/pdb_dataset_builder.py \
-  --datasets solution_nmr_program_counts,solution_nmr_monomer_quality,solution_nmr_monomer_experiments
-
-python src/pdb_dataset_builder.py \
-  --datasets solution_nmr_monomer_program_clusters
-
-python src/pdb_dataset_builder.py \
-  --datasets solution_nmr_monomer_stride_modeled_first_model,solution_nmr_monomer_precision_stride_modeled_first_model
-
-python src/pdb_dataset_builder.py \
-  --datasets solution_nmr_monomer_xray_homologs,solution_nmr_monomer_xray_homologs_historical
-
-rmsd_datasets=solution_nmr_monomer_xray_rmsd,\
-solution_nmr_monomer_xray_rmsd_extremes,\
-solution_nmr_monomer_xray_rmsd_historical,\
-solution_nmr_monomer_xray_rmsd_extremes_historical
-python src/pdb_dataset_builder.py \
-  --datasets "$rmsd_datasets" \
-  --xray-rmsd-sequence-identity 100
-```
-
-Selecting related RMSD kinds together lets the builder reuse candidate
-calculations. Input selection and historical behavior are described in the
-[`solution_nmr_monomer_xray_rmsd`](#solution_nmr_monomer_xray_rmsd) reference.
+Without resume, datasets are rebuilt. Homolog resume retains completed paired
+95%/100% results only when their candidate-rejection reports are checkpointed,
+and also retains checkpointed ineligible entries. Failed or unfinished entries
+are retried. The homolog checkpoint is `<95%-output-stem>.resume.tsv` beside
+the 95% output. Precision and each selected RMSD variant resume independently.
 
 ## Dataset Reference
 
@@ -452,76 +287,46 @@ Outputs:
 
 ### `solution_nmr_membrane_proteins`
 
-The RCSB Search/Data API cohort requires:
+Selects PDB entries with at least one `polypeptide(L)` or `polypeptide(D)` chain,
+exactly `SOLUTION NMR` as the experimental-method set, more than one deposited model,
+and a protein-entity annotation of type `OPM`, `PDBTM`, `MemProtMD` or `mpstruc`.
+Missing/invalid model counts are excluded. UniProt membrane annotation alone
+does not qualify. There are no monomer, HETATM, length, core or year filters.
+The unit is a PDB entry; repeated proteins are not deduplicated.
 
-1. At least one `polypeptide(L)` or `polypeptide(D)` chain.
-2. Experimental method set exactly `{SOLUTION NMR}`.
-3. At least one protein entity with `rcsb_polymer_entity_annotation.type` equal
-   to any of `OPM`, `PDBTM`, `MemProtMD`, `mpstruc`.
-4. More than one deposited model (`rcsb_entry_info.deposited_model_count > 1`).
-   Missing/invalid model counts are excluded with a separate reason.
-
-A UniProt membrane annotation alone does not select an entry. There are no
-HETATM, oligomeric-state, length, core or deposition-year restrictions. The
-unit is a PDB entry, not a unique protein or an independent biological replicate.
-No full-length/fragment assignment is made.
-
-```bash
-python src/pdb_dataset_builder.py --datasets solution_nmr_membrane_proteins
-python src/pdb_plot.py --plots solution_nmr_membrane_proteins
-```
-
-**Coordinate calculation.** The existing shared PDB downloader/cache is used
-(`data/pdb_cache`, configurable with `--solution-nmr-monomer-cache-dir`), including
-its alternative-conformer normalization and mmCIF-to-PDB fallback with chain-ID
-mapping. The first coordinate model is extracted without a core crop or use of
-unmodeled SEQRES residues. All its ATOM/HETATM coordinates are submitted to TmDet;
-the program applies its own atom/chain eligibility rules. The coordinate file
-must also contain more than one model. No assembly expansion is requested.
-
-The managed build uses [TmDet](https://github.com/brgenzim/TmDet) revision
+**TmDet calculation.** The coordinate file must also contain multiple models.
+The normalized first model, with all ATOM/HETATM coordinates and no core crop
+or assembly expansion, is passed to TmDet. The program applies its own atom
+and chain eligibility rules. The managed build uses revision
 `311af38c09b1ec8636810b6f9d7ab532adaa846e` (XML version 4.1.4), Gemmi 0.7.0,
-Eigen 3.4.0, nlohmann/json 3.11.3 and pugixml 1.14, with archive SHA-256 checks.
-CMake and a C++20 compiler are required. Builds and logs live under
-`data/tmdet/<revision>/<platform>/`; `--tmdet-executable` selects an existing binary.
-The managed build includes `<span>` explicitly, makes the abstract `SideDetector`
-and `Optimizer` destructors virtual, and replaces invalid `erase(end())` with
-`pop_back()` in PDB-to-CIF export. These compatibility fixes do not alter scoring,
-optimization or region-assignment formulas. Source archives, patched sources,
-build commands and binary hash are retained in the installation directory.
+Eigen 3.4.0, nlohmann/json 3.11.3 and pugixml 1.14. Archives are hash-checked;
+CMake and a C++20 compiler are required. Build adjustments are defined in
+`dataset/tmdet_install.py`. `--tmdet-executable` selects an existing binary.
 
 Arguments are `-pi input.pdb -x result.xml -po transformed.cif -m 0 -nc`, with
-an explicit environment file. `0` is the first model's zero-based index. Default
-planar-membrane settings are used; curved, double-membrane and fragment-analysis
-options are not enabled. `-nc` disables TmDet's sequence-only surface cache.
-The default per-entry timeout is 600 seconds (`--tmdet-timeout-seconds`).
-Only required chemical components are retrieved from RCSB CCD, plus its real
-`ZZZ.cif` record used by TmDet to recognize an installed CCD directory; component
-URLs, retrieval times and hashes are retained.
+an explicit environment file. Model index `0` is the extracted first model;
+planar-membrane defaults apply, and `-nc` disables the sequence-only surface
+cache. `--tmdet-timeout-seconds` defaults to 600. Required chemical components
+and the `ZZZ` installation marker are retrieved from RCSB CCD.
 
-**Residue mapping and counts.** XML boundaries are mapped through PDB chain IDs,
-author residue numbers and insertion codes onto the observed coordinate order.
-Numbering gaps do not create residues. Each polypeptide residue with at least
-one modeled atom is counted once; polymer HETATM membership follows the shared
-SEQRES/MODRES or converted-mmCIF metadata. Counts include all protein chains in
-the entry, including partners; `is_membrane` remains available per chain/residue.
-The chain table's RCSB `modeled_residue_count` is separate from the measured
+**Residue counts.** XML boundaries map onto observed coordinate order using
+PDB chain IDs, author numbers and insertion codes. Numbering gaps add no
+residues. Each modeled polypeptide residue is counted once across all protein
+chains, including partner chains. Polymer HETATM membership follows the shared
+coordinate rules. All XML region codes and attributes are retained. For the
+summary, `N_TM = N_H + N_B`, `f_TM = N_TM / N_modeled`, and the other-residue
+count is `N_modeled - N_TM`. Other residues can include re-entrant loops and
+interfacial helices. RCSB `modeled_residue_count` is separate from the measured
 `tmdet_modeled_residue_count`.
 
-All [TmDet region codes](https://tmdet.unitmp.org/usage) and original XML attributes
-are retained, including unknown future codes. For the current summary,
-`N_TM = N_H + N_B` and `f_TM = N_TM / N_modeled`. Other modeled residues are
-`N_modeled - N_TM`; they can include re-entrant loops and interfacial helices,
-so this quantity is not a count of strictly extramembrane residues.
-
-| Status | Interpretation in the tables |
+| Status | Meaning |
 | --- | --- |
 | `membrane_detected` | Every modeled protein residue has an XML region assignment. |
-| `partial_annotation` | Positive result with unassigned modeled residues; TM count is the assigned H/B count, but fraction and other-residue count are blank. |
-| `no_membrane_detected` | Valid negative TmDet result; detected TM count and fraction are zero, without fabricating residue region labels. This is algorithmic non-detection. |
+| `partial_annotation` | Some residues lack assignments; assigned H/B counts remain, but fraction and other-residue count are blank. |
+| `no_membrane_detected` | Valid negative result; TM count/fraction are zero, without inferred region labels. |
 | `no_analyzable_protein` | TmDet reports `Noprotein`; TM count/fraction are blank. |
-| `not_in_model` | Chain absent from the first coordinate model; chain TM count/fraction are blank. |
-| `error` | Download, execution, timeout or mapping failure; TM count/fraction are blank and the reason is saved. |
+| `not_in_model` | Chain absent from the first model; chain TM count/fraction are blank. |
+| `error` | Download, execution, timeout or mapping failed; reason is retained and TM count/fraction are blank. |
 
 The main CSV is `data/solution_nmr_membrane_proteins.csv`. Companions share its stem:
 
@@ -532,73 +337,45 @@ The main CSV is `data/solution_nmr_membrane_proteins.csv`. Companions share its 
 | `_segments.csv` | Original RCSB PDBTM interval, raw positions and validity. |
 | `_tmdet_regions.csv` | Every XML region, author boundaries and modeled residue count. |
 | `_tmdet_residues.csv` | Every modeled protein residue, all region codes and assignment status. |
-| `_duplicate_candidates.csv` | One-model/ensemble audit; normally empty with criterion 4 enabled. |
+| `_duplicate_candidates.csv` | One-model/ensemble audit; normally empty under the multiple-model requirement. |
 | `_filtered.csv` | Excluded entry ID, deposition year and reason. |
 | `_manifest.json` | Source/run provenance, parameters, filter counts, status/category statistics, hashes, command and software versions. |
 
-Original PDBTM segment bounds use one-based `label_seq_id` in the deposited
-sequence. Bounds must be positive integers, ordered and within known sequence
-length. Invalid intervals remain in the table with their reasons. The PDBTM
-`complete/partial/missing` status describes annotation availability, not biological
-completeness. This stored annotation is not substituted for a TmDet calculation.
+PDBTM segment bounds are one-based `label_seq_id` positions in the deposited
+sequence. Invalid intervals are retained with reasons. PDBTM
+`complete/partial/missing` describes annotation availability; it does not assign
+biological completeness or replace the TmDet calculation.
 
-**Caching and retries.** Raw API bodies remain in
-`data/rcsb_cache/solution_nmr_membrane_proteins/`, keyed by URL/request/schema,
-with SHA-256 and a 24-hour validation interval. Set
-`--solution-nmr-membrane-cache-validation-hours 0` to revalidate.
-TmDet bundles are in `data/tmdet_cache/<PDB ID>/<input hash>/` (configurable with
-`--tmdet-cache-dir`), keyed by PDB/first-model/binary/CCD hashes, schema and arguments.
-Every successful bundle preserves input PDB, full XML, optional transformed CIF,
-stdout/stderr, native logs and a hash manifest. A valid negative result normally
-has no transformed CIF. Hash validation precedes reuse. Failed attempts and
-corrupt bundles remain available; errors are retried by the same command.
-Tables are written atomically and their manifest is published last. A run with
-calculation errors publishes the error rows and exits unsuccessfully.
-Deleting published tables/figures does not invalidate compatible raw caches.
+**Reuse and failures.** Raw API responses are hash-checked and revalidated after
+24 hours by default; `--solution-nmr-membrane-cache-validation-hours 0` forces
+revalidation. TmDet reuse requires matching coordinate, first-model, binary
+and CCD hashes, schema and arguments. Raw inputs, XML, available transformed
+coordinates, logs and hashes are retained. Failed calculations are retried on
+rerun. Tables are written atomically, with the manifest published last; a run
+with calculation errors saves error rows and exits unsuccessfully.
 
-**Plots.** The family reads the entry CSV (`--nmr-membrane-input`) and applies the
-project-wide deposition-year cutoff of 2024. It writes the usual title/frame PNG
-variants for `solution_nmr_membrane_proteins_by_year`,
-`solution_nmr_membrane_tmdet_status` and `solution_nmr_membrane_tmdet_residues`.
-The residue map uses only complete positive/valid negative results. Each point
-is one PDB entry: x is the number of modeled H/B residues and y is the number of
-other modeled protein residues, summed over all chains of the first model.
-All points use the same symbol; no full-length/fragment classification is implied.
-Both axes are linear and retain the entire range, including zeros; there is no
-jitter or smoothing. Top and right histograms use the same entries and shared
-residue axes, with fixed bins `[0, 10)`, `[10, 20)`, etc. Counts are absolute
-numbers of entries, not density estimates. Each histogram sums to the number of
-points. An adjacent `solution_nmr_membrane_tmdet_residues.csv` contains all entries
-in the plotting years, including excluded entries, with their identifiers,
-status/error, residue counts and `included_in_residue_plot` flag. Its TM fraction
-is undefined for incomplete/unavailable results, even when partial counts exist.
-The full collection CSV retains additional metadata and cache paths; all statuses
-also appear in the status plot. Three additional plots
-export their source statistics as CSV beside the PNG variants:
+**Plots.** Entries with known deposition years through 2024 enter the count
+and status summaries. The residue map uses complete positive and valid negative
+results: x is the H/B residue count, y the other modeled residue count. This map
+alone is Figure 99. Linear axes retain zeros and the full range. Marginal
+histograms count the same entries in ten-residue bins. The accompanying table
+`figures/solution_nmr_membrane_tmdet_residues/solution_nmr_membrane_tmdet_residues.csv`
+retains excluded entries and marks selection with `included_in_residue_plot`.
+No full-length/fragment class is assigned.
 
-| Stem (after `solution_nmr_membrane_tmdet_`) | Statistic |
+| Time summary | Statistic |
 | --- | --- |
-| `composition_by_year` | Annual shares with H/B residues, with zero H/B residues, and with incomplete/unavailable results; denominator: all entries in that year |
-| `fraction_by_year` | Two panels: annual mean H/B and other-residue fractions for entries with complete TmDet results and the subset with H/B residues |
-| `fraction_by_period` | Distributions of the same fractions in calendar periods 1990–1994, 1995–1999, etc. |
+| Composition | Annual shares with H/B residues, zero H/B residues, and incomplete/unavailable results; denominator: all entries that year. |
+| Fractions | Annual mean TM and other-residue fractions for complete results and, separately, the subset with H/B residues. |
+| Period distributions | The same fractions in five-year periods starting 1990–1994. |
 
-The fraction is `(H + B residues) / modeled protein residues` in the first model,
-summed over chains of each PDB entry. Entries have equal weight. Valid negative
-results contribute zero; incomplete/unavailable results are excluded from fraction
-statistics. The CSV fractions use 0–1; figures use percent. Boxplots show linear
-25th/50th/75th percentiles, Tukey whiskers (1.5 IQR), all outliers and group sizes;
-CSV `fliers` cells contain JSON arrays. Annual composition and fraction plots use
-100% stacked areas with centered yearly steps. The overlapping entry groups are
-shown in separate fraction panels; the other-residue share is `1 - mean H/B fraction`.
-The deposition-count plot uses centered steps as in `pdb_method_trends`.
-Group sizes and excluded counts are recorded in the CSVs.
-Years with no denominator remain gaps. Unknown years are
-reported and omitted. Summaries are descriptive; repeated proteins are not
-deduplicated, and no hypothesis tests or confidence intervals are applied.
-
-Procedure/figure review uses Scientific Agent Skills: Kassis, T., Agarwal, V.,
-He, Y., Patel, D., & Brueckner, A. M. (2026),
-[Scientific Agent Skills: A Library of Procedural Knowledge for Research Agents](https://doi.org/10.48550/arXiv.2609.00065).
+Each entry has equal weight. Valid negatives contribute zero TM fraction;
+incomplete/unavailable results are excluded from fraction statistics. Tables
+use fractions in 0–1; plots use percent. Boxplots show linear 25th/50th/75th
+percentiles, 1.5-IQR whiskers, all outliers and group sizes. Annual shares use
+centered steps, and years without a denominator remain gaps. Source tables
+record group sizes and exclusions. These are descriptive summaries without
+hypothesis tests or confidence intervals.
 
 ### `solution_nmr_program_counts`
 
@@ -618,10 +395,6 @@ each distinct normalized name it reports.
 Output:
 
 - `data/solution_nmr_program_counts_by_year.csv`
-
-Useful options:
-
-- `--solution-nmr-program-cache-dir`
 
 ### `solution_nmr_monomer_program_clusters`
 
@@ -655,10 +428,6 @@ For example, `CNS ARIA` contributes `0.5` to both `CLUSTER3` and `CLUSTER2`.
 these fractional weights. Overall yearly totals count unique structures.
 The dataset downloads missing PDB files itself; `solution_nmr_program_counts` is
 not a prerequisite.
-
-Requires:
-
-- `data/solution_nmr_monomer_quality_metrics.csv`
 
 Outputs:
 
@@ -723,7 +492,7 @@ aligned coordinate of residue `j` in model `i`, and
 r_mean,j = (1/N) * sum_i r_ij(aligned).
 ```
 
-Ensemble precision is
+Ensemble precision in Å is
 
 ```text
 P = sqrt[(1 / (N*n)) * sum_i sum_j ||r_ij(aligned) - r_mean,j||^2].
@@ -823,11 +592,6 @@ candidates remain with `has_xray_homolog = 0`. For a record with candidates, a
 missing NMR deposition date or any missing X-ray initial-release date removes
 the complete record. The release date is the RCSB `initial_release_date` field.
 
-Requires:
-
-- `data/solution_nmr_monomer_xray_homologs_95.csv`
-- `data/solution_nmr_monomer_xray_homologs_100.csv`
-
 Outputs:
 
 - `data/solution_nmr_monomer_xray_homologs_95_historical.csv`
@@ -835,17 +599,13 @@ Outputs:
 
 ### `solution_nmr_monomer_xray_rmsd`
 
-The four RMSD dataset kinds select their cutoff with
-`--xray-rmsd-sequence-identity`. For each selected variant, the value replaces
-`<cutoff>` in its input path:
-
-- current variants: `data/solution_nmr_monomer_xray_homologs_<cutoff>.csv`;
-- historical variants:
-  `data/solution_nmr_monomer_xray_homologs_<cutoff>_historical.csv`.
-
-Historical-only runs do not require a current homolog CSV. The calculation still
-requires an exact modeled-core match at either cutoff. Use different output paths
-to retain both 95% and 100% runs.
+The four RMSD dataset kinds read the current or historical homolog output
+selected by `--xray-rmsd-sequence-identity`. Historical-only runs require only
+the historical input. The coordinate calculation requires an exact core match
+at either cutoff. Default inputs are
+`data/solution_nmr_monomer_xray_homologs_<cutoff>.csv` or
+`data/solution_nmr_monomer_xray_homologs_<cutoff>_historical.csv`.
+Use separate output paths to retain both cutoff runs.
 
 Computes CA RMSD between an NMR STRIDE core and an exactly matching HETATM-free
 X-ray region. It uses at least three matched `ATOM` CA pairs from the first NMR
@@ -856,7 +616,8 @@ reused across its X-ray candidates; X-ray data comes from the CA cache.
 d_eh = RMSD_superposed(NMR_e,model1, Xray_h,model1)
 ```
 
-The coordinates are centered and optimally superposed before RMSD is calculated.
+The coordinates are centered and optimally superposed before RMSD is calculated
+in Å.
 
 If one chain has several exact matching windows, the window with the lowest RMSD
 is used. Within an entity, the chain with the most CA pairs is selected, using
@@ -923,66 +684,26 @@ Output:
 
 ## Plot Generation
 
-After the CSV files are ready, build figures with `src/pdb_plot.py`.
+`python src/pdb_plot.py --plots all` selects every plot group; selected groups
+require their input datasets. `--help` lists input/output flags and defaults.
+Plots use deposition years through 2024. `--svg` adds SVG export to PNG output.
 
-By default, `src/pdb_plot.py` reads the standard CSV paths in `data/` and writes
-four PNG variants of each figure to `figures/<figure_name>/`. Omit `--plots` or
-pass `--plots all` to select every group; all standard input CSVs must then be
-present.
+The plotter reads the standard CSVs in `data/`. An output path such as
+`figures/pdb_method_trends.png` is grouped as
+`figures/pdb_method_trends/pdb_method_trends.png`. Article figure names and
+title/frame variants are listed in the [output guide](../README.md#outputs).
 
-The variants combine title/no title with closed/open top and right axes. PNG is
-the default image format. The homolog-timing plot also writes two yearly count
-CSVs.
+The homolog-timing plot also exports yearly counts. Membrane exports are
+specified in the [dataset reference](#solution_nmr_membrane_proteins).
 
-Datasets may contain later records, but plots use only years through 2024.
-
-Build only selected plot groups with `--plots`:
-
-```bash
-python src/pdb_plot.py \
-  --plots method_counts,solution_nmr_weight_stats,solution_nmr_monomer_quality
-```
-
-Use `--svg` to additionally generate SVG files:
-
-```bash
-python src/pdb_plot.py --svg
-```
-
-Input and output paths can be overridden with the corresponding flags, for
-example:
-
-```bash
-python src/pdb_plot.py \
-  --plots method_counts \
-  --counts-input data/pdb_method_counts_by_year.csv \
-  --annual-output-png figures/pdb_method_trends.png
-```
-
-The output is still grouped automatically, so this example writes
-`figures/pdb_method_trends/pdb_method_trends.png` and its three PNG variants.
-
-- `--nmr-monomer-precision-secondary-structure-input PATH`: add core/secondary-structure
-  RMSD histogram comparisons to the median precision plot, saved separately as
-  `_with_histogram`, `_comparison_panels`, and `_histogram` figures. Histograms use
-  the shared set of structures; the yearly curve uses the original core dataset.
-  The `_histogram` directory also receives a CSV for that shared set, joined by
-  `entry_id`, with `rmsd_nmr_core_angstrom` and
-  `rmsd_nmr_secondary_structure_angstrom`, deposition year, chain/core boundaries
-  and model/CA counts for each selection. Rows are sorted by decreasing core RMSD.
-  The histogram uses 0.1 Å bins below 3 Å and one separate `≥3 Å` category; the CSV
-  preserves each original numeric value, including the entire tail. Both values
-  follow the [ensemble precision formula](#solution_nmr_monomer_precision_stride_modeled_first_model).
-  For secondary structure, only first-model STRIDE `H/G/I/E/B` positions in the
-  same core enter alignment and RMSD. The CSV is shared by the standalone
-  histogram, inset and two-panel comparison.
-
-Run `python src/pdb_plot.py --help` to see all plot groups and path options.
-
-## License
-
-See the project [license summary](../README.md#license) and
-[`LICENSE`](../LICENSE) for the applicable terms.
-
-[rcsb-apis]: https://www.rcsb.org/docs/programmatic-access/web-apis-overview
-[stride-repository]: https://github.com/MDAnalysis/stride
+For the median precision plot,
+`--nmr-monomer-precision-secondary-structure-input PATH` adds core/secondary-
+structure comparisons while `--rmsd-residue-selection` remains `core`. The
+second input is built with the builder's `secondary-structure` selection.
+Comparisons join entries by `entry_id`; the yearly curve uses the original core
+sample. Histograms use 0.1 Å bins below 3 Å and one `≥3 Å` category. Their shared
+table keeps unrounded RMSDs in Å, deposition year, chain/core boundaries and
+model/CA counts, sorted by decreasing core RMSD. Both RMSDs use the ensemble
+precision formula above. The comparison outputs use the suffixes
+`_with_histogram`, `_comparison_panels` and `_histogram`; the shared CSV is saved
+beside the standalone histogram.
