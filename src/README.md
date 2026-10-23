@@ -560,8 +560,20 @@ Deleting published tables/figures does not invalidate compatible raw caches.
 project-wide deposition-year cutoff of 2024. It writes the usual title/frame PNG
 variants for `solution_nmr_membrane_proteins_by_year`,
 `solution_nmr_membrane_tmdet_status` and `solution_nmr_membrane_tmdet_residues`.
-The scatter uses only complete positive/valid negative results; the omitted count
-is printed and all statuses appear in the status plot. Three additional plots
+The residue map uses only complete positive/valid negative results. Each point
+is one PDB entry: x is the number of modeled H/B residues and y is the number of
+other modeled protein residues, summed over all chains of the first model.
+All points use the same symbol; no full-length/fragment classification is implied.
+Both axes are linear and retain the entire range, including zeros; there is no
+jitter or smoothing. Top and right histograms use the same entries and shared
+residue axes, with fixed bins `[0, 10)`, `[10, 20)`, etc. Counts are absolute
+numbers of entries, not density estimates. Each histogram sums to the number of
+points. An adjacent `solution_nmr_membrane_tmdet_residues.csv` contains all entries
+in the plotting years, including excluded entries, with their identifiers,
+status/error, residue counts and `included_in_residue_plot` flag. Its TM fraction
+is undefined for incomplete/unavailable results, even when partial counts exist.
+The full collection CSV retains additional metadata and cache paths; all statuses
+also appear in the status plot. Three additional plots
 export their source statistics as CSV beside the PNG variants:
 
 | Stem (after `solution_nmr_membrane_tmdet_`) | Statistic |
@@ -954,6 +966,16 @@ The output is still grouped automatically, so this example writes
   RMSD histogram comparisons to the median precision plot, saved separately as
   `_with_histogram`, `_comparison_panels`, and `_histogram` figures. Histograms use
   the shared set of structures; the yearly curve uses the original core dataset.
+  The `_histogram` directory also receives a CSV for that shared set, joined by
+  `entry_id`, with `rmsd_nmr_core_angstrom` and
+  `rmsd_nmr_secondary_structure_angstrom`, deposition year, chain/core boundaries
+  and model/CA counts for each selection. Rows are sorted by decreasing core RMSD.
+  The histogram uses 0.1 Å bins below 3 Å and one separate `≥3 Å` category; the CSV
+  preserves each original numeric value, including the entire tail. Both values
+  follow the [ensemble precision formula](#solution_nmr_monomer_precision_stride_modeled_first_model).
+  For secondary structure, only first-model STRIDE `H/G/I/E/B` positions in the
+  same core enter alignment and RMSD. The CSV is shared by the standalone
+  histogram, inset and two-panel comparison.
 
 Run `python src/pdb_plot.py --help` to see all plot groups and path options.
 

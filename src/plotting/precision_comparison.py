@@ -11,6 +11,7 @@ from matplotlib.colors import to_rgba
 from matplotlib.patches import Patch
 from matplotlib.ticker import FixedLocator, MaxNLocator, MultipleLocator
 
+from ..dataset.io.common import _atomic_write_csv_rows
 from .constants import AXIS_MAJOR_TICK_LENGTH, AXIS_MINOR_TICK_LENGTH
 
 
@@ -261,6 +262,21 @@ class PrecisionComparisonPlotsMixin:
                 output_png.with_stem(output_png.stem + suffix),
                 output_svg.with_stem(output_svg.stem + suffix),
             )
+
+        exported = core.drop(columns='residue_selection', errors='ignore').rename(
+            columns={'mean_rmsd_angstrom': 'rmsd_nmr_core_angstrom'})
+        secondary_columns = [column for column in (
+            'entry_id', 'mean_rmsd_angstrom', 'n_models', 'n_ca_core_used', 'n_ca_core_raw',
+        ) if column in secondary]
+        exported = exported.merge(
+            secondary[secondary_columns].rename(
+                columns={'mean_rmsd_angstrom': 'rmsd_nmr_secondary_structure_angstrom'}),
+            on='entry_id', validate='one_to_one', suffixes=('_core', '_secondary_structure'),
+        ).sort_values(['rmsd_nmr_core_angstrom', 'entry_id'], ascending=[False, True])
+        histogram_csv = self._grouped_figure_output_path(paths('_histogram')[0]).with_suffix('.csv')
+        _atomic_write_csv_rows(histogram_csv, exported.columns,
+                               exported.astype(object).where(exported.notna(), None)
+                               .itertuples(index=False, name=None))
 
         def draw_inset(ax: plt.Axes) -> None:
             self._draw_core_precision_trend(ax, yearly)

@@ -143,6 +143,20 @@ python src/pdb_plot.py \
   --plots solution_nmr_monomer_precision_stride_modeled_first_model_median
 ```
 
+To add the core/secondary-structure RMSD histogram comparison, use the existing
+secondary-structure dataset:
+
+```bash
+python src/pdb_plot.py \
+  --plots solution_nmr_monomer_precision_stride_modeled_first_model_median \
+  --nmr-monomer-precision-secondary-structure-input data/solution_nmr_monomer_precision_stride_modeled_first_model_secondary_structure.csv
+```
+
+The `_histogram` figure directory also contains a CSV with one row per plotted
+PDB entry, both RMSD values in Å, and atom/model counts. Rows are sorted by core
+RMSD, largest first; the values represented by the `≥3 Å` bin remain unrounded
+and unpooled in the CSV. The comparison panels use the same table.
+
 ### Figure 5
 
 ```bash
@@ -197,8 +211,17 @@ and a C++20 compiler are required), caches calculations, and saves all region
 categories and raw outputs. Existing binaries can be supplied with
 `--tmdet-executable /path/to/tmdet`. The entry CSV, companion tables and manifest
 share the stem `data/solution_nmr_membrane_proteins`. PNG figures show deposition
-counts, calculation status, modeled residue counts, annual TM fractions and
-five-year fraction distributions. Time-summary CSVs accompany the corresponding PNGs.
+counts, calculation status, a residue-count map with marginal histograms, annual
+TM fractions and five-year fraction distributions. The map uses complete TmDet
+results, including zero TM counts; it does not classify full-length proteins or
+fragments. Histograms count entries in ten-residue bins on each axis.
+
+For sharing the membrane data, use
+`figures/solution_nmr_membrane_tmdet_residues/solution_nmr_membrane_tmdet_residues.csv`:
+it contains all entries through 2024, their TmDet status, residue counts and the
+`included_in_residue_plot` flag. Incomplete results remain in this CSV and are
+excluded from the map and both marginal histograms. Time-summary CSVs also
+accompany the corresponding PNGs; the full collection remains in `data/`.
 See the [protocol and cache reference](src/README.md#solution_nmr_membrane_proteins).
 
 ## Long-Running Builds

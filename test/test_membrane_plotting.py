@@ -75,7 +75,7 @@ def test_unknown_result_not_coerced_to_zero(plotter):
 
 
 @pytest.mark.parametrize('empty', [False, True])
-def test_all_standard_variants_and_data_counts(plotter, empty):
+def test_all_standard_variants_and_data_counts(plotter, tmp_path, empty):
     data = cohort_table().iloc[:0] if empty else cohort_table()
     rendered = []
     def inspect(**kwargs):
@@ -88,12 +88,35 @@ def test_all_standard_variants_and_data_counts(plotter, empty):
             assert sum(p.get_height() for p in ax.patches) == (0 if empty else 5)
         else:
             assert sum(len(c.get_offsets()) for c in ax.collections) == (0 if empty else 2)
+            assert len(kwargs['fig'].axes) == 3
+            top, right = kwargs['fig'].axes[1:]
+            for marginal in (top, right):
+                assert marginal.patches[0].get_data().values.sum() == (0 if empty else 2)
+            if not empty:
+                np.testing.assert_array_equal(ax.collections[0].get_offsets(), [[25, 75], [0, 80]])
+                np.testing.assert_array_equal(top.patches[0].get_data().edges, [0, 10, 20, 30])
+                np.testing.assert_array_equal(top.patches[0].get_data().values, [1, 0, 1])
+                # 80 belongs to [80, 90), while 75 belongs to [70, 80).
+                np.testing.assert_array_equal(right.patches[0].get_data().values, [0] * 7 + [1, 1])
+            assert ax.get_shared_x_axes().joined(ax, top)
+            assert ax.get_shared_y_axes().joined(ax, right)
+            assert all(panel.spines['top'].get_visible() == ('open_axes' not in name)
+                       for panel in (ax, top, right))
         assert ax.get_ylim()[0] == 0
     with patch.object(plotter, '_read_csv', return_value=data), patch.object(plotter, '_save_figure_files', side_effect=inspect):
-        plotter.plot_solution_nmr_membrane_proteins(Path('data.csv'), *[Path(f'{stem}.{ext}')
+        plotter.plot_solution_nmr_membrane_proteins(Path('data.csv'), *[tmp_path / f'{stem}.{ext}'
             for stem in ('annual', 'status', 'residues') for ext in ('png', 'svg')])
     assert len(rendered) == 12
     assert plt.get_fignums() == []
+    exported = pd.read_csv(tmp_path / 'residues/residues.csv')
+    if empty:
+        assert exported.empty
+    else:
+        assert exported['entry_id'].tolist() == ['1AAA', '1BBB', '1CCC', '1DDD', '1EEE']
+        assert exported['included_in_residue_plot'].tolist() == [True, True, False, False, False]
+        assert exported['tmdet_tm_fraction'].iloc[:2].tolist() == [.25, 0]
+        assert exported['tmdet_tm_fraction'].iloc[2:].isna().all()
+        assert exported['tmdet_tm_residue_count'].iloc[2] == 20
 
 
 def test_fraction_statistics_weight_entries_and_preserve_missing_years(plotter):

@@ -23,6 +23,74 @@ TMDET_LABELS = (
 class MembranePlotsMixin:
     """Count entries once and keep failed/incomplete calculations visible."""
 
+    def _render_membrane_residue_map(self, table, output_png, output_svg):
+        """Plot complete entry counts with shared-axis, ten-residue histograms."""
+        included = table['tmdet_status'].isin(TMDET_STATUSES[:2])
+        exported = table.reindex(columns=[
+            'entry_id', 'year', 'title', 'membrane_annotation_sources',
+            'deposited_model_count', 'tmdet_status', 'tmdet_error',
+            'tmdet_modeled_residue_count', 'tmdet_tm_residue_count',
+            'tmdet_other_residue_count',
+        ]).copy()
+        exported['included_in_residue_plot'] = included
+        exported['tmdet_tm_fraction'] = (
+            table['tmdet_tm_residue_count'] / table['tmdet_modeled_residue_count']
+        ).where(included)
+        _atomic_write_csv_rows(self._grouped_figure_output_path(output_png).with_suffix('.csv'),
+                               exported.columns, exported.astype(object).where(
+                                   exported.notna(), None).itertuples(index=False, name=None))
+        x = table.loc[included, 'tmdet_tm_residue_count'].to_numpy(dtype=float)
+        y = table.loc[included, 'tmdet_other_residue_count'].to_numpy(dtype=float)
+        x_edges = np.arange(0, (int(x.max()) // 10 + 1) * 10 + 1, 10) if len(x) else np.array([0, 10])
+        y_edges = np.arange(0, (int(y.max()) // 10 + 1) * 10 + 1, 10) if len(y) else np.array([0, 10])
+        x_counts, _ = np.histogram(x, bins=x_edges)
+        y_counts, _ = np.histogram(y, bins=y_edges)
+        color = '#0072B2'
+        for with_title, open_axes in ((True, False), (False, False), (True, True), (False, True)):
+            fig = plt.figure(figsize=self.config.figure_size(1.2), layout='constrained')
+            grid = fig.add_gridspec(2, 2, width_ratios=(4, 1.2), height_ratios=(1, 4),
+                                   hspace=.04, wspace=.04)
+            ax = fig.add_subplot(grid[1, 0])
+            top = fig.add_subplot(grid[0, 0], sharex=ax)
+            right = fig.add_subplot(grid[1, 1], sharey=ax)
+            ax.scatter(x, y, s=22, facecolors=(0, .447, .698, .22),
+                       edgecolors=color, linewidths=.55, clip_on=False)
+            for marginal, counts, edges, orientation in (
+                (top, x_counts, x_edges, 'vertical'),
+                (right, y_counts, y_edges, 'horizontal'),
+            ):
+                marginal.stairs(counts, edges, orientation=orientation, fill=True,
+                                color=color, alpha=.22, linewidth=0)
+                marginal.stairs(counts, edges, orientation=orientation,
+                                color=color, linewidth=1.1)
+            ax.set(xlim=(0, x_edges[-1]), ylim=(0, y_edges[-1]),
+                   xlabel='Modeled TM residues', ylabel='Other modeled residues')
+            ax.xaxis.set_major_locator(MaxNLocator(nbins=5, integer=True))
+            ax.yaxis.set_major_locator(MaxNLocator(nbins=5, integer=True))
+            top.set_ylim(0, max(1, int(x_counts.max()) * 1.12))
+            right.set_xlim(0, max(1, int(y_counts.max()) * 1.12))
+            top.yaxis.set_major_locator(MaxNLocator(nbins=3, integer=True))
+            right.xaxis.set_major_locator(MaxNLocator(nbins=3, integer=True))
+            top.set_ylabel('PDB entries', fontsize=10)
+            right.set_xlabel('PDB entries', fontsize=10)
+            for panel in (ax, top, right):
+                self._configure_minor_ticks(panel, use_year_x_ticks=False)
+                self._configure_boxed_axes(panel)
+                if open_axes:
+                    self._configure_open_axes(panel)
+            top.tick_params(axis='x', which='both', labelbottom=False)
+            right.tick_params(axis='y', which='both', labelleft=False)
+            if with_title:
+                fig.suptitle(self.config.nmr_membrane_residues_title,
+                             fontsize=TITLE_FONTSIZE, fontweight='bold')
+            png, svg = output_png, output_svg
+            if not with_title:
+                png, svg = self._titleless_output_path(png), self._titleless_output_path(svg)
+            if open_axes:
+                png, svg = self._open_axes_output_path(png), self._open_axes_output_path(svg)
+            self._save_figure_files(fig=fig, output_png=png, output_svg=svg)
+            plt.close(fig)
+
     def _draw_membrane_share_areas(self, ax, years, shares, labels, colors):
         """Fill complete calendar-year bins, leaving undefined denominators blank."""
         years = np.asarray(years, dtype=int)
@@ -143,7 +211,6 @@ class MembranePlotsMixin:
     ) -> None:
         table = self._prepare_solution_nmr_membrane_table(self._read_csv(data_path))
         annual, statuses = self._summarize_solution_nmr_membrane_table(table)
-        usable = table.loc[table['tmdet_status'].isin(TMDET_STATUSES[:2])]
         colors = ('#0072B2', '#E69F00', '#009E73', '#999999', '#D55E00')
         hatches = ('//', '\\\\', 'xx', '..', '++')
         use_year_ticks = not annual.empty and annual.index.max() - annual.index.min() >= YEAR_MAJOR_TICK_STEP
@@ -170,22 +237,6 @@ class MembranePlotsMixin:
             ax.yaxis.set_major_locator(MaxNLocator(integer=True))
             ax.bar_label(bars, padding=4, fontsize=11)
 
-        def draw_residues(ax):
-            for status, label, color, marker in zip(TMDET_STATUSES[:2],
-                    ('Membrane detected', 'No membrane detected'), colors[:2], ('o', 'x')):
-                rows = usable.loc[usable['tmdet_status'] == status]
-                ax.scatter(rows['tmdet_tm_residue_count'].to_numpy(dtype=float),
-                           rows['tmdet_other_residue_count'].to_numpy(dtype=float),
-                           s=24, alpha=.45, c=color, marker=marker,
-                           linewidths=.7, label=f'{label} (n = {len(rows)})', clip_on=False)
-            max_x = float(usable['tmdet_tm_residue_count'].max()) if len(usable) else 0
-            max_y = float(usable['tmdet_other_residue_count'].max()) if len(usable) else 0
-            ax.set_xlim(0, max(1, max_x * 1.05))
-            ax.set_ylim(0, max(1, max_y * 1.15))
-            ax.text(.98, .03, f'{len(table) - len(usable)} incomplete/unavailable results omitted',
-                    transform=ax.transAxes, ha='right', fontsize=9)
-            self._add_legend(ax, loc='upper right', fontsize=10)
-
         with plt.rc_context():
             self._scientific_style()
             self._render_figure(annual_output_png, annual_output_svg, self.config.nmr_membrane_annual_title,
@@ -193,9 +244,7 @@ class MembranePlotsMixin:
             self._render_figure(coverage_output_png, coverage_output_svg, self.config.nmr_membrane_coverage_title,
                                 'Number of PDB entries', draw_status, x_label='', use_year_x_ticks=False,
                                 auto_minor_ticks=False)
-            self._render_figure(residues_output_png, residues_output_svg, self.config.nmr_membrane_residues_title,
-                                'Other modeled residues per PDB entry', draw_residues,
-                                x_label='Modeled residues in TmDet H/B regions per PDB entry', use_year_x_ticks=False)
+            self._render_membrane_residue_map(table, residues_output_png, residues_output_svg)
 
     def plot_solution_nmr_membrane_trends(
         self, data_path: Path, composition_output_png: Path, composition_output_svg: Path,

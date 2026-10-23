@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import Mock, patch
 
 import numpy as np
@@ -64,6 +65,7 @@ class PrecisionComparisonTests(unittest.TestCase):
             kwargs["draw_fn"](Mock())
 
         with (
+            TemporaryDirectory() as tmp,
             patch.object(plotter, "_read_csv", side_effect=[self.core, self.secondary]),
             patch.object(plotter, "_scientific_style"),
             patch.object(plotter, "_render_figure", side_effect=draw_without_saving),
@@ -73,7 +75,7 @@ class PrecisionComparisonTests(unittest.TestCase):
         ):
             plotter.plot_solution_nmr_monomer_precision_comparison(
                 Path("core.csv"), Path("secondary.csv"),
-                Path("figure4.png"), Path("figure4.svg"),
+                Path(tmp) / "figure4.png", Path(tmp) / "figure4.svg",
             )
 
         self.assertEqual(draw_histogram.call_count, 2)
@@ -93,6 +95,32 @@ class PrecisionComparisonTests(unittest.TestCase):
             self.assertAlmostEqual(yearly.loc[2000], 0.7)
             self.assertAlmostEqual(yearly.loc[2024], 0.6)
             self.assertEqual(yearly.index.tolist(), [2000, 2024])
+
+    def test_histogram_csv_matches_paired_entries_and_retains_large_rmsds(self) -> None:
+        plotter = PDBScientificPlotter(PlotConfig())
+        core, secondary = self.core.copy(), self.secondary.copy()
+        core.loc[core.entry_id == 'a', 'mean_rmsd_angstrom'] = 28.0
+        secondary.loc[secondary.entry_id == 'a', 'mean_rmsd_angstrom'] = 24.0
+        core['n_ca_core_used'] = [39, 39, 38, 39]
+        secondary['n_ca_core_used'] = [20, 25, 10, 25]
+        with (
+            TemporaryDirectory() as tmp,
+            patch.object(plotter, '_read_csv', side_effect=[core, secondary]),
+            patch.object(plotter, '_scientific_style'),
+            patch.object(plotter, '_render_figure'),
+            patch.object(plotter, '_render_precision_comparison_panels'),
+        ):
+            plotter.plot_solution_nmr_monomer_precision_comparison(
+                Path('core.csv'), Path('secondary.csv'),
+                Path(tmp) / 'figure4.png', Path(tmp) / 'figure4.svg',
+            )
+            exported = pd.read_csv(Path(tmp) / 'figure4_histogram/figure4_histogram.csv')
+        self.assertEqual(exported.entry_id.tolist(), ['a', 'c'])
+        self.assertEqual(exported.rmsd_nmr_core_angstrom.tolist(), [28.0, .6])
+        self.assertEqual(exported.rmsd_nmr_secondary_structure_angstrom.tolist(), [24.0, .3])
+        self.assertEqual(exported.n_ca_core_used_core.tolist(), [39, 38])
+        self.assertEqual(exported.n_ca_core_used_secondary_structure.tolist(), [25, 20])
+        self.assertEqual(exported.year.tolist(), [2000, 2024])
 
     def test_rejects_mislabelled_or_missing_secondary_selection(self) -> None:
         cases = (
