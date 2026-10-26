@@ -27,6 +27,12 @@ query($ids: [String!]!) {
     pdbx_nmr_sample_details {
       solution_id contents details label solvent_system type
     }
+    assemblies {
+      rcsb_id
+      pdbx_struct_assembly_gen { asym_id_list oper_expression }
+      rcsb_assembly_info { polymer_entity_instance_count_protein }
+      rcsb_struct_symmetry { kind type symbol oligomeric_state stoichiometry }
+    }
     polymer_entities {
       rcsb_id
       entity_poly {

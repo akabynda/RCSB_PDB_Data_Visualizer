@@ -23,6 +23,13 @@ def cohort_table():
         'tmdet_modeled_residue_count': [100, 80, 70, 10, 90, 100],
         'tmdet_tm_residue_count': [25, 0, 20, None, None, 30],
         'tmdet_other_residue_count': [75, 80, None, None, None, 70],
+        # 1AAA is a homodimer of 50-residue chains with 12 and 13 TM residues.
+        'max_protein_entity_chain_count': [2, 1, 1, 1, 1, 1],
+        'tmdet_copy_mean_modeled_residue_count': [50, 80, None, None, None, 100],
+        'tmdet_copy_mean_tm_residue_count': [12.5, 0, None, None, None, 30],
+        'tmdet_copy_mean_other_residue_count': [37.5, 80, None, None, None, 70],
+        'tmdet_copy_min_tm_residue_count': [12, 0, None, None, None, 30],
+        'tmdet_copy_max_tm_residue_count': [13, 0, None, None, None, 30],
     })
 
 
@@ -68,6 +75,52 @@ def test_invalid_metadata_never_plots_as_valid(plotter, column, value):
         plotter._prepare_solution_nmr_membrane_table(table)
 
 
+@pytest.mark.parametrize('row,column,value', [
+    (0, 'max_protein_entity_chain_count', 0), (0, 'max_protein_entity_chain_count', None),
+    (0, 'max_protein_entity_chain_count', 1.5),
+    (0, 'tmdet_copy_mean_other_residue_count', 38),  # 12.5 + 38 != 50
+    (0, 'tmdet_copy_min_tm_residue_count', 13), (0, 'tmdet_copy_max_tm_residue_count', 12),
+    (0, 'tmdet_copy_min_tm_residue_count', 11.5), (0, 'tmdet_copy_mean_tm_residue_count', -1),
+    (0, 'tmdet_copy_mean_tm_residue_count', np.inf),
+    (0, 'tmdet_copy_mean_modeled_residue_count', 101),  # exceeds the entry total
+    (1, 'tmdet_copy_mean_tm_residue_count', 1),  # valid negative must stay zero
+    (1, 'tmdet_copy_mean_modeled_residue_count', 40),  # single copy must equal total
+    (1, 'tmdet_copy_mean_other_residue_count', None),  # partial set of copy counts
+])
+def test_invalid_copy_counts_never_plot_as_valid(plotter, row, column, value):
+    table = cohort_table().astype(object)
+    table.loc[row, column] = value
+    with pytest.raises(ValueError):
+        plotter._prepare_membrane_copy_counts(plotter._prepare_solution_nmr_membrane_table(table))
+
+
+def test_copy_counts_for_incomplete_result_raise(plotter):
+    table = cohort_table().astype(object)
+    table.loc[2, ['tmdet_copy_mean_modeled_residue_count', 'tmdet_copy_mean_tm_residue_count',
+                  'tmdet_copy_mean_other_residue_count', 'tmdet_copy_min_tm_residue_count',
+                  'tmdet_copy_max_tm_residue_count']] = [70, 20, 50, 20, 20]
+    with pytest.raises(ValueError, match='only for complete'):
+        plotter._prepare_membrane_copy_counts(plotter._prepare_solution_nmr_membrane_table(table))
+
+
+def test_missing_copy_columns_raise(plotter):
+    table = plotter._prepare_solution_nmr_membrane_table(cohort_table())
+    with pytest.raises(ValueError, match='tmdet_copy_max_tm_residue_count'):
+        plotter._prepare_membrane_copy_counts(table.drop(columns='tmdet_copy_max_tm_residue_count'))
+
+
+def test_complete_entry_without_copy_counts_is_omitted_visibly(plotter):
+    table = cohort_table().astype(object)
+    table.loc[0, ['tmdet_copy_mean_modeled_residue_count', 'tmdet_copy_mean_tm_residue_count',
+                  'tmdet_copy_mean_other_residue_count', 'tmdet_copy_min_tm_residue_count',
+                  'tmdet_copy_max_tm_residue_count']] = None
+    with pytest.warns(RuntimeWarning, match='1 complete entries.*1AAA'):
+        _, included, repeated = plotter._prepare_membrane_copy_counts(
+            plotter._prepare_solution_nmr_membrane_table(table))
+    assert included.tolist() == [False, True, False, False, False]
+    assert repeated.tolist() == [True, False, False, False, False]
+
+
 def test_unknown_result_not_coerced_to_zero(plotter):
     table = plotter._prepare_solution_nmr_membrane_table(cohort_table())
     assert table.loc[table['tmdet_status'] == 'error', 'tmdet_tm_residue_count'].isna().all()
@@ -91,13 +144,25 @@ def test_all_standard_variants_and_data_counts(plotter, tmp_path, empty):
             assert len(kwargs['fig'].axes) == 3
             top, right = kwargs['fig'].axes[1:]
             for marginal in (top, right):
-                assert marginal.patches[0].get_data().values.sum() == (0 if empty else 2)
+                distinct, stacked = marginal.patches[:2]
+                assert distinct.get_data().values.sum() == (0 if empty else 1)
+                assert stacked.get_data().values.sum() == (0 if empty else 2)
+                np.testing.assert_array_equal(stacked.get_data().baseline, distinct.get_data().values)
             if not empty:
-                np.testing.assert_array_equal(ax.collections[0].get_offsets(), [[25, 75], [0, 80]])
-                np.testing.assert_array_equal(top.patches[0].get_data().edges, [0, 10, 20, 30])
-                np.testing.assert_array_equal(top.patches[0].get_data().values, [1, 0, 1])
-                # 80 belongs to [80, 90), while 75 belongs to [70, 80).
-                np.testing.assert_array_equal(right.patches[0].get_data().values, [0] * 7 + [1, 1])
+                # Copy means, not entry totals: the dimer is plotted at (25/2, 75/2).
+                np.testing.assert_array_equal(ax.collections[0].get_offsets(), [[0, 80]])
+                np.testing.assert_array_equal(ax.collections[1].get_offsets(), [[12.5, 37.5]])
+                # Groups differ by marker shape as well as colour.
+                circle, triangle = (c.get_paths()[0].vertices for c in ax.collections)
+                assert circle.shape != triangle.shape
+                assert ax.collections[0].get_label() != ax.collections[1].get_label()
+                assert [text.get_text() for text in ax.get_legend().get_texts()] == [
+                    c.get_label() for c in ax.collections]
+                np.testing.assert_array_equal(top.patches[1].get_data().edges, [0, 10, 20])
+                np.testing.assert_array_equal(top.patches[1].get_data().values, [1, 1])
+                # 80 belongs to [80, 90), while 37.5 belongs to [30, 40).
+                np.testing.assert_array_equal(right.patches[0].get_data().values, [0] * 8 + [1])
+                np.testing.assert_array_equal(right.patches[1].get_data().values, [0] * 3 + [1] + [0] * 4 + [1])
             assert ax.get_shared_x_axes().joined(ax, top)
             assert ax.get_shared_y_axes().joined(ax, right)
             assert all(panel.spines['top'].get_visible() == ('open_axes' not in name)
@@ -117,6 +182,12 @@ def test_all_standard_variants_and_data_counts(plotter, tmp_path, empty):
         assert exported['tmdet_tm_fraction'].iloc[:2].tolist() == [.25, 0]
         assert exported['tmdet_tm_fraction'].iloc[2:].isna().all()
         assert exported['tmdet_tm_residue_count'].iloc[2] == 20
+        # Entry totals and copy means are both retained.
+        assert exported['tmdet_tm_residue_count'].iloc[0] == 25
+        assert exported['tmdet_copy_mean_tm_residue_count'].iloc[0] == 12.5
+        assert exported[['tmdet_copy_min_tm_residue_count', 'tmdet_copy_max_tm_residue_count']].iloc[0].tolist() == [12, 13]
+        assert exported['repeated_protein_chains'].tolist() == [True, False, False, False, False]
+        assert exported['tmdet_copy_mean_tm_residue_count'].iloc[2:].isna().all()
 
 
 def test_fraction_statistics_weight_entries_and_preserve_missing_years(plotter):

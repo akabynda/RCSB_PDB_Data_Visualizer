@@ -1,6 +1,7 @@
 """Map TmDet XML regions onto actual first-model PDB residues."""
 
 from collections import Counter, defaultdict
+from fractions import Fraction
 import json
 import math
 import xml.etree.ElementTree as ET
@@ -12,7 +13,15 @@ TMDET_SUMMARY_COLUMNS = (
     "tmdet_modeled_residue_count", "tmdet_assigned_residue_count", "tmdet_unassigned_residue_count",
     "tmdet_tm_residue_count", "tmdet_other_residue_count", "tmdet_tm_fraction", "tmdet_region_counts_json",
 )
-TMDET_ENTRY_COLUMNS = (*TMDET_SUMMARY_COLUMNS, "tmdet_model_index", "tmdet_result_directory")
+TMDET_COPY_COLUMNS = (
+    "tmdet_copy_mean_modeled_residue_count", "tmdet_copy_mean_tm_residue_count",
+    "tmdet_copy_mean_other_residue_count", "tmdet_copy_min_tm_residue_count",
+    "tmdet_copy_max_tm_residue_count",
+)
+TMDET_ENTRY_COLUMNS = (
+    *TMDET_SUMMARY_COLUMNS, *TMDET_COPY_COLUMNS, "tmdet_model_index", "tmdet_result_directory",
+)
+COMPLETE_TMDET_STATUSES = frozenset({"membrane_detected", "no_membrane_detected"})
 TMDET_RESIDUE_COLUMNS = (
     "entry_id", "entity_id", "asym_id", "auth_asym_id", "pdb_chain_id", "auth_seq_id",
     "insertion_code", "residue_name", "is_membrane", "has_ca", "region_type", "assignment_status",
@@ -90,6 +99,31 @@ def _summarize(rows, metadata, status):
         "tmdet_tm_fraction": tm_count / n if complete else None,
         "tmdet_region_counts_json": json.dumps(dict(sorted(counts.items())), separators=(",", ":")),
     }
+
+
+def summarize_entity_copies(entry_status, chain_rows):
+    """Average complete chain counts over copies of each entity, then sum the entities.
+
+    Min/max sum each entity's fewest/most TM residues among its copies. Counts are
+    blank unless the entry and every protein chain have complete TmDet results.
+    """
+    if entry_status not in COMPLETE_TMDET_STATUSES or not chain_rows or any(
+        chain.get("tmdet_status") not in COMPLETE_TMDET_STATUSES
+        or chain.get("tmdet_other_residue_count") is None for chain in chain_rows
+    ):
+        return dict.fromkeys(TMDET_COPY_COLUMNS)
+    copies = defaultdict(list)
+    for chain in chain_rows:
+        copies[chain["entity_id"]].append(chain)
+    modeled, tm, low, high = Fraction(0), Fraction(0), 0, 0
+    for rows in copies.values():
+        counts = [row["tmdet_tm_residue_count"] for row in rows]
+        modeled += Fraction(sum(row["tmdet_modeled_residue_count"] for row in rows), len(rows))
+        tm += Fraction(sum(counts), len(rows))
+        low, high = low + min(counts), high + max(counts)
+    # Exact rationals keep mean TM + mean other equal to the mean modeled count.
+    values = [value.numerator if value.denominator == 1 else float(value) for value in (modeled, tm, modeled - tm)]
+    return dict(zip(TMDET_COPY_COLUMNS, (*values, low, high)))
 
 
 def parse_tmdet_annotations(xml_text, modeled_residues, chain_rows):

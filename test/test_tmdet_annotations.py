@@ -4,7 +4,9 @@ import json
 import pytest
 
 from src.dataset.pdb_normalization import PDBPolymerMetadata
-from src.dataset.tmdet_annotations import collect_modeled_residues, parse_tmdet_annotations
+from src.dataset.tmdet_annotations import (
+    TMDET_COPY_COLUMNS, collect_modeled_residues, parse_tmdet_annotations, summarize_entity_copies,
+)
 
 
 def chain(asym='A', auth='A'):
@@ -95,3 +97,43 @@ def test_missing_chain_and_invalid_xml():
     assert chains['B']['tmdet_tm_residue_count'] is None
     with pytest.raises(ValueError):
         parse_tmdet_annotations('<html/>', [], [])
+
+
+def counted(entity, modeled, tm, status='membrane_detected'):
+    return dict(entity_id=entity, tmdet_status=status, tmdet_modeled_residue_count=modeled,
+                tmdet_tm_residue_count=tm, tmdet_other_residue_count=modeled - tm)
+
+
+def test_copy_means_for_homopentamer_with_unequal_copies():
+    # 2M6I-like copies: (96 + 95 + 93 + 99 + 99) / 5 = 482 / 5 = 96.4 TM residues per copy.
+    chains = [counted('1', 150, tm) for tm in (96, 95, 93, 99, 99)]
+    summary = summarize_entity_copies('membrane_detected', chains)
+    assert summary == dict(zip(TMDET_COPY_COLUMNS, (150, 96.4, 53.6, 93, 99)))
+    assert summary['tmdet_copy_mean_tm_residue_count'] + summary['tmdet_copy_mean_other_residue_count'] == 150
+
+
+def test_distinct_entities_are_summed_and_repeated_entity_averaged():
+    # Two 222-residue copies (70, 65 TM) and one 25-residue partner: 222 + 25, 67.5 + 0.
+    chains = [counted('1', 222, 70), counted('1', 222, 65), counted('2', 25, 0)]
+    assert summarize_entity_copies('membrane_detected', chains) == dict(
+        zip(TMDET_COPY_COLUMNS, (247, 67.5, 179.5, 65, 70)))
+
+
+def test_single_copies_and_valid_negatives_equal_entry_totals():
+    chains = [counted('1', 40, 18), counted('2', 30, 0)]
+    assert summarize_entity_copies('membrane_detected', chains) == dict(
+        zip(TMDET_COPY_COLUMNS, (70, 18, 52, 18, 18)))
+    negative = [counted('1', 60, 0, 'no_membrane_detected')] * 2
+    assert summarize_entity_copies('no_membrane_detected', negative) == dict(
+        zip(TMDET_COPY_COLUMNS, (60, 0, 60, 0, 0)))
+
+
+@pytest.mark.parametrize('status,chains', [
+    ('partial_annotation', [counted('1', 10, 5)]),
+    ('error', [counted('1', 10, 5)]),
+    ('membrane_detected', []),
+    ('membrane_detected', [counted('1', 10, 5), dict(entity_id='1', tmdet_status='not_in_model')]),
+    ('membrane_detected', [counted('1', 10, 5), {**counted('1', 10, 5), 'tmdet_other_residue_count': None}]),
+])
+def test_incomplete_copies_leave_copy_counts_blank(status, chains):
+    assert summarize_entity_copies(status, chains) == dict.fromkeys(TMDET_COPY_COLUMNS)

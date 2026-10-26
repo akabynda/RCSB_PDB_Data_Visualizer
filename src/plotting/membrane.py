@@ -18,20 +18,75 @@ TMDET_LABELS = (
     'Membrane detected\ncomplete annotation', 'No membrane\ndetected',
     'Partial\nannotation', 'No analyzable\nprotein', 'Calculation\nerror',
 )
+COPY_COUNT_COLUMNS = (
+    'tmdet_copy_mean_modeled_residue_count', 'tmdet_copy_mean_tm_residue_count',
+    'tmdet_copy_mean_other_residue_count', 'tmdet_copy_min_tm_residue_count',
+    'tmdet_copy_max_tm_residue_count',
+)
+# Copy means are rationals with small denominators stored as floats; real
+# inconsistencies are at least 1/copies residues, far above this rounding bound.
+COPY_COUNT_ATOL = 1e-9
 
 
 class MembranePlotsMixin:
     """Count entries once and keep failed/incomplete calculations visible."""
 
+    @staticmethod
+    def _prepare_membrane_copy_counts(table):
+        """Validate copy-mean counts; return numeric copy table, plotted rows and oligomer flags."""
+        name = 'SOLUTION NMR membrane residue map'
+        missing = {'max_protein_entity_chain_count', *COPY_COUNT_COLUMNS} - set(table.columns)
+        if missing:
+            raise ValueError(f'{name} is missing required columns: {", ".join(sorted(missing))}')
+        copies = pd.DataFrame(index=table.index)
+        for column in ('max_protein_entity_chain_count', *COPY_COUNT_COLUMNS):
+            raw = table[column].astype('string').str.strip()
+            copies[column] = pd.to_numeric(raw.mask(raw == ''), errors='raise')
+        chains = copies['max_protein_entity_chain_count']
+        if chains.isna().any() or (chains < 1).any() or (chains % 1 != 0).any():
+            raise ValueError(f'{name}: invalid max_protein_entity_chain_count')
+        known = copies[list(COPY_COUNT_COLUMNS)].notna()
+        complete = table['tmdet_status'].isin(TMDET_STATUSES[:2])
+        if (known.any(axis=1) != known.all(axis=1)).any() or (known.all(axis=1) & ~complete).any():
+            raise ValueError(f'{name}: copy counts must be all present, and only for complete TmDet results')
+        included = complete & known.all(axis=1)
+        unavailable = table.loc[complete & ~included, 'entry_id'].tolist()
+        if unavailable:
+            warnings.warn(f'{name}: omitting {len(unavailable)} complete entries without copy counts: '
+                          + ', '.join(unavailable), RuntimeWarning, stacklevel=3)
+        rows = copies.loc[included]
+        modeled, tm, other, low, high = (rows[column] for column in COPY_COUNT_COLUMNS)
+        totals = table.loc[included]
+        single = rows['max_protein_entity_chain_count'] == 1
+        atol = COPY_COUNT_ATOL
+        if (not np.isfinite(rows[list(COPY_COUNT_COLUMNS)]).all().all() or (rows < 0).any().any()
+                or (modeled <= 0).any() or (low % 1 != 0).any() or (high % 1 != 0).any()
+                or ((tm + other - modeled).abs() > atol).any()
+                or (low > tm + atol).any() or (tm > high + atol).any()
+                or (modeled > totals['tmdet_modeled_residue_count'] + atol).any()
+                or (tm > totals['tmdet_tm_residue_count'] + atol).any()
+                or (tm[totals['tmdet_status'] == 'no_membrane_detected'] != 0).any()
+                or (modeled[single] != totals.loc[single, 'tmdet_modeled_residue_count']).any()
+                or (tm[single] != totals.loc[single, 'tmdet_tm_residue_count']).any()):
+            raise ValueError(f'{name}: inconsistent copy-mean residue counts')
+        return copies, included, chains > 1
+
     def _render_membrane_residue_map(self, table, output_png, output_svg):
-        """Plot complete entry counts with shared-axis, ten-residue histograms."""
-        included = table['tmdet_status'].isin(TMDET_STATUSES[:2])
+        """Plot copy-mean counts with stacked, shared-axis ten-residue histograms."""
+        copies, included, repeated = self._prepare_membrane_copy_counts(table)
         exported = table.reindex(columns=[
             'entry_id', 'year', 'title', 'membrane_annotation_sources',
-            'deposited_model_count', 'tmdet_status', 'tmdet_error',
-            'tmdet_modeled_residue_count', 'tmdet_tm_residue_count',
-            'tmdet_other_residue_count',
+            'deposited_model_count', 'protein_entity_count', 'protein_chain_count',
+            'tmdet_status', 'tmdet_error', 'tmdet_modeled_residue_count',
+            'tmdet_tm_residue_count', 'tmdet_other_residue_count',
         ]).copy()
+        exported['max_protein_entity_chain_count'] = copies['max_protein_entity_chain_count']
+        for column in COPY_COUNT_COLUMNS:
+            exported[column] = copies[column]
+        exported = exported.join(table.reindex(columns=[
+            'assembly_global_symmetry', 'assembly_global_stoichiometry', 'assembly_oligomeric_state',
+        ]))
+        exported['repeated_protein_chains'] = repeated
         exported['included_in_residue_plot'] = included
         exported['tmdet_tm_fraction'] = (
             table['tmdet_tm_residue_count'] / table['tmdet_modeled_residue_count']
@@ -39,13 +94,16 @@ class MembranePlotsMixin:
         _atomic_write_csv_rows(self._grouped_figure_output_path(output_png).with_suffix('.csv'),
                                exported.columns, exported.astype(object).where(
                                    exported.notna(), None).itertuples(index=False, name=None))
-        x = table.loc[included, 'tmdet_tm_residue_count'].to_numpy(dtype=float)
-        y = table.loc[included, 'tmdet_other_residue_count'].to_numpy(dtype=float)
+        x = copies.loc[included, 'tmdet_copy_mean_tm_residue_count'].to_numpy(dtype=float)
+        y = copies.loc[included, 'tmdet_copy_mean_other_residue_count'].to_numpy(dtype=float)
+        oligomer = repeated[included].to_numpy(dtype=bool)
         x_edges = np.arange(0, (int(x.max()) // 10 + 1) * 10 + 1, 10) if len(x) else np.array([0, 10])
         y_edges = np.arange(0, (int(y.max()) // 10 + 1) * 10 + 1, 10) if len(y) else np.array([0, 10])
+        x_distinct, _ = np.histogram(x[~oligomer], bins=x_edges)
+        y_distinct, _ = np.histogram(y[~oligomer], bins=y_edges)
         x_counts, _ = np.histogram(x, bins=x_edges)
         y_counts, _ = np.histogram(y, bins=y_edges)
-        color = '#0072B2'
+        color, gold = '#0072B2', '#B8860B'
         for with_title, open_axes in ((True, False), (False, False), (True, True), (False, True)):
             fig = plt.figure(figsize=self.config.figure_size(1.2), layout='constrained')
             grid = fig.add_gridspec(2, 2, width_ratios=(4, 1.2), height_ratios=(1, 4),
@@ -53,18 +111,25 @@ class MembranePlotsMixin:
             ax = fig.add_subplot(grid[1, 0])
             top = fig.add_subplot(grid[0, 0], sharex=ax)
             right = fig.add_subplot(grid[1, 1], sharey=ax)
-            ax.scatter(x, y, s=22, facecolors=(0, .447, .698, .22),
-                       edgecolors=color, linewidths=.55, clip_on=False)
-            for marginal, counts, edges, orientation in (
-                (top, x_counts, x_edges, 'vertical'),
-                (right, y_counts, y_edges, 'horizontal'),
+            ax.scatter(x[~oligomer], y[~oligomer], s=22, marker='o', facecolors=(0, .447, .698, .22),
+                       edgecolors=color, linewidths=.55, clip_on=False, label='Each protein chain distinct')
+            ax.scatter(x[oligomer], y[oligomer], s=34, marker='^', facecolors=(.722, .525, .043, .3),
+                       edgecolors=gold, linewidths=.7, clip_on=False, label='Identical chains, mean per copy')
+            for marginal, distinct, total, edges, orientation in (
+                (top, x_distinct, x_counts, x_edges, 'vertical'),
+                (right, y_distinct, y_counts, y_edges, 'horizontal'),
             ):
-                marginal.stairs(counts, edges, orientation=orientation, fill=True,
+                # Stack oligomers above distinct-chain entries; the outer step is the total.
+                marginal.stairs(distinct, edges, orientation=orientation, fill=True,
                                 color=color, alpha=.22, linewidth=0)
-                marginal.stairs(counts, edges, orientation=orientation,
-                                color=color, linewidth=1.1)
+                marginal.stairs(total, edges, baseline=distinct, orientation=orientation, fill=True,
+                                facecolor=(.722, .525, .043, .3), edgecolor=gold, hatch='////', linewidth=0)
+                marginal.stairs(distinct, edges, orientation=orientation, color=color, linewidth=1.1)
+                marginal.stairs(total, edges, orientation=orientation, color='#4D4D4D', linewidth=1.1)
             ax.set(xlim=(0, x_edges[-1]), ylim=(0, y_edges[-1]),
                    xlabel='Modeled TM residues', ylabel='Other modeled residues')
+            if len(x):
+                self._add_legend(ax, loc='upper right', fontsize=10)
             ax.xaxis.set_major_locator(MaxNLocator(nbins=5, integer=True))
             ax.yaxis.set_major_locator(MaxNLocator(nbins=5, integer=True))
             top.set_ylim(0, max(1, int(x_counts.max()) * 1.12))

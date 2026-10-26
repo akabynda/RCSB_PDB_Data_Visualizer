@@ -20,7 +20,9 @@ from src.dataset.coordinates import extract_model_pdb_texts
 from src.dataset.downloads import download_pdb_if_needed
 from src.dataset.pdb_normalization import load_pdb_polymer_metadata, pdb_atom_field_offset
 from src.dataset.structures import load_cached_chain_id_map
-from src.dataset.tmdet_annotations import collect_modeled_residues, parse_tmdet_annotations
+from src.dataset.tmdet_annotations import (
+    collect_modeled_residues, parse_tmdet_annotations, summarize_entity_copies,
+)
 from src.dataset.tmdet_install import ensure_tmdet_executable
 
 TMDET_CACHE_SCHEMA = "first-model-tmdet-v1"
@@ -184,6 +186,7 @@ def annotate_membrane_cohort(result, args, client, config):
                 chain.update(chain_summaries.get(chain["asym_id"], {
                     "tmdet_status": "error", "tmdet_error": summary.get("tmdet_error", ""),
                 }))
+            row.update(summarize_entity_copies(row["tmdet_status"], chains[row["entry_id"]]))
             result.tmdet_region_rows.extend(regions)
             result.tmdet_residue_rows.extend(residues)
             sources.append(source)

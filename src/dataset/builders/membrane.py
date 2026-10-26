@@ -19,12 +19,14 @@ from src.dataset.utils import extract_year
 ENTRY_COLUMNS = (
     "entry_id", "year", "deposit_date", "initial_release_date", "revision_date",
     "methods", "deposited_model_count", "model_count_status", "protein_entity_count",
-    "protein_chain_count", "membrane_entity_count", "membrane_chain_count",
+    "protein_chain_count", "max_protein_entity_chain_count", "membrane_entity_count", "membrane_chain_count",
     "membrane_annotation_sources", "has_pdbtm_annotation", "pdbtm_annotated_entity_count",
     "pdbtm_segment_chain_count", "pdbtm_segment_status", "title", "primary_citation_doi",
     "primary_citation_pubmed_id", "primary_citation_title", "related_pdb_ids",
     "related_database_records_json", "nmr_ensemble_json", "nmr_representative_json",
-    "nmr_sample_details_json", "sequence_multiset_sha256",
+    "nmr_sample_details_json", "sequence_multiset_sha256", "assembly_rcsb_id",
+    "assembly_global_symmetry", "assembly_global_stoichiometry", "assembly_oligomeric_state",
+    "assembly_symmetry_json",
 )
 ENTITY_COLUMNS = (
     "entry_id", "entity_id", "description", "polymer_type", "is_membrane",
@@ -100,6 +102,31 @@ def _instances(entity: dict[str, Any]) -> list[dict[str, Any]]:
             "_missing_instance_metadata": True,
         })
     return [by_asym[key] for key in sorted(by_asym)]
+
+
+def _assembly_symmetry(entry: dict[str, Any], protein_asym_ids: set[str]) -> dict[str, Any]:
+    """Describe the one RCSB assembly that contains each deposited protein chain once."""
+    matches = []
+    for assembly in entry.get("assemblies") or []:
+        listed = {asym_id for generator in assembly.get("pdbx_struct_assembly_gen") or []
+                  for asym_id in generator.get("asym_id_list") or []}
+        protein_count = (assembly.get("rcsb_assembly_info") or {}).get("polymer_entity_instance_count_protein")
+        # Equal protein counts exclude assemblies that repeat a chain under another operator.
+        if protein_asym_ids <= listed and protein_count == len(protein_asym_ids):
+            matches.append(assembly)
+    if len(matches) != 1:
+        return {"assembly_rcsb_id": None, "assembly_global_symmetry": None, "assembly_global_stoichiometry": None,
+                "assembly_oligomeric_state": None, "assembly_symmetry_json": None}
+    records = matches[0].get("rcsb_struct_symmetry") or []
+    global_records = [record for record in records if record.get("kind") == "Global Symmetry"]
+    symmetry = global_records[0] if len(global_records) == 1 else {}
+    return {
+        "assembly_rcsb_id": matches[0].get("rcsb_id"),
+        "assembly_global_symmetry": symmetry.get("symbol"),
+        "assembly_global_stoichiometry": ";".join(symmetry.get("stoichiometry") or []) or None,
+        "assembly_oligomeric_state": symmetry.get("oligomeric_state"),
+        "assembly_symmetry_json": _json(records),
+    }
 
 
 def _coverage_status(chains: list[dict[str, Any]]) -> str:
@@ -288,6 +315,7 @@ class SolutionNMRMembraneBuilder:
                 "methods": ";".join(sorted(methods)), "deposited_model_count": model_count,
                 "model_count_status": "unknown" if model_count is None else "single" if model_count == 1 else "multiple",
                 "protein_entity_count": len(entities), "protein_chain_count": len(chains),
+                "max_protein_entity_chain_count": max(entity["chain_count"] for entity in entities),
                 "membrane_entity_count": len(membrane_entities), "membrane_chain_count": len(membrane_chains),
                 "membrane_annotation_sources": ";".join(sources), "has_pdbtm_annotation": "PDBTM" in sources,
                 "pdbtm_annotated_entity_count": sum(entity["has_pdbtm_annotation"] for entity in membrane_entities),
@@ -303,6 +331,7 @@ class SolutionNMRMembraneBuilder:
                 "nmr_representative_json": _json(entry.get("pdbx_nmr_representative")),
                 "nmr_sample_details_json": _json(entry.get("pdbx_nmr_sample_details")),
                 "sequence_multiset_sha256": sha256(_json(sorted(sequence_copies)).encode()).hexdigest() if complete_sequences else None,
+                **_assembly_symmetry(entry, {chain["asym_id"] for chain in chains}),
             })
             result.entity_rows.extend(entities)
             result.chain_rows.extend(chains)

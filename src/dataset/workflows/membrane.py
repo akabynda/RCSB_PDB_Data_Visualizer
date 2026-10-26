@@ -93,7 +93,7 @@ def run_solution_nmr_membrane(
         )),
     }
     manifest = {
-        "schema_version": "solution-nmr-membrane-v2",
+        "schema_version": "solution-nmr-membrane-v3",
         "started_at": started_at,
         "completed_at": _utc_now_iso(),
         "command": shlex.join([sys.executable, *sys.argv]),
@@ -112,6 +112,10 @@ def run_solution_nmr_membrane(
             "require_multiple_models": args.solution_nmr_membrane_require_multiple_models,
             "deposition_year_limit": None,
         },
+        "assembly_symmetry": (
+            "RCSB rcsb_struct_symmetry Global Symmetry of the unique assembly containing each "
+            "deposited protein chain once; descriptive flag, not a selection criterion"
+        ),
         "api_cache": {
             "directory": str(cache.cache_dir.resolve()),
             "validation_hours": cache.validation_hours,
@@ -125,6 +129,7 @@ def run_solution_nmr_membrane(
         "tmdet": {
             "model_index": 0, "input": "first PDB coordinate model, no core crop",
             "count_unit": "modeled polypeptide residues across all protein chains in each PDB entry",
+            "copy_count_unit": "sum over protein entities of the mean chain count over that entity's copies",
             "tm_region_codes": ["H", "B"], "preserved_region_codes": "all",
             "cache_directory": str(Path(args.tmdet_cache_dir).resolve()),
             "timeout_seconds": args.tmdet_timeout_seconds,

@@ -319,6 +319,23 @@ count is `N_modeled - N_TM`. Other residues can include re-entrant loops and
 interfacial helices. RCSB `modeled_residue_count` is separate from the measured
 `tmdet_modeled_residue_count`.
 
+**Copy counts.** `max_protein_entity_chain_count` is the largest number of
+chains of one protein entity; values above 1 mark identical chains. TmDet still
+runs on the whole first model; only aggregation differs. For entity `e` with
+chains `c`, `N_copy = Σ_e (1/n_e) Σ_c N_c`, computed separately for modeled,
+H/B and other residues (`tmdet_copy_mean_*`). `tmdet_copy_min_tm_residue_count`
+and `tmdet_copy_max_tm_residue_count` sum each entity's smallest and largest
+chain H/B count. Copy counts equal the entry totals when every entity has one
+chain. They are blank unless the entry and all its protein chains have complete
+results.
+
+**Symmetry flag.** The flag uses the one RCSB assembly that lists every
+deposited protein chain and has the same protein-instance count. Its
+`Global Symmetry` symbol, stoichiometry and oligomeric state are stored;
+`assembly_symmetry_json` keeps all its `rcsb_struct_symmetry` records. Values are
+blank without exactly one such assembly or global record. The flag is
+descriptive: it does not select entries or change counts.
+
 | Status | Meaning |
 | --- | --- |
 | `membrane_detected` | Every modeled protein residue has an XML region assignment. |
@@ -356,12 +373,17 @@ with calculation errors saves error rows and exits unsuccessfully.
 
 **Plots.** Entries with known deposition years through 2024 enter the count
 and status summaries. The residue map uses complete positive and valid negative
-results: x is the H/B residue count, y the other modeled residue count. This map
-alone is Figure 99. Linear axes retain zeros and the full range. Marginal
-histograms count the same entries in ten-residue bins. The accompanying table
+results with copy counts: x is the copy-mean H/B count, y the copy-mean other
+count. Entries with identical chains are gold triangles; all others are blue
+circles. Complete entries without copy counts are omitted with a warning. This
+map alone is Figure 99. Linear axes retain zeros and the full range. Marginal
+histograms stack the two groups in ten-residue bins: blue at the bottom,
+hatched gold above; the grey outer step is all plotted entries. The table
 `figures/solution_nmr_membrane_tmdet_residues/solution_nmr_membrane_tmdet_residues.csv`
 retains excluded entries and marks selection with `included_in_residue_plot`.
-No full-length/fragment class is assigned.
+It keeps entry totals, copy means and ranges, chain counts, the symmetry flag and
+`repeated_protein_chains`. No full-length/fragment class is assigned. Count,
+status and fraction summaries use entry totals.
 
 | Time summary | Statistic |
 | --- | --- |

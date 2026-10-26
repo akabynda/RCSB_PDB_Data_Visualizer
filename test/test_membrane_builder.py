@@ -240,3 +240,61 @@ def test_filter_counts_record_each_sequential_stage():
     assert result.filter_counts["after_exact_method_filter"] == 3
     assert result.filter_counts["after_membrane_annotation_filter"] == 2
     assert result.filter_counts["after_model_filter"] == 1
+
+
+def _assembly(assembly_id="1ABC-1", asym_ids=("A", "B"), *, proteins=2, symmetry=None):
+    return {
+        "rcsb_id": assembly_id,
+        "pdbx_struct_assembly_gen": [{"asym_id_list": list(asym_ids), "oper_expression": "1"}],
+        "rcsb_assembly_info": {"polymer_entity_instance_count_protein": proteins},
+        "rcsb_struct_symmetry": symmetry if symmetry is not None else [
+            {"kind": "Global Symmetry", "type": "Cyclic", "symbol": "C2",
+             "oligomeric_state": "Homo 2-mer", "stoichiometry": ["A2"]},
+            {"kind": "Local Symmetry", "type": "Asymmetric", "symbol": "C1",
+             "oligomeric_state": "Monomer", "stoichiometry": ["A1"]},
+        ],
+    }
+
+
+def test_assembly_symmetry_comes_from_assembly_with_each_protein_chain_once():
+    entry = _entry(entities=[_entity(chains=("A", "B"))])
+    entry["assemblies"] = [
+        _assembly("1ABC-1", ("A",), proteins=1),
+        _assembly("1ABC-2", ("A", "B", "C"), proteins=2),  # C is a ligand asym
+        _assembly("1ABC-3", ("A", "B"), proteins=4),  # chains repeated by another operator
+    ]
+    row = _build([entry]).entry_rows[0]
+    assert row["max_protein_entity_chain_count"] == 2
+    assert row["assembly_rcsb_id"] == "1ABC-2"
+    assert (row["assembly_global_symmetry"], row["assembly_global_stoichiometry"],
+            row["assembly_oligomeric_state"]) == ("C2", "A2", "Homo 2-mer")
+    assert '"Local Symmetry"' in row["assembly_symmetry_json"]
+
+
+@pytest.mark.parametrize("assemblies", [
+    None, [], [_assembly("1ABC-1", ("A",), proteins=1)],
+    [_assembly("1ABC-1"), _assembly("1ABC-2")],
+])
+def test_missing_or_ambiguous_assembly_leaves_symmetry_blank(assemblies):
+    entry = _entry(entities=[_entity(chains=("A", "B"))])
+    entry["assemblies"] = assemblies
+    row = _build([entry]).entry_rows[0]
+    assert all(row[column] is None for column in (
+        "assembly_rcsb_id", "assembly_global_symmetry", "assembly_global_stoichiometry",
+        "assembly_oligomeric_state", "assembly_symmetry_json"))
+
+
+def test_assembly_without_one_global_record_keeps_raw_records_only():
+    entry = _entry()
+    entry["assemblies"] = [_assembly("1ABC-1", ("A",), proteins=1, symmetry=[])]
+    row = _build([entry]).entry_rows[0]
+    assert row["assembly_rcsb_id"] == "1ABC-1"
+    assert row["assembly_global_symmetry"] is None
+    assert row["assembly_symmetry_json"] == "[]"
+
+
+def test_max_entity_chain_count_distinguishes_repeated_entities_from_heteromers():
+    hetero = _entry(entities=[_entity("1"), _entity("2", chains=("B",), sequence="G" * 30)])
+    mixed = _entry("2ABC", entities=[_entity("1", chains=("A", "B")), _entity("2", chains=("C",))])
+    rows = _build([hetero, mixed]).entry_rows
+    assert [(row["protein_chain_count"], row["max_protein_entity_chain_count"]) for row in rows] == [(2, 1), (3, 2)]
