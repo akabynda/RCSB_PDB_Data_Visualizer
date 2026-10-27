@@ -7,11 +7,12 @@ import warnings
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from matplotlib.ticker import MaxNLocator
+from matplotlib.ticker import FixedLocator, MaxNLocator, StrMethodFormatter
 from matplotlib.patches import Patch
+from mpl_toolkits.axes_grid1 import Divider, Size
 
 from ..dataset.io.common import _atomic_write_csv_rows
-from .constants import TITLE_FONTSIZE, YEAR_MAJOR_TICK_STEP
+from .constants import AXIS_MAJOR_TICK_LENGTH, AXIS_MINOR_TICK_LENGTH, TITLE_FONTSIZE, YEAR_MAJOR_TICK_STEP
 from .membrane_statistics import (
     FRACTION_GROUPS, TMDET_STATUSES, membrane_time_statistics, usable_tmdet_results,
 )
@@ -28,6 +29,26 @@ COPY_COUNT_COLUMNS = (
 # Copy means are rationals with small denominators stored as floats; real
 # inconsistencies are at least 1/copies residues, far above this rounding bound.
 COPY_COUNT_ATOL = 1e-9
+# Residue map: side of the square scatter panel and size of each marginal panel, in inches.
+RESIDUE_MAP_PANEL_INCHES = 5.0
+RESIDUE_MAP_MARGINAL_INCHES = 1.0
+# Both residue-map axes are symlog: linear below 10 residues, logarithmic above.
+# matplotlib draws the linear range linscale / (1 - 1/10) decades wide, so 0.9
+# makes 0-10 exactly one decade wide and every marginal bin equally wide.
+RESIDUE_MAP_LINTHRESH = 10
+RESIDUE_MAP_LINSCALE = .9
+RESIDUE_MAP_BINS_PER_DECADE = 5
+RESIDUE_MAP_TICKS = (0, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000)
+
+
+def residue_map_bin_edges(maximum):
+    """Marginal bin edges of equal symlog width, from zero to the first edge above `maximum`."""
+    edges = list(np.linspace(0, RESIDUE_MAP_LINTHRESH, RESIDUE_MAP_BINS_PER_DECADE + 1))
+    step = 1
+    while edges[-1] <= maximum:
+        edges.append(RESIDUE_MAP_LINTHRESH * 10 ** (step / RESIDUE_MAP_BINS_PER_DECADE))
+        step += 1
+    return np.array(edges)
 
 
 class MembranePlotsMixin:
@@ -100,41 +121,49 @@ class MembranePlotsMixin:
         x = copies.loc[included, 'tmdet_copy_mean_membrane_residue_count'].to_numpy(dtype=float)
         y = copies.loc[included, 'tmdet_copy_mean_other_residue_count'].to_numpy(dtype=float)
         oligomer = repeated[included].to_numpy(dtype=bool)
-        x_edges = np.arange(0, (int(x.max()) // 10 + 1) * 10 + 1, 10) if len(x) else np.array([0, 10])
-        y_edges = np.arange(0, (int(y.max()) // 10 + 1) * 10 + 1, 10) if len(y) else np.array([0, 10])
-        x_distinct, _ = np.histogram(x[~oligomer], bins=x_edges)
-        y_distinct, _ = np.histogram(y[~oligomer], bins=y_edges)
-        x_counts, _ = np.histogram(x, bins=x_edges)
-        y_counts, _ = np.histogram(y, bins=y_edges)
-        color, gold = '#0072B2', '#B8860B'
+        # One symlog range and bin set on both axes of a square panel keeps the map 1:1.
+        edges = residue_map_bin_edges(max(x.max(), y.max()) if len(x) else 0)
+        limit = edges[-1]
+        x_distinct, _ = np.histogram(x[~oligomer], bins=edges)
+        y_distinct, _ = np.histogram(y[~oligomer], bins=edges)
+        x_counts, _ = np.histogram(x, bins=edges)
+        y_counts, _ = np.histogram(y, bins=edges)
+        major = [tick for tick in RESIDUE_MAP_TICKS if tick <= limit]
+        minor = [tick for tick in (*range(1, 10), *(m * 10 ** d for d in range(1, 4) for m in range(2, 10)))
+                 if tick <= limit]
+        color, pink = '#0072B2', '#CC79A7'
+        pink_fill = (.8, .475, .655, .3)
         for with_title, open_axes in ((True, False), (False, False), (True, True), (False, True)):
-            fig = plt.figure(figsize=self.config.figure_size(1.2), layout='constrained')
-            grid = fig.add_gridspec(2, 2, width_ratios=(4, 1.2), height_ratios=(1, 4),
-                                   hspace=.04, wspace=.04)
-            ax = fig.add_subplot(grid[1, 0])
-            top = fig.add_subplot(grid[0, 0], sharex=ax)
-            right = fig.add_subplot(grid[1, 1], sharey=ax)
+            # Generous margins for labels and title; saving crops to the drawn content.
+            # The gap keeps facing major ticks of adjacent panels apart.
+            columns = (1.0, RESIDUE_MAP_PANEL_INCHES, .25, RESIDUE_MAP_MARGINAL_INCHES, .2)
+            rows = (.8, RESIDUE_MAP_PANEL_INCHES, .25, RESIDUE_MAP_MARGINAL_INCHES, .6 if with_title else .1)
+            fig = plt.figure(figsize=(sum(columns), sum(rows)))
+            divider = Divider(fig, (0, 0, 1, 1), [Size.Fixed(size) for size in columns],
+                              [Size.Fixed(size) for size in rows], aspect=False)
+            ax = fig.add_axes((0, 0, 1, 1), axes_locator=divider.new_locator(nx=1, ny=1))
+            top = fig.add_axes((0, 0, 1, 1), axes_locator=divider.new_locator(nx=1, ny=3), sharex=ax)
+            right = fig.add_axes((0, 0, 1, 1), axes_locator=divider.new_locator(nx=3, ny=1), sharey=ax)
+            ax.set_xscale('symlog', linthresh=RESIDUE_MAP_LINTHRESH, linscale=RESIDUE_MAP_LINSCALE)
+            ax.set_yscale('symlog', linthresh=RESIDUE_MAP_LINTHRESH, linscale=RESIDUE_MAP_LINSCALE)
             ax.scatter(x[~oligomer], y[~oligomer], s=22, marker='o', facecolors=(0, .447, .698, .22),
                        edgecolors=color, linewidths=.55, clip_on=False, label='Each protein chain distinct')
-            ax.scatter(x[oligomer], y[oligomer], s=34, marker='^', facecolors=(.722, .525, .043, .3),
-                       edgecolors=gold, linewidths=.7, clip_on=False, label='Identical chains, mean per copy')
-            for marginal, distinct, total, edges, orientation in (
-                (top, x_distinct, x_counts, x_edges, 'vertical'),
-                (right, y_distinct, y_counts, y_edges, 'horizontal'),
+            ax.scatter(x[oligomer], y[oligomer], s=22, marker='o', facecolors=pink_fill,
+                       edgecolors=pink, linewidths=.55, clip_on=False, label='Identical chains, mean per copy')
+            for marginal, distinct, total, orientation in (
+                (top, x_distinct, x_counts, 'vertical'),
+                (right, y_distinct, y_counts, 'horizontal'),
             ):
                 # Stack oligomers above distinct-chain entries; the outer step is the total.
                 marginal.stairs(distinct, edges, orientation=orientation, fill=True,
                                 color=color, alpha=.22, linewidth=0)
                 marginal.stairs(total, edges, baseline=distinct, orientation=orientation, fill=True,
-                                facecolor=(.722, .525, .043, .3), edgecolor=gold, hatch='////', linewidth=0)
+                                facecolor=pink_fill, edgecolor=pink, hatch='////', linewidth=0)
                 marginal.stairs(distinct, edges, orientation=orientation, color=color, linewidth=1.1)
                 marginal.stairs(total, edges, orientation=orientation, color='#4D4D4D', linewidth=1.1)
-            ax.set(xlim=(0, x_edges[-1]), ylim=(0, y_edges[-1]),
-                   xlabel='Modeled membrane residues', ylabel='Other modeled residues')
-            if len(x):
-                self._add_legend(ax, loc='upper right', fontsize=10)
-            ax.xaxis.set_major_locator(MaxNLocator(nbins=5, integer=True))
-            ax.yaxis.set_major_locator(MaxNLocator(nbins=5, integer=True))
+            ax.set(xlim=(0, limit), ylim=(0, limit),
+                   xlabel='Number of modeled residues in membrane regions (symlog)',
+                   ylabel='Number of modeled residues in extramembrane regions (symlog)')
             top.set_ylim(0, max(1, int(x_counts.max()) * 1.12))
             right.set_xlim(0, max(1, int(y_counts.max()) * 1.12))
             top.yaxis.set_major_locator(MaxNLocator(nbins=3, integer=True))
@@ -146,6 +175,17 @@ class MembranePlotsMixin:
                 self._configure_boxed_axes(panel)
                 if open_axes:
                     self._configure_open_axes(panel)
+            # Set after the shared helpers, which would put linear minor locators on these axes.
+            for axis in (ax.xaxis, ax.yaxis):
+                axis.set_major_locator(FixedLocator(major))
+                axis.set_minor_locator(FixedLocator(minor))
+                axis.set_major_formatter(StrMethodFormatter('{x:g}'))
+            # The style draws zero-length x ticks, and the shared helper restores them only
+            # for uniform major steps, which the symlog axis lacks.
+            for panel in (ax, top, right):
+                panel.tick_params(which='major', length=AXIS_MAJOR_TICK_LENGTH)
+                panel.tick_params(which='minor', length=AXIS_MINOR_TICK_LENGTH)
+            ax.grid(which='minor', linewidth=.5, alpha=.12)
             top.tick_params(axis='x', which='both', labelbottom=False)
             right.tick_params(axis='y', which='both', labelleft=False)
             if with_title:
@@ -156,7 +196,7 @@ class MembranePlotsMixin:
                 png, svg = self._titleless_output_path(png), self._titleless_output_path(svg)
             if open_axes:
                 png, svg = self._open_axes_output_path(png), self._open_axes_output_path(svg)
-            self._save_figure_files(fig=fig, output_png=png, output_svg=svg)
+            self._save_figure_files(fig=fig, output_png=png, output_svg=svg, savefig_bbox_inches='tight')
             plt.close(fig)
 
     def _draw_membrane_share_areas(self, ax, years, shares, labels, colors):

@@ -384,11 +384,16 @@ with calculation errors saves error rows and exits unsuccessfully.
 and status summaries. Usable results are complete positive and valid negative
 results, plus partial ones with counted chains. The residue map uses usable
 results with copy counts: x is the copy-mean membrane count, y the copy-mean
-other count. Entries with identical chains are gold triangles; all others are
-blue circles. Usable entries without copy counts are omitted with a warning. This
-map alone is Figure 99. Linear axes retain zeros and the full range. Marginal
-histograms stack the two groups in ten-residue bins: blue at the bottom,
-hatched gold above; the grey outer step is all plotted entries. The table
+other count. Entries with identical chains are pink circles; all others are
+blue circles; the map has no legend. Usable entries without copy counts are
+omitted with a warning. This map alone is Figure 99. Both axes use one symlog
+scale on a square panel: linear from 0 to 10 residues, logarithmic above, with
+`linscale` 0.9 so that 0–10 is drawn one decade wide. Both run from zero to the
+first marginal bin edge above the largest x or y value. Marginal bins are
+equally wide on that scale: 2 residues within 0–10, then five per decade
+(edges `10^(1 + k/5)`); bins are half-open except the last. The histograms
+stack the two groups: blue at the bottom, hatched pink above; the grey outer
+step is all plotted entries. Major and minor grid lines are drawn. The table
 `figures/solution_nmr_membrane_tmdet_residues/solution_nmr_membrane_tmdet_residues.csv`
 retains excluded entries and marks selection with `included_in_residue_plot`.
 It keeps entry totals, exclusion counts, copy means and ranges, chain counts,
