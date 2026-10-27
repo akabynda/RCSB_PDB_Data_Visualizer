@@ -8,7 +8,12 @@ TMDET_STATUSES = (
     'membrane_detected', 'no_membrane_detected', 'partial_annotation',
     'no_analyzable_protein', 'error',
 )
-FRACTION_GROUPS = ('all_usable', 'with_tm')
+FRACTION_GROUPS = ('all_usable', 'with_membrane')
+
+
+def usable_tmdet_results(table):
+    """Complete results, plus partial ones with counts over their fully annotated chains."""
+    return table['tmdet_status'].isin(TMDET_STATUSES[:3]) & table['tmdet_other_residue_count'].notna()
 
 
 def _fraction_statistics(values):
@@ -33,12 +38,13 @@ def membrane_time_statistics(table, period_years=1):
     """Summarize a prepared table in calendar bins, retaining empty intervening bins.
 
     Each PDB entry has equal weight. Valid negative results contribute zero;
-    incomplete/unavailable results contribute only to cohort composition counts.
+    partial results count only fully annotated chains; unavailable results
+    contribute only to cohort composition counts.
     """
     if period_years not in (1, 5):
         raise ValueError('Membrane summaries support annual or five-year bins')
     count_columns = ['period_start', 'period_end', 'n_entries', 'n_usable',
-                     'n_with_tm', 'n_without_tm', 'n_unavailable', *TMDET_STATUSES]
+                     'n_with_membrane', 'n_without_membrane', 'n_unavailable', *TMDET_STATUSES]
     fraction_columns = ['period_start', 'period_end', 'group', 'n_entries',
                         'n_unavailable', 'n', 'mean', 'q1', 'med', 'q3',
                         'whislo', 'whishi', 'fliers']
@@ -48,13 +54,13 @@ def membrane_time_statistics(table, period_years=1):
     starts = table['year'] // period_years * period_years
     for start in range(int(starts.min()), int(starts.max()) + 1, period_years):
         rows = table.loc[starts == start]
-        usable = rows.loc[rows['tmdet_status'].isin(TMDET_STATUSES[:2])]
-        values = (usable['tmdet_tm_residue_count']
-                  / usable['tmdet_modeled_residue_count']).to_numpy(dtype=float)
+        usable = rows.loc[usable_tmdet_results(rows)]
+        values = (usable['tmdet_membrane_residue_count']
+                  / usable['tmdet_counted_residue_count']).to_numpy(dtype=float)
         count = dict(period_start=start, period_end=start + period_years - 1,
                      n_entries=len(rows), n_usable=len(values),
-                     n_with_tm=int((values > 0).sum()),
-                     n_without_tm=int((values == 0).sum()),
+                     n_with_membrane=int((values > 0).sum()),
+                     n_without_membrane=int((values == 0).sum()),
                      n_unavailable=len(rows) - len(values))
         count.update(rows['tmdet_status'].value_counts().reindex(TMDET_STATUSES, fill_value=0).to_dict())
         counts.append(count)

@@ -11,17 +11,26 @@ from src.dataset.pdb_normalization import pdb_atom_field_offset
 TMDET_SUMMARY_COLUMNS = (
     "tmdet_status", "tmdet_error", "tmdet_version", "tmdet_protein_type", "tmdet_q_value",
     "tmdet_modeled_residue_count", "tmdet_assigned_residue_count", "tmdet_unassigned_residue_count",
-    "tmdet_tm_residue_count", "tmdet_other_residue_count", "tmdet_tm_fraction", "tmdet_region_counts_json",
+    "tmdet_membrane_residue_count", "tmdet_other_residue_count", "tmdet_membrane_fraction",
+    "tmdet_region_counts_json",
+)
+TMDET_EXCLUSION_COLUMNS = (
+    "tmdet_counted_residue_count", "tmdet_excluded_chain_count", "tmdet_excluded_residue_count",
 )
 TMDET_COPY_COLUMNS = (
-    "tmdet_copy_mean_modeled_residue_count", "tmdet_copy_mean_tm_residue_count",
-    "tmdet_copy_mean_other_residue_count", "tmdet_copy_min_tm_residue_count",
-    "tmdet_copy_max_tm_residue_count",
+    "tmdet_copy_mean_modeled_residue_count", "tmdet_copy_mean_membrane_residue_count",
+    "tmdet_copy_mean_other_residue_count", "tmdet_copy_min_membrane_residue_count",
+    "tmdet_copy_max_membrane_residue_count",
 )
 TMDET_ENTRY_COLUMNS = (
-    *TMDET_SUMMARY_COLUMNS, *TMDET_COPY_COLUMNS, "tmdet_model_index", "tmdet_result_directory",
+    *TMDET_SUMMARY_COLUMNS, *TMDET_EXCLUSION_COLUMNS, *TMDET_COPY_COLUMNS,
+    "tmdet_model_index", "tmdet_result_directory",
 )
 COMPLETE_TMDET_STATUSES = frozenset({"membrane_detected", "no_membrane_detected"})
+COUNTED_TMDET_STATUSES = COMPLETE_TMDET_STATUSES | {"partial_annotation"}
+# TmDet 4 Region::isAnnotatedMembraneType: TM helix/strand, re-entrant loop,
+# interfacial helix and beta-barrel inside element.
+MEMBRANE_REGION_CODES = frozenset("HBLFN")
 TMDET_RESIDUE_COLUMNS = (
     "entry_id", "entity_id", "asym_id", "auth_asym_id", "pdb_chain_id", "auth_seq_id",
     "insertion_code", "residue_name", "is_membrane", "has_ca", "region_type", "assignment_status",
@@ -82,21 +91,24 @@ def _insertion_code(value):
     raise ValueError(f"Invalid TmDet insertion code: {value}")
 
 
-def _summarize(rows, metadata, status):
+def _summarize(rows, metadata, status, excluded=frozenset()):
+    """Count residues of chains not in `excluded`; an unassigned counted residue blanks other/fraction."""
     counts = Counter(row["region_type"] for row in rows if row["region_type"] is not None)
     assigned = sum(counts.values())
     n = len(rows)
     valid_negative = status == "no_membrane_detected"
     unusable = status in {"no_analyzable_protein", "not_in_model"}
-    tm_count = None if unusable else counts["H"] + counts["B"]
-    complete = not unusable and n > 0 and (assigned == n or valid_negative)
+    kept = [row for row in rows if row["asym_id"] not in excluded]
+    membrane = None if unusable or not kept else sum(row["region_type"] in MEMBRANE_REGION_CODES for row in kept)
+    complete = not unusable and bool(kept) and (
+        valid_negative or all(row["region_type"] is not None for row in kept))
     return {
         "tmdet_status": status, "tmdet_error": "", **metadata,
         "tmdet_modeled_residue_count": n, "tmdet_assigned_residue_count": assigned,
         "tmdet_unassigned_residue_count": n - assigned,
-        "tmdet_tm_residue_count": tm_count,
-        "tmdet_other_residue_count": n - tm_count if complete else None,
-        "tmdet_tm_fraction": tm_count / n if complete else None,
+        "tmdet_membrane_residue_count": membrane,
+        "tmdet_other_residue_count": len(kept) - membrane if complete else None,
+        "tmdet_membrane_fraction": membrane / len(kept) if complete else None,
         "tmdet_region_counts_json": json.dumps(dict(sorted(counts.items())), separators=(",", ":")),
     }
 
@@ -104,10 +116,13 @@ def _summarize(rows, metadata, status):
 def summarize_entity_copies(entry_status, chain_rows):
     """Average complete chain counts over copies of each entity, then sum the entities.
 
-    Min/max sum each entity's fewest/most TM residues among its copies. Counts are
-    blank unless the entry and every protein chain have complete TmDet results.
+    Partially annotated chains are excluded, as in the entry totals; an entity
+    without remaining copies drops out. Min/max sum each entity's fewest/most
+    membrane residues among its copies. Counts are blank unless every other
+    protein chain has a complete TmDet result.
     """
-    if entry_status not in COMPLETE_TMDET_STATUSES or not chain_rows or any(
+    chain_rows = [chain for chain in chain_rows if chain.get("tmdet_status") != "partial_annotation"]
+    if entry_status not in COUNTED_TMDET_STATUSES or not chain_rows or any(
         chain.get("tmdet_status") not in COMPLETE_TMDET_STATUSES
         or chain.get("tmdet_other_residue_count") is None for chain in chain_rows
     ):
@@ -115,14 +130,15 @@ def summarize_entity_copies(entry_status, chain_rows):
     copies = defaultdict(list)
     for chain in chain_rows:
         copies[chain["entity_id"]].append(chain)
-    modeled, tm, low, high = Fraction(0), Fraction(0), 0, 0
+    modeled, membrane, low, high = Fraction(0), Fraction(0), 0, 0
     for rows in copies.values():
-        counts = [row["tmdet_tm_residue_count"] for row in rows]
+        counts = [row["tmdet_membrane_residue_count"] for row in rows]
         modeled += Fraction(sum(row["tmdet_modeled_residue_count"] for row in rows), len(rows))
-        tm += Fraction(sum(counts), len(rows))
+        membrane += Fraction(sum(counts), len(rows))
         low, high = low + min(counts), high + max(counts)
-    # Exact rationals keep mean TM + mean other equal to the mean modeled count.
-    values = [value.numerator if value.denominator == 1 else float(value) for value in (modeled, tm, modeled - tm)]
+    # Exact rationals keep mean membrane + mean other equal to the mean modeled count.
+    values = [value.numerator if value.denominator == 1 else float(value)
+              for value in (modeled, membrane, modeled - membrane)]
     return dict(zip(TMDET_COPY_COLUMNS, (*values, low, high)))
 
 
@@ -184,10 +200,6 @@ def parse_tmdet_annotations(xml_text, modeled_residues, chain_rows):
     if negative:
         for row in residues:
             row["assignment_status"] = base_status
-    status = base_status
-    if not negative and any(r["region_type"] is None for r in residues):
-        status = "partial_annotation"
-    summary = _summarize(residues, metadata, status)
     summaries = {}
     for chain in chain_rows:
         rows = [r for r in residues if r["asym_id"] == chain["asym_id"]]
@@ -195,4 +207,14 @@ def parse_tmdet_annotations(xml_text, modeled_residues, chain_rows):
         if rows and not negative and any(r["region_type"] is None for r in rows):
             chain_status = "partial_annotation"
         summaries[chain["asym_id"]] = _summarize(rows, metadata, chain_status)
+    # A chain with any unassigned residue is excluded whole from the entry totals.
+    excluded = {asym for asym, row in summaries.items() if row["tmdet_status"] == "partial_annotation"}
+    status = "partial_annotation" if excluded else base_status
+    summary = _summarize(residues, metadata, status, excluded)
+    excluded_count = sum(r["asym_id"] in excluded for r in residues)
+    summary.update({
+        "tmdet_counted_residue_count": (
+            None if summary["tmdet_other_residue_count"] is None else len(residues) - excluded_count),
+        "tmdet_excluded_chain_count": len(excluded), "tmdet_excluded_residue_count": excluded_count,
+    })
     return summary, summaries, regions, residues

@@ -56,7 +56,7 @@ def test_cohort_workflow_cache_replay_and_default_filter(monkeypatch, tmp_path):
     args = _args(monkeypatch, tmp_path)
     def annotate(result, *args):
         for row in result.entry_rows:
-            row.update(tmdet_status="no_membrane_detected", tmdet_tm_residue_count=0)
+            row.update(tmdet_status="no_membrane_detected", tmdet_membrane_residue_count=0)
         return []
     monkeypatch.setattr(membrane_workflow, "annotate_membrane_cohort", annotate)
     args.solution_nmr_membrane_require_multiple_models = False
@@ -142,7 +142,7 @@ def test_default_filter_is_applied_before_native_stage_and_errors_remain_visible
         run_solution_nmr_membrane(args, client, client.config)
     rows = list(csv.DictReader(args.solution_nmr_membrane_output.open()))
     assert rows[0]['tmdet_status'] == 'error'
-    assert rows[0]['tmdet_tm_residue_count'] == ''
+    assert rows[0]['tmdet_membrane_residue_count'] == ''
     manifest = json.loads((tmp_path / 'cohort_manifest.json').read_text())
     assert manifest['summary']['tmdet_status'] == {'error': 1}
     assert manifest['filters']['require_multiple_models'] is True

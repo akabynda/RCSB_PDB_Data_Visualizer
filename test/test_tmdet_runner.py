@@ -35,7 +35,7 @@ def test_first_model_only_and_replay_validated_by_hash(setup_run, monkeypatch):
     run, pdb, binary, _ = setup_run
     summary, _, _, residues, source = run()
     assert summary['tmdet_status'] == 'membrane_detected'
-    assert summary['tmdet_tm_residue_count'] == 2
+    assert summary['tmdet_membrane_residue_count'] == 2
     assert [r['auth_seq_id'] for r in residues] == [1, 2]
     directory = Path(summary['tmdet_result_directory'])
     assert (directory / 'input.pdb').read_text() == atom(1) + atom(2) + 'END\n'
@@ -68,7 +68,7 @@ def test_failed_process_timeout_or_xml_retains_logs_and_null_counts(setup_run, s
     binary.write_text('#!/usr/bin/env python3\n' + script + '\n')
     summary, _, _, rows, source = run(timeout=.15)
     assert summary['tmdet_status'] == 'error'
-    assert 'tmdet_tm_residue_count' not in summary
+    assert 'tmdet_membrane_residue_count' not in summary
     assert all(r['assignment_status'] == 'error' for r in rows)
     directory = Path(summary['tmdet_result_directory'])
     assert (directory / 'failure.json').is_file()
@@ -83,7 +83,7 @@ def test_negative_process_is_successful_but_has_no_transformed_file(setup_run):
                       f'Path("result.xml").write_text({xml(negative=True, protein_type="Soluble")!r})\n')
     summary = run()[0]
     assert summary['tmdet_status'] == 'no_membrane_detected'
-    assert summary['tmdet_tm_residue_count'] == 0
+    assert summary['tmdet_membrane_residue_count'] == 0
     assert not (Path(summary['tmdet_result_directory']) / 'transformed.cif').exists()
 
 

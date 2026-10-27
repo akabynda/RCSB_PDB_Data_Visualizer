@@ -12,16 +12,18 @@ from matplotlib.patches import Patch
 
 from ..dataset.io.common import _atomic_write_csv_rows
 from .constants import TITLE_FONTSIZE, YEAR_MAJOR_TICK_STEP
-from .membrane_statistics import FRACTION_GROUPS, TMDET_STATUSES, membrane_time_statistics
+from .membrane_statistics import (
+    FRACTION_GROUPS, TMDET_STATUSES, membrane_time_statistics, usable_tmdet_results,
+)
 
 TMDET_LABELS = (
     'Membrane detected\ncomplete annotation', 'No membrane\ndetected',
     'Partial\nannotation', 'No analyzable\nprotein', 'Calculation\nerror',
 )
 COPY_COUNT_COLUMNS = (
-    'tmdet_copy_mean_modeled_residue_count', 'tmdet_copy_mean_tm_residue_count',
-    'tmdet_copy_mean_other_residue_count', 'tmdet_copy_min_tm_residue_count',
-    'tmdet_copy_max_tm_residue_count',
+    'tmdet_copy_mean_modeled_residue_count', 'tmdet_copy_mean_membrane_residue_count',
+    'tmdet_copy_mean_other_residue_count', 'tmdet_copy_min_membrane_residue_count',
+    'tmdet_copy_max_membrane_residue_count',
 )
 # Copy means are rationals with small denominators stored as floats; real
 # inconsistencies are at least 1/copies residues, far above this rounding bound.
@@ -46,28 +48,28 @@ class MembranePlotsMixin:
         if chains.isna().any() or (chains < 1).any() or (chains % 1 != 0).any():
             raise ValueError(f'{name}: invalid max_protein_entity_chain_count')
         known = copies[list(COPY_COUNT_COLUMNS)].notna()
-        complete = table['tmdet_status'].isin(TMDET_STATUSES[:2])
-        if (known.any(axis=1) != known.all(axis=1)).any() or (known.all(axis=1) & ~complete).any():
-            raise ValueError(f'{name}: copy counts must be all present, and only for complete TmDet results')
-        included = complete & known.all(axis=1)
-        unavailable = table.loc[complete & ~included, 'entry_id'].tolist()
+        usable = usable_tmdet_results(table)
+        if (known.any(axis=1) != known.all(axis=1)).any() or (known.all(axis=1) & ~usable).any():
+            raise ValueError(f'{name}: copy counts must be all present, and only for usable TmDet results')
+        included = usable & known.all(axis=1)
+        unavailable = table.loc[usable & ~included, 'entry_id'].tolist()
         if unavailable:
-            warnings.warn(f'{name}: omitting {len(unavailable)} complete entries without copy counts: '
+            warnings.warn(f'{name}: omitting {len(unavailable)} usable entries without copy counts: '
                           + ', '.join(unavailable), RuntimeWarning, stacklevel=3)
         rows = copies.loc[included]
-        modeled, tm, other, low, high = (rows[column] for column in COPY_COUNT_COLUMNS)
+        modeled, membrane, other, low, high = (rows[column] for column in COPY_COUNT_COLUMNS)
         totals = table.loc[included]
         single = rows['max_protein_entity_chain_count'] == 1
         atol = COPY_COUNT_ATOL
         if (not np.isfinite(rows[list(COPY_COUNT_COLUMNS)]).all().all() or (rows < 0).any().any()
                 or (modeled <= 0).any() or (low % 1 != 0).any() or (high % 1 != 0).any()
-                or ((tm + other - modeled).abs() > atol).any()
-                or (low > tm + atol).any() or (tm > high + atol).any()
-                or (modeled > totals['tmdet_modeled_residue_count'] + atol).any()
-                or (tm > totals['tmdet_tm_residue_count'] + atol).any()
-                or (tm[totals['tmdet_status'] == 'no_membrane_detected'] != 0).any()
-                or (modeled[single] != totals.loc[single, 'tmdet_modeled_residue_count']).any()
-                or (tm[single] != totals.loc[single, 'tmdet_tm_residue_count']).any()):
+                or ((membrane + other - modeled).abs() > atol).any()
+                or (low > membrane + atol).any() or (membrane > high + atol).any()
+                or (modeled > totals['tmdet_counted_residue_count'] + atol).any()
+                or (membrane > totals['tmdet_membrane_residue_count'] + atol).any()
+                or (membrane[totals['tmdet_status'] == 'no_membrane_detected'] != 0).any()
+                or (modeled[single] != totals.loc[single, 'tmdet_counted_residue_count']).any()
+                or (membrane[single] != totals.loc[single, 'tmdet_membrane_residue_count']).any()):
             raise ValueError(f'{name}: inconsistent copy-mean residue counts')
         return copies, included, chains > 1
 
@@ -78,7 +80,8 @@ class MembranePlotsMixin:
             'entry_id', 'year', 'title', 'membrane_annotation_sources',
             'deposited_model_count', 'protein_entity_count', 'protein_chain_count',
             'tmdet_status', 'tmdet_error', 'tmdet_modeled_residue_count',
-            'tmdet_tm_residue_count', 'tmdet_other_residue_count',
+            'tmdet_excluded_chain_count', 'tmdet_excluded_residue_count', 'tmdet_counted_residue_count',
+            'tmdet_membrane_residue_count', 'tmdet_other_residue_count',
         ]).copy()
         exported['max_protein_entity_chain_count'] = copies['max_protein_entity_chain_count']
         for column in COPY_COUNT_COLUMNS:
@@ -88,13 +91,13 @@ class MembranePlotsMixin:
         ]))
         exported['repeated_protein_chains'] = repeated
         exported['included_in_residue_plot'] = included
-        exported['tmdet_tm_fraction'] = (
-            table['tmdet_tm_residue_count'] / table['tmdet_modeled_residue_count']
+        exported['tmdet_membrane_fraction'] = (
+            table['tmdet_membrane_residue_count'] / table['tmdet_counted_residue_count']
         ).where(included)
         _atomic_write_csv_rows(self._grouped_figure_output_path(output_png).with_suffix('.csv'),
                                exported.columns, exported.astype(object).where(
                                    exported.notna(), None).itertuples(index=False, name=None))
-        x = copies.loc[included, 'tmdet_copy_mean_tm_residue_count'].to_numpy(dtype=float)
+        x = copies.loc[included, 'tmdet_copy_mean_membrane_residue_count'].to_numpy(dtype=float)
         y = copies.loc[included, 'tmdet_copy_mean_other_residue_count'].to_numpy(dtype=float)
         oligomer = repeated[included].to_numpy(dtype=bool)
         x_edges = np.arange(0, (int(x.max()) // 10 + 1) * 10 + 1, 10) if len(x) else np.array([0, 10])
@@ -127,7 +130,7 @@ class MembranePlotsMixin:
                 marginal.stairs(distinct, edges, orientation=orientation, color=color, linewidth=1.1)
                 marginal.stairs(total, edges, orientation=orientation, color='#4D4D4D', linewidth=1.1)
             ax.set(xlim=(0, x_edges[-1]), ylim=(0, y_edges[-1]),
-                   xlabel='Modeled TM residues', ylabel='Other modeled residues')
+                   xlabel='Modeled membrane residues', ylabel='Other modeled residues')
             if len(x):
                 self._add_legend(ax, loc='upper right', fontsize=10)
             ax.xaxis.set_major_locator(MaxNLocator(nbins=5, integer=True))
@@ -187,7 +190,7 @@ class MembranePlotsMixin:
                 mean = rows['mean'].to_numpy(dtype=float) * 100
                 self._draw_membrane_share_areas(
                     ax, rows['period_start'], [mean, 100 - mean],
-                    ('TM residues', 'Other modeled residues'), self.config.area_colors[:2])
+                    ('Membrane residues', 'Other modeled residues'), self.config.area_colors[:2])
                 if use_year_ticks:
                     self._configure_year_axis_ticks(ax)
                 else:
@@ -204,7 +207,7 @@ class MembranePlotsMixin:
             axes[-1].set_xlabel(self.config.x_label)
             handles = [Patch(facecolor=color, edgecolor=color, alpha=.85, linestyle=line, label=label)
                        for color, line, label in zip(self.config.area_colors[:2], ('-', '--'),
-                                                    ('TM residues', 'Other modeled residues'))]
+                                                    ('Membrane residues', 'Other modeled residues'))]
             self._add_legend(axes[-1], handles=handles, loc='upper center',
                              bbox_to_anchor=(.5, -.3), ncol=2, fontsize=10)
             if with_title:
@@ -224,7 +227,8 @@ class MembranePlotsMixin:
         name = 'SOLUTION NMR membrane protein CSV'
         cls._validate_required_columns(df, {
             'entry_id', 'year', 'deposited_model_count', 'tmdet_status',
-            'tmdet_modeled_residue_count', 'tmdet_tm_residue_count', 'tmdet_other_residue_count',
+            'tmdet_modeled_residue_count', 'tmdet_counted_residue_count',
+            'tmdet_membrane_residue_count', 'tmdet_other_residue_count',
         }, name)
         table = df.copy()
         ids = table['entry_id'].astype('string').str.strip().str.upper()
@@ -232,7 +236,8 @@ class MembranePlotsMixin:
             raise ValueError(f'{name} requires one row per entry with a nonempty ID')
         table['entry_id'] = ids
         for column in ('year', 'deposited_model_count', 'tmdet_modeled_residue_count',
-                       'tmdet_tm_residue_count', 'tmdet_other_residue_count'):
+                       'tmdet_counted_residue_count', 'tmdet_membrane_residue_count',
+                       'tmdet_other_residue_count'):
             raw = table[column].astype('string').str.strip()
             numbers = pd.to_numeric(raw.mask(raw == ''), errors='raise')
             known = numbers.dropna()
@@ -246,13 +251,21 @@ class MembranePlotsMixin:
         if not table['tmdet_status'].isin(TMDET_STATUSES).all():
             raise ValueError('Invalid TmDet status')
         complete = table['tmdet_status'].isin(TMDET_STATUSES[:2])
-        counts = table.loc[complete, ['tmdet_modeled_residue_count', 'tmdet_tm_residue_count', 'tmdet_other_residue_count']]
+        partial = table['tmdet_status'] == 'partial_annotation'
+        counted = table[['tmdet_counted_residue_count', 'tmdet_other_residue_count']].notna()
+        usable = complete | (partial & counted.all(axis=1))
+        counts = table.loc[usable, ['tmdet_counted_residue_count', 'tmdet_membrane_residue_count',
+                                    'tmdet_other_residue_count', 'tmdet_modeled_residue_count']]
         if (counts.isna().any().any() or (counts.iloc[:, 0] <= 0).any()
-                or (counts.iloc[:, 1] + counts.iloc[:, 2] != counts.iloc[:, 0]).any()):
-            raise ValueError('Complete TmDet results require consistent modeled/TM/other residue counts')
+                or (counts.iloc[:, 1] + counts.iloc[:, 2] != counts.iloc[:, 0]).any()
+                or (counts.iloc[:, 0] > counts.iloc[:, 3]).any()
+                or (table.loc[complete, 'tmdet_counted_residue_count']
+                    != table.loc[complete, 'tmdet_modeled_residue_count']).any()
+                or (counted.any(axis=1) & ~usable).any()):
+            raise ValueError('Usable TmDet results require consistent counted/membrane/other residue counts')
         negative = table['tmdet_status'] == 'no_membrane_detected'
-        if (table.loc[negative, 'tmdet_tm_residue_count'] != 0).any():
-            raise ValueError('Negative TmDet results must have zero TM residues')
+        if (table.loc[negative, 'tmdet_membrane_residue_count'] != 0).any():
+            raise ValueError('Negative TmDet results must have zero membrane residues')
         unknown = table.loc[table['year'].isna(), 'entry_id'].tolist()
         if unknown:
             warnings.warn(f'{name}: omitting {len(unknown)} entries with unknown deposition year: '
@@ -320,16 +333,16 @@ class MembranePlotsMixin:
         annual, annual_fractions = membrane_time_statistics(table)
         _, period_fractions = membrane_time_statistics(table, period_years=5)
         colors = ('#0072B2', '#D55E00')
-        labels = ('Entries with complete TmDet results', 'Entries with detected TM regions')
+        labels = ('Entries with usable TmDet results', 'Entries with detected membrane regions')
         use_year_ticks = not annual.empty and annual['period_start'].max() - annual['period_start'].min() >= YEAR_MAJOR_TICK_STEP
 
         def draw_composition(ax):
             total = annual['n_entries'].replace(0, np.nan).to_numpy(dtype=float)
             shares = [annual[column].to_numpy(dtype=float) / total * 100
-                      for column in ('n_with_tm', 'n_without_tm', 'n_unavailable')]
+                      for column in ('n_with_membrane', 'n_without_membrane', 'n_unavailable')]
             self._draw_membrane_share_areas(
                 ax, annual['period_start'], shares,
-                ('TM regions detected', 'No TM regions detected', 'Incomplete / unavailable'),
+                ('Membrane regions detected', 'No membrane regions detected', 'Incomplete / unavailable'),
                 self.config.homolog_timing_colors)
             if not use_year_ticks:
                 ax.set_xticks(annual['period_start'].to_numpy(dtype=int))
@@ -381,6 +394,6 @@ class MembranePlotsMixin:
             self._render_membrane_fraction_panels(annual_fractions, fraction_output_png,
                                                   fraction_output_svg, labels, use_year_ticks)
             self._render_figure(period_output_png, period_output_svg,
-                                self.config.nmr_membrane_period_title, 'TM residue fraction per PDB entry (%)',
+                                self.config.nmr_membrane_period_title, 'Membrane residue fraction per PDB entry (%)',
                                 draw_period, x_label='Deposition period', use_year_x_ticks=False,
                                 auto_minor_ticks=False)

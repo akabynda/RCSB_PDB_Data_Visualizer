@@ -21,6 +21,7 @@ from src.dataset.io.membrane import write_solution_nmr_membrane_csvs
 from src.dataset.reporting import _record_filtered_structure, _set_active_dataset_filtered_csvs
 from src.dataset.utils import chunked, collect_batch_results
 from src.dataset.tmdet import annotate_membrane_cohort
+from src.dataset.tmdet_annotations import MEMBRANE_REGION_CODES
 
 
 def _code_provenance() -> dict:
@@ -93,7 +94,7 @@ def run_solution_nmr_membrane(
         )),
     }
     manifest = {
-        "schema_version": "solution-nmr-membrane-v3",
+        "schema_version": "solution-nmr-membrane-v4",
         "started_at": started_at,
         "completed_at": _utc_now_iso(),
         "command": shlex.join([sys.executable, *sys.argv]),
@@ -128,9 +129,12 @@ def run_solution_nmr_membrane(
         "sources": cache.sources,
         "tmdet": {
             "model_index": 0, "input": "first PDB coordinate model, no core crop",
-            "count_unit": "modeled polypeptide residues across all protein chains in each PDB entry",
+            "count_unit": (
+                "modeled polypeptide residues across protein chains in each PDB entry; a chain with "
+                "any unassigned residue is excluded whole"
+            ),
             "copy_count_unit": "sum over protein entities of the mean chain count over that entity's copies",
-            "tm_region_codes": ["H", "B"], "preserved_region_codes": "all",
+            "membrane_region_codes": sorted(MEMBRANE_REGION_CODES), "preserved_region_codes": "all",
             "cache_directory": str(Path(args.tmdet_cache_dir).resolve()),
             "timeout_seconds": args.tmdet_timeout_seconds,
             "sources": tmdet_sources,

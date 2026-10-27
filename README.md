@@ -140,7 +140,7 @@ python src/pdb_plot.py \
 
 ### Figure 99
 
-Temporary figure number: the residue-count map of modeled transmembrane versus
+Temporary figure number: the residue-count map of modeled membrane versus
 other modeled protein residues in solution-NMR entries, with identical chains
 averaged per copy. Generate it with the membrane plot group:
 

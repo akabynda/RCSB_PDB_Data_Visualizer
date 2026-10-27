@@ -313,21 +313,30 @@ and the `ZZZ` installation marker are retrieved from RCSB CCD.
 PDB chain IDs, author numbers and insertion codes. Numbering gaps add no
 residues. Each modeled polypeptide residue is counted once across all protein
 chains, including partner chains. Polymer HETATM membership follows the shared
-coordinate rules. All XML region codes and attributes are retained. For the
-summary, `N_TM = N_H + N_B`, `f_TM = N_TM / N_modeled`, and the other-residue
-count is `N_modeled - N_TM`. Other residues can include re-entrant loops and
-interfacial helices. RCSB `modeled_residue_count` is separate from the measured
+coordinate rules. All XML region codes and attributes are retained. Membrane
+residues are those with the codes TmDet 4 classes as annotated membrane types
+(`Region::isAnnotatedMembraneType`): `H` (TM helix), `B` (TM β-strand), `L`
+(re-entrant loop), `F` (interfacial helix) and `N` (β-barrel inside element).
+A chain with any unassigned residue (`partial_annotation`) is excluded whole.
+Over the remaining chains, `N_membrane = N_H + N_B + N_L + N_F + N_N`,
+`f_membrane = N_membrane / N_counted`, and the other-residue count is
+`N_counted - N_membrane`. `tmdet_counted_residue_count` is `N_counted`;
+`tmdet_excluded_chain_count` and `tmdet_excluded_residue_count` record the
+exclusions. `tmdet_modeled_residue_count`, assigned/unassigned counts and
+`tmdet_region_counts_json` cover all modeled residues. RCSB
+`modeled_residue_count` is separate from the measured
 `tmdet_modeled_residue_count`.
 
 **Copy counts.** `max_protein_entity_chain_count` is the largest number of
 chains of one protein entity; values above 1 mark identical chains. TmDet still
 runs on the whole first model; only aggregation differs. For entity `e` with
 chains `c`, `N_copy = Σ_e (1/n_e) Σ_c N_c`, computed separately for modeled,
-H/B and other residues (`tmdet_copy_mean_*`). `tmdet_copy_min_tm_residue_count`
-and `tmdet_copy_max_tm_residue_count` sum each entity's smallest and largest
-chain H/B count. Copy counts equal the entry totals when every entity has one
-chain. They are blank unless the entry and all its protein chains have complete
-results.
+membrane and other residues (`tmdet_copy_mean_*`), over counted chains only;
+an entity without counted chains drops out. `tmdet_copy_min_membrane_residue_count`
+and `tmdet_copy_max_membrane_residue_count` sum each entity's smallest and
+largest chain membrane count. Copy counts equal the entry totals when every
+entity has one counted chain. They are blank unless every protein chain other
+than the excluded ones has a complete result.
 
 **Symmetry flag.** The flag uses the one RCSB assembly that lists every
 deposited protein chain and has the same protein-instance count. Its
@@ -339,11 +348,11 @@ descriptive: it does not select entries or change counts.
 | Status | Meaning |
 | --- | --- |
 | `membrane_detected` | Every modeled protein residue has an XML region assignment. |
-| `partial_annotation` | Some residues lack assignments; assigned H/B counts remain, but fraction and other-residue count are blank. |
-| `no_membrane_detected` | Valid negative result; TM count/fraction are zero, without inferred region labels. |
-| `no_analyzable_protein` | TmDet reports `Noprotein`; TM count/fraction are blank. |
-| `not_in_model` | Chain absent from the first model; chain TM count/fraction are blank. |
-| `error` | Download, execution, timeout or mapping failed; reason is retained and TM count/fraction are blank. |
+| `partial_annotation` | Some chains have unassigned residues. Entry: counts over the other chains, blank if none remain. Chain: membrane count of assigned residues; fraction and other-residue count are blank. |
+| `no_membrane_detected` | Valid negative result; membrane count/fraction are zero, without inferred region labels. |
+| `no_analyzable_protein` | TmDet reports `Noprotein`; membrane count/fraction are blank. |
+| `not_in_model` | Chain absent from the first model; chain membrane count/fraction are blank. |
+| `error` | Download, execution, timeout or mapping failed; reason is retained and membrane count/fraction are blank. |
 
 The main CSV is `data/solution_nmr_membrane_proteins.csv`. Companions share its stem:
 
@@ -372,27 +381,28 @@ rerun. Tables are written atomically, with the manifest published last; a run
 with calculation errors saves error rows and exits unsuccessfully.
 
 **Plots.** Entries with known deposition years through 2024 enter the count
-and status summaries. The residue map uses complete positive and valid negative
-results with copy counts: x is the copy-mean H/B count, y the copy-mean other
-count. Entries with identical chains are gold triangles; all others are blue
-circles. Complete entries without copy counts are omitted with a warning. This
+and status summaries. Usable results are complete positive and valid negative
+results, plus partial ones with counted chains. The residue map uses usable
+results with copy counts: x is the copy-mean membrane count, y the copy-mean
+other count. Entries with identical chains are gold triangles; all others are
+blue circles. Usable entries without copy counts are omitted with a warning. This
 map alone is Figure 99. Linear axes retain zeros and the full range. Marginal
 histograms stack the two groups in ten-residue bins: blue at the bottom,
 hatched gold above; the grey outer step is all plotted entries. The table
 `figures/solution_nmr_membrane_tmdet_residues/solution_nmr_membrane_tmdet_residues.csv`
 retains excluded entries and marks selection with `included_in_residue_plot`.
-It keeps entry totals, copy means and ranges, chain counts, the symmetry flag and
-`repeated_protein_chains`. No full-length/fragment class is assigned. Count,
-status and fraction summaries use entry totals.
+It keeps entry totals, exclusion counts, copy means and ranges, chain counts,
+the symmetry flag and `repeated_protein_chains`. No full-length/fragment class
+is assigned. Count, status and fraction summaries use entry totals.
 
 | Time summary | Statistic |
 | --- | --- |
-| Composition | Annual shares with H/B residues, zero H/B residues, and incomplete/unavailable results; denominator: all entries that year. |
-| Fractions | Annual mean TM and other-residue fractions for complete results and, separately, the subset with H/B residues. |
+| Composition | Annual shares with membrane residues, zero membrane residues, and unavailable results; denominator: all entries that year. |
+| Fractions | Annual mean membrane and other-residue fractions for usable results and, separately, the subset with membrane residues. |
 | Period distributions | The same fractions in five-year periods starting 1990–1994. |
 
-Each entry has equal weight. Valid negatives contribute zero TM fraction;
-incomplete/unavailable results are excluded from fraction statistics. Tables
+Each entry has equal weight. Valid negatives contribute zero membrane fraction;
+unavailable results are excluded from fraction statistics. Tables
 use fractions in 0–1; plots use percent. Boxplots show linear 25th/50th/75th
 percentiles, 1.5-IQR whiskers, all outliers and group sizes. Annual shares use
 centered steps, and years without a denominator remain gaps. Source tables
