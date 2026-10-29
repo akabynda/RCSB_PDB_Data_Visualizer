@@ -10,12 +10,8 @@ import pandas as pd
 import pytest
 
 from src.pdb_plot import PDBScientificPlotter, PlotConfig
-from matplotlib.scale import SymmetricalLogTransform
-
 from src.plotting.constants import AXIS_MAJOR_TICK_LENGTH, AXIS_MINOR_TICK_LENGTH
-from src.plotting.membrane import (
-    RESIDUE_MAP_LINSCALE, RESIDUE_MAP_LINTHRESH, TMDET_STATUSES, residue_map_bin_edges,
-)
+from src.plotting.membrane import TMDET_STATUSES, residue_map_axis_limit
 from src.plotting.membrane_statistics import _fraction_statistics, membrane_time_statistics
 
 
@@ -178,13 +174,8 @@ def test_all_standard_variants_and_data_counts(plotter, tmp_path, empty):
             assert sum(p.get_height() for p in ax.patches) == (0 if empty else 5)
         else:
             assert sum(len(c.get_offsets()) for c in ax.collections) == (0 if empty else 3)
-            assert len(kwargs['fig'].axes) == 3
-            top, right = kwargs['fig'].axes[1:]
-            for marginal in (top, right):
-                distinct, stacked = marginal.patches[:2]
-                assert distinct.get_data().values.sum() == (0 if empty else 2)
-                assert stacked.get_data().values.sum() == (0 if empty else 3)
-                np.testing.assert_array_equal(stacked.get_data().baseline, distinct.get_data().values)
+            # The scatter panel alone: no marginal histograms.
+            assert len(kwargs['fig'].axes) == 1
             if not empty:
                 # Copy means, not entry totals: the dimer is plotted at (25/2, 75/2);
                 # the partial entry counts only its annotated chains (20, 40).
@@ -195,44 +186,31 @@ def test_all_standard_variants_and_data_counts(plotter, tmp_path, empty):
                 np.testing.assert_array_equal(circle.get_paths()[0].vertices, pink.get_paths()[0].vertices)
                 assert circle.get_sizes().tolist() == pink.get_sizes().tolist()
                 assert circle.get_edgecolor().tolist() != pink.get_edgecolor().tolist()
-                np.testing.assert_array_equal(top.patches[1].get_data().edges, residue_map_bin_edges(80))
-                # x = 0 is in [0, 2), 12.5 in [10, 15.8) and 20 in [15.8, 25.1).
-                np.testing.assert_array_equal(top.patches[1].get_data().values, [1, 0, 0, 0, 0, 1, 1, 0, 0, 0])
-                # y = 37.5 is in [25.1, 39.8), 40 in [39.8, 63.1) and 80 in [63.1, 100).
-                np.testing.assert_array_equal(right.patches[0].get_data().values, [0] * 8 + [1, 1])
-                np.testing.assert_array_equal(right.patches[1].get_data().values, [0] * 7 + [1, 1, 1])
             assert ax.get_legend() is None
-            assert ax.get_xlabel() == 'Number of modeled residues in membrane regions (symlog)'
-            assert ax.get_ylabel() == 'Number of modeled residues in extramembrane regions (symlog)'
+            assert ax.get_xlabel() == 'Number of modeled residues in membrane regions'
+            assert ax.get_ylabel() == 'Number of modeled residues in extramembrane regions'
             assert ax.get_xscale() == ax.get_yscale() == 'symlog'
-            # Marginal bins have equal widths on the drawn symlog axis.
-            widths = np.diff(ax.xaxis.get_transform().transform(top.patches[1].get_data().edges))
-            np.testing.assert_allclose(widths, widths[0], rtol=1e-12, atol=0)
             assert all(tick.gridline.get_visible() for tick in ax.xaxis.get_minor_ticks())
             assert all(tick.gridline.get_visible() for tick in ax.yaxis.get_minor_ticks())
-            # Every panel has visible major and minor ticks on both axes, symlog ones included.
-            for panel in (ax, top, right):
-                for axis in (panel.xaxis, panel.yaxis):
-                    assert axis.get_major_ticks()[0].tick1line.get_markersize() == AXIS_MAJOR_TICK_LENGTH
-                    assert axis.get_minor_ticks()[0].tick1line.get_markersize() == AXIS_MINOR_TICK_LENGTH
-            assert ax.get_shared_x_axes().joined(ax, top)
-            assert ax.get_shared_y_axes().joined(ax, right)
+            # Visible major and minor ticks on both symlog axes.
+            for axis in (ax.xaxis, ax.yaxis):
+                assert axis.get_major_ticks()[0].tick1line.get_markersize() == AXIS_MAJOR_TICK_LENGTH
+                assert axis.get_minor_ticks()[0].tick1line.get_markersize() == AXIS_MINOR_TICK_LENGTH
             fig = kwargs['fig']
-            fig.canvas.draw()
             width, height = fig.get_size_inches()
-            main, upper, side = (panel.get_position() for panel in (ax, top, right))
-            # Equal inches per residue (1:1); only float rounding of figure fractions differs.
-            x_scale = main.width * width / np.diff(ax.get_xlim())[0]
-            y_scale = main.height * height / np.diff(ax.get_ylim())[0]
-            assert x_scale == pytest.approx(y_scale, rel=1e-12, abs=0)
-            assert (upper.x0, upper.width) == pytest.approx((main.x0, main.width), rel=1e-12, abs=0)
-            assert (side.y0, side.height) == pytest.approx((main.y0, main.height), rel=1e-12, abs=0)
-            # Both axes span zero to the first bin edge above the data: 100 > 80; 10 when empty.
+            main = ax.get_position()
+            # A square panel; only float rounding of figure fractions differs.
+            assert main.width * width == pytest.approx(main.height * height, rel=1e-12, abs=0)
+            # Both axes end at the first major tick above the data: 100 > 80; 10 when empty.
             assert ax.get_xlim() == ax.get_ylim() == ((0, 10) if empty else (0, 100))
             assert ax.get_xticks().tolist() == ax.get_yticks().tolist()
+            title = ax.get_title()
+            if '_no_title' in name:
+                assert title == ''
+            else:
+                assert title == plotter.config.nmr_membrane_residues_title and title.count('\n') == 1
             assert kwargs['savefig_bbox_inches'] == 'tight'
-            assert all(panel.spines['top'].get_visible() == ('open_axes' not in name)
-                       for panel in (ax, top, right))
+            assert ax.spines['top'].get_visible() == ('open_axes' not in name)
         assert ax.get_ylim()[0] == 0
     with patch.object(plotter, '_read_csv', return_value=data), patch.object(plotter, '_save_figure_files', side_effect=inspect):
         plotter.plot_solution_nmr_membrane_proteins(Path('data.csv'), *[tmp_path / f'{stem}.{ext}'
@@ -259,17 +237,9 @@ def test_all_standard_variants_and_data_counts(plotter, tmp_path, empty):
         assert exported['tmdet_copy_mean_membrane_residue_count'].iloc[3:].isna().all()
 
 
-def test_residue_map_bins_have_equal_symlog_widths():
-    # 0-10 in steps of 2, then 5 bins per decade up to the first edge above the maximum.
-    np.testing.assert_array_equal(residue_map_bin_edges(0), [0, 2, 4, 6, 8, 10])
-    edges = residue_map_bin_edges(100)
-    np.testing.assert_allclose(edges[5:], 10 ** np.arange(1, 2.4, .2), rtol=1e-12, atol=0)
-    assert edges[-2] <= 100 < edges[-1]
-    # Equal widths under matplotlib's own symlog transform with the plotted parameters.
-    transform = SymmetricalLogTransform(base=10, linthresh=RESIDUE_MAP_LINTHRESH,
-                                        linscale=RESIDUE_MAP_LINSCALE)
-    widths = np.diff(transform.transform(edges))
-    np.testing.assert_allclose(widths, widths[0], rtol=1e-12, atol=0)
+@pytest.mark.parametrize('maximum,limit', [(0, 10), (9.5, 10), (10, 20), (80, 100), (448, 500), (500, 1000)])
+def test_residue_map_axis_limit_is_first_major_tick_above_data(maximum, limit):
+    assert residue_map_axis_limit(maximum) == limit
 
 
 def test_fraction_statistics_weight_entries_and_preserve_missing_years(plotter):

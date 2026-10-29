@@ -9,7 +9,6 @@ import numpy as np
 import pandas as pd
 from matplotlib.ticker import FixedLocator, MaxNLocator, StrMethodFormatter
 from matplotlib.patches import Patch
-from mpl_toolkits.axes_grid1 import Divider, Size
 
 from ..dataset.io.common import _atomic_write_csv_rows
 from .constants import AXIS_MAJOR_TICK_LENGTH, AXIS_MINOR_TICK_LENGTH, TITLE_FONTSIZE, YEAR_MAJOR_TICK_STEP
@@ -29,26 +28,19 @@ COPY_COUNT_COLUMNS = (
 # Copy means are rationals with small denominators stored as floats; real
 # inconsistencies are at least 1/copies residues, far above this rounding bound.
 COPY_COUNT_ATOL = 1e-9
-# Residue map: side of the square scatter panel and size of each marginal panel, in inches.
+# Residue map: side of the square scatter panel, in inches.
 RESIDUE_MAP_PANEL_INCHES = 5.0
-RESIDUE_MAP_MARGINAL_INCHES = 1.0
 # Both residue-map axes are symlog: linear below 10 residues, logarithmic above.
 # matplotlib draws the linear range linscale / (1 - 1/10) decades wide, so 0.9
-# makes 0-10 exactly one decade wide and every marginal bin equally wide.
+# makes 0-10 as wide as one decade.
 RESIDUE_MAP_LINTHRESH = 10
 RESIDUE_MAP_LINSCALE = .9
-RESIDUE_MAP_BINS_PER_DECADE = 5
 RESIDUE_MAP_TICKS = (0, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000)
 
 
-def residue_map_bin_edges(maximum):
-    """Marginal bin edges of equal symlog width, from zero to the first edge above `maximum`."""
-    edges = list(np.linspace(0, RESIDUE_MAP_LINTHRESH, RESIDUE_MAP_BINS_PER_DECADE + 1))
-    step = 1
-    while edges[-1] <= maximum:
-        edges.append(RESIDUE_MAP_LINTHRESH * 10 ** (step / RESIDUE_MAP_BINS_PER_DECADE))
-        step += 1
-    return np.array(edges)
+def residue_map_axis_limit(maximum):
+    """Upper limit of both residue-map axes: the first major tick of at least 10 above `maximum`."""
+    return next(tick for tick in RESIDUE_MAP_TICKS if tick >= RESIDUE_MAP_LINTHRESH and tick > maximum)
 
 
 class MembranePlotsMixin:
@@ -95,7 +87,7 @@ class MembranePlotsMixin:
         return copies, included, chains > 1
 
     def _render_membrane_residue_map(self, table, output_png, output_svg):
-        """Plot copy-mean counts with stacked, shared-axis ten-residue histograms."""
+        """Plot copy-mean counts on a square panel with one symlog scale on both axes."""
         copies, included, repeated = self._prepare_membrane_copy_counts(table)
         exported = table.reindex(columns=[
             'entry_id', 'year', 'title', 'membrane_annotation_sources',
@@ -121,76 +113,43 @@ class MembranePlotsMixin:
         x = copies.loc[included, 'tmdet_copy_mean_membrane_residue_count'].to_numpy(dtype=float)
         y = copies.loc[included, 'tmdet_copy_mean_other_residue_count'].to_numpy(dtype=float)
         oligomer = repeated[included].to_numpy(dtype=bool)
-        # One symlog range and bin set on both axes of a square panel keeps the map 1:1.
-        edges = residue_map_bin_edges(max(x.max(), y.max()) if len(x) else 0)
-        limit = edges[-1]
-        x_distinct, _ = np.histogram(x[~oligomer], bins=edges)
-        y_distinct, _ = np.histogram(y[~oligomer], bins=edges)
-        x_counts, _ = np.histogram(x, bins=edges)
-        y_counts, _ = np.histogram(y, bins=edges)
+        # One symlog range on both axes of a square panel keeps the map 1:1.
+        limit = residue_map_axis_limit(max(x.max(), y.max()) if len(x) else 0)
         major = [tick for tick in RESIDUE_MAP_TICKS if tick <= limit]
         minor = [tick for tick in (*range(1, 10), *(m * 10 ** d for d in range(1, 4) for m in range(2, 10)))
                  if tick <= limit]
-        color, pink = '#0072B2', '#CC79A7'
-        pink_fill = (.8, .475, .655, .3)
         for with_title, open_axes in ((True, False), (False, False), (True, True), (False, True)):
-            # Generous margins for labels and title; saving crops to the drawn content.
-            # The gap keeps facing major ticks of adjacent panels apart.
-            columns = (1.0, RESIDUE_MAP_PANEL_INCHES, .25, RESIDUE_MAP_MARGINAL_INCHES, .2)
-            rows = (.8, RESIDUE_MAP_PANEL_INCHES, .25, RESIDUE_MAP_MARGINAL_INCHES, .6 if with_title else .1)
-            fig = plt.figure(figsize=(sum(columns), sum(rows)))
-            divider = Divider(fig, (0, 0, 1, 1), [Size.Fixed(size) for size in columns],
-                              [Size.Fixed(size) for size in rows], aspect=False)
-            ax = fig.add_axes((0, 0, 1, 1), axes_locator=divider.new_locator(nx=1, ny=1))
-            top = fig.add_axes((0, 0, 1, 1), axes_locator=divider.new_locator(nx=1, ny=3), sharex=ax)
-            right = fig.add_axes((0, 0, 1, 1), axes_locator=divider.new_locator(nx=3, ny=1), sharey=ax)
+            # Generous margins for labels and the two-line title; saving crops to the drawn content.
+            left, bottom, right, top = 1.0, .8, .2, .9 if with_title else .1
+            width, height = left + RESIDUE_MAP_PANEL_INCHES + right, bottom + RESIDUE_MAP_PANEL_INCHES + top
+            fig = plt.figure(figsize=(width, height))
+            ax = fig.add_axes((left / width, bottom / height,
+                               RESIDUE_MAP_PANEL_INCHES / width, RESIDUE_MAP_PANEL_INCHES / height))
             ax.set_xscale('symlog', linthresh=RESIDUE_MAP_LINTHRESH, linscale=RESIDUE_MAP_LINSCALE)
             ax.set_yscale('symlog', linthresh=RESIDUE_MAP_LINTHRESH, linscale=RESIDUE_MAP_LINSCALE)
             ax.scatter(x[~oligomer], y[~oligomer], s=22, marker='o', facecolors=(0, .447, .698, .22),
-                       edgecolors=color, linewidths=.55, clip_on=False, label='Each protein chain distinct')
-            ax.scatter(x[oligomer], y[oligomer], s=22, marker='o', facecolors=pink_fill,
-                       edgecolors=pink, linewidths=.55, clip_on=False, label='Identical chains, mean per copy')
-            for marginal, distinct, total, orientation in (
-                (top, x_distinct, x_counts, 'vertical'),
-                (right, y_distinct, y_counts, 'horizontal'),
-            ):
-                # Stack oligomers above distinct-chain entries; the outer step is the total.
-                marginal.stairs(distinct, edges, orientation=orientation, fill=True,
-                                color=color, alpha=.22, linewidth=0)
-                marginal.stairs(total, edges, baseline=distinct, orientation=orientation, fill=True,
-                                facecolor=pink_fill, edgecolor=pink, hatch='////', linewidth=0)
-                marginal.stairs(distinct, edges, orientation=orientation, color=color, linewidth=1.1)
-                marginal.stairs(total, edges, orientation=orientation, color='#4D4D4D', linewidth=1.1)
+                       edgecolors='#0072B2', linewidths=.55, clip_on=False, label='Each protein chain distinct')
+            ax.scatter(x[oligomer], y[oligomer], s=22, marker='o', facecolors=(.8, .475, .655, .3),
+                       edgecolors='#CC79A7', linewidths=.55, clip_on=False, label='Identical chains, mean per copy')
             ax.set(xlim=(0, limit), ylim=(0, limit),
-                   xlabel='Number of modeled residues in membrane regions (symlog)',
-                   ylabel='Number of modeled residues in extramembrane regions (symlog)')
-            top.set_ylim(0, max(1, int(x_counts.max()) * 1.12))
-            right.set_xlim(0, max(1, int(y_counts.max()) * 1.12))
-            top.yaxis.set_major_locator(MaxNLocator(nbins=3, integer=True))
-            right.xaxis.set_major_locator(MaxNLocator(nbins=3, integer=True))
-            top.set_ylabel('PDB entries', fontsize=10)
-            right.set_xlabel('PDB entries', fontsize=10)
-            for panel in (ax, top, right):
-                self._configure_minor_ticks(panel, use_year_x_ticks=False)
-                self._configure_boxed_axes(panel)
-                if open_axes:
-                    self._configure_open_axes(panel)
-            # Set after the shared helpers, which would put linear minor locators on these axes.
+                   xlabel='Number of modeled residues in membrane regions',
+                   ylabel='Number of modeled residues in extramembrane regions')
+            self._configure_minor_ticks(ax, use_year_x_ticks=False)
+            self._configure_boxed_axes(ax)
+            if open_axes:
+                self._configure_open_axes(ax)
+            # Set after the shared helper, which would put linear minor locators on these axes.
             for axis in (ax.xaxis, ax.yaxis):
                 axis.set_major_locator(FixedLocator(major))
                 axis.set_minor_locator(FixedLocator(minor))
                 axis.set_major_formatter(StrMethodFormatter('{x:g}'))
             # The style draws zero-length x ticks, and the shared helper restores them only
             # for uniform major steps, which the symlog axis lacks.
-            for panel in (ax, top, right):
-                panel.tick_params(which='major', length=AXIS_MAJOR_TICK_LENGTH)
-                panel.tick_params(which='minor', length=AXIS_MINOR_TICK_LENGTH)
+            ax.tick_params(which='major', length=AXIS_MAJOR_TICK_LENGTH)
+            ax.tick_params(which='minor', length=AXIS_MINOR_TICK_LENGTH)
             ax.grid(which='minor', linewidth=.5, alpha=.12)
-            top.tick_params(axis='x', which='both', labelbottom=False)
-            right.tick_params(axis='y', which='both', labelleft=False)
             if with_title:
-                fig.suptitle(self.config.nmr_membrane_residues_title,
-                             fontsize=TITLE_FONTSIZE, fontweight='bold')
+                self._set_title(ax, self.config.nmr_membrane_residues_title)
             png, svg = output_png, output_svg
             if not with_title:
                 png, svg = self._titleless_output_path(png), self._titleless_output_path(svg)

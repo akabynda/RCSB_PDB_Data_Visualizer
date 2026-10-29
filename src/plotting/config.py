@@ -80,7 +80,7 @@ class PlotConfig:
         "TmDet results for solution NMR membrane protein entries"
     )
     nmr_membrane_residues_title: str = (
-        "Delineation of membrane vs. extramembrane regions in NMR structures of membrane proteins"
+        "Delineation of membrane vs. extramembrane regions\nin NMR structures of membrane proteins"
     )
     nmr_membrane_composition_title: str = "Membrane-region detection in solution NMR entries by year"
     nmr_membrane_fraction_title: str = "Membrane residue fraction in solution NMR entries by year"

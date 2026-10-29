@@ -18,7 +18,7 @@ figures for the accompanying article. Plots include deposition years through
   - [Figure 6](#figure-6)
   - [Figure 7](#figure-7)
   - [Figure 8](#figure-8)
-  - [Figure 99](#figure-99)
+  - [Figure 9](#figure-9)
 - [Outputs](#outputs)
 - [Reference](#reference)
 - [License](#license)
@@ -30,7 +30,7 @@ figures for the accompanying article. Plots include deposition years through
   build can require about 100 GiB.
 - Figures 3–7: STRIDE, or Git, GNU Make and a C compiler for its automatic
   installation on macOS/Linux. On Windows, use WSL or supply a prebuilt STRIDE.
-- Figure 99: TmDet, or CMake and a C++20 compiler for its automatic installation.
+- Figure 9: TmDet, or CMake and a C++20 compiler for its automatic installation.
 
 ## Setup
 
@@ -138,11 +138,11 @@ python src/pdb_plot.py \
   --plots solution_nmr_monomer_quality,solution_nmr_monomer_program_clusters
 ```
 
-### Figure 99
+### Figure 9
 
-Temporary figure number: the residue-count map of modeled membrane versus
-other modeled protein residues in solution-NMR entries, with identical chains
-averaged per copy. Generate it with the membrane plot group:
+The residue-count map of modeled membrane versus other modeled protein
+residues in solution-NMR entries, with identical chains averaged per copy.
+Generate it with the membrane plot group:
 
 ```bash
 python src/pdb_dataset_builder.py --datasets solution_nmr_membrane_proteins
@@ -173,9 +173,9 @@ base PNG with a closed frame.
 | 8B | `solution_nmr_monomer_quality_ramachandran_outliers_by_year` |
 | 8C | `solution_nmr_monomer_quality_sidechain_outliers_by_year` |
 | 8D | `solution_nmr_monomer_program_cluster_share_by_year` |
-| 99 | `solution_nmr_membrane_tmdet_residues` |
+| 9 | `solution_nmr_membrane_tmdet_residues` |
 
-Figure 99 is only the residue-count map in
+Figure 9 is only the residue-count map in
 `figures/solution_nmr_membrane_tmdet_residues/`. The membrane plot group also
 produces separate count, status and time-summary figures.
 
