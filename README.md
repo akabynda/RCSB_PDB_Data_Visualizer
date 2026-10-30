@@ -58,11 +58,7 @@ This runs all supported analyses, including those beyond the article figures.
 The full build downloads coordinates, searches for homologs and calculates
 structural comparisons, so it can take a long time.
 
-The builder writes CSV datasets to `data/`; the plotter reads them and writes
-PNGs under `figures/`. See [Outputs](#outputs) to locate each figure. Input/output
-path options are listed by `--help`; add `--svg` to export SVGs as well.
-For individual figures, run the commands below. Figures 6 and 7 use homologs
-selected at 100% sequence identity.
+Add `--svg` to the plotter to export SVGs as well.
 
 ## Reproduce Individual Figures
 
