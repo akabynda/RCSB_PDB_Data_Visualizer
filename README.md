@@ -140,10 +140,6 @@ python src/pdb_plot.py \
 
 ### Figure 9
 
-The residue-count map of modeled membrane versus other modeled protein
-residues in solution-NMR entries, with identical chains averaged per copy.
-Generate it with the membrane plot group:
-
 ```bash
 python src/pdb_dataset_builder.py --datasets solution_nmr_membrane_proteins
 python src/pdb_plot.py --plots solution_nmr_membrane_proteins
@@ -174,11 +170,6 @@ base PNG with a closed frame.
 | 8C | `solution_nmr_monomer_quality_sidechain_outliers_by_year` |
 | 8D | `solution_nmr_monomer_program_cluster_share_by_year` |
 | 9 | `solution_nmr_membrane_tmdet_residues` |
-
-Figure 9 is only the residue-count map in
-`figures/solution_nmr_membrane_tmdet_residues/`. The membrane plot group also
-produces the annual entry count in
-`figures/solution_nmr_membrane_proteins_by_year/`.
 
 ## Reference
 
