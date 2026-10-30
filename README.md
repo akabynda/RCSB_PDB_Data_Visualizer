@@ -177,7 +177,8 @@ base PNG with a closed frame.
 
 Figure 9 is only the residue-count map in
 `figures/solution_nmr_membrane_tmdet_residues/`. The membrane plot group also
-produces separate count, status and time-summary figures.
+produces the annual entry count in
+`figures/solution_nmr_membrane_proteins_by_year/`.
 
 ## Reference
 

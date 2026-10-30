@@ -20,35 +20,12 @@ def add_nmr_output_arguments(parser: argparse.ArgumentParser) -> None:
         default=Path("figures/solution_nmr_membrane_proteins_by_year.svg"),
         help="Output SVG for SOLUTION NMR membrane entries by deposition year.",
     )
-    parser.add_argument(
-        "--nmr-membrane-coverage-output-png",
-        type=Path,
-        default=Path("figures/solution_nmr_membrane_tmdet_status.png"),
-        help="Output PNG for TmDet calculation status in the SOLUTION NMR membrane cohort.",
-    )
-    parser.add_argument(
-        "--nmr-membrane-coverage-output-svg",
-        type=Path,
-        default=Path("figures/solution_nmr_membrane_tmdet_status.svg"),
-        help="Output SVG for TmDet calculation status in the SOLUTION NMR membrane cohort.",
-    )
     for extension in ("png", "svg"):
         parser.add_argument(
             f"--nmr-membrane-residues-output-{extension}", type=Path,
             default=Path(f"figures/solution_nmr_membrane_tmdet_residues.{extension}"),
             help=f"Output {extension.upper()} for first-model TmDet residue counts.",
         )
-    for name, stem in (
-        ("composition", "solution_nmr_membrane_tmdet_composition_by_year"),
-        ("fraction", "solution_nmr_membrane_tmdet_fraction_by_year"),
-        ("period", "solution_nmr_membrane_tmdet_fraction_by_period"),
-    ):
-        for extension in ("png", "svg"):
-            parser.add_argument(
-                f"--nmr-membrane-{name}-output-{extension}", type=Path,
-                default=Path(f"figures/{stem}.{extension}"),
-                help=f"Output {extension.upper()} for TmDet {name} statistics; CSV accompanies PNG.",
-            )
     parser.add_argument(
         "--nmr-avg-output-png",
         type=Path,

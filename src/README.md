@@ -380,11 +380,12 @@ coordinates, logs and hashes are retained. Failed calculations are retried on
 rerun. Tables are written atomically, with the manifest published last; a run
 with calculation errors saves error rows and exits unsuccessfully.
 
-**Plots.** Entries with known deposition years through 2024 enter the count
-and status summaries. Usable results are complete positive and valid negative
-results, plus partial ones with counted chains. The residue map uses usable
-results with copy counts: x is the copy-mean membrane count, y the copy-mean
-other count. Entries with identical chains are pink circles; all others are
+**Plots.** Entries with known deposition years through 2024 enter the annual
+entry count (`solution_nmr_membrane_proteins_by_year`) and the residue map
+(`solution_nmr_membrane_tmdet_residues`). Usable results are complete positive
+and valid negative results, plus partial ones with counted chains. The residue
+map uses usable results with copy counts: x is the copy-mean membrane count,
+y the copy-mean other count. Entries with identical chains are pink circles; all others are
 blue circles; the map has no legend. Usable entries without copy counts are
 omitted with a warning. This map alone is Figure 9. Both axes use one symlog
 scale on a square panel without marginal histograms: linear from 0 to 10
@@ -396,21 +397,7 @@ grid lines are drawn. The table
 retains excluded entries and marks selection with `included_in_residue_plot`.
 It keeps entry totals, exclusion counts, copy means and ranges, chain counts,
 the symmetry flag and `repeated_protein_chains`. No full-length/fragment class
-is assigned. Count, status and fraction summaries use entry totals.
-
-| Time summary | Statistic |
-| --- | --- |
-| Composition | Annual shares with membrane residues, zero membrane residues, and unavailable results; denominator: all entries that year. |
-| Fractions | Annual mean membrane and other-residue fractions for usable results and, separately, the subset with membrane residues. |
-| Period distributions | The same fractions in five-year periods starting 1990–1994. |
-
-Each entry has equal weight. Valid negatives contribute zero membrane fraction;
-unavailable results are excluded from fraction statistics. Tables
-use fractions in 0–1; plots use percent. Boxplots show linear 25th/50th/75th
-percentiles, 1.5-IQR whiskers, all outliers and group sizes. Annual shares use
-centered steps, and years without a denominator remain gaps. Source tables
-record group sizes and exclusions. These are descriptive summaries without
-hypothesis tests or confidence intervals.
+is assigned. The annual count includes every entry regardless of TmDet status.
 
 ### `solution_nmr_program_counts`
 
