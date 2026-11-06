@@ -23,8 +23,8 @@ def add_nmr_output_arguments(parser: argparse.ArgumentParser) -> None:
     for extension in ("png", "svg"):
         parser.add_argument(
             f"--nmr-membrane-residues-output-{extension}", type=Path,
-            default=Path(f"figures/solution_nmr_membrane_tmdet_residues.{extension}"),
-            help=f"Output {extension.upper()} for first-model TmDet residue counts.",
+            default=Path(f"figures/solution_nmr_membrane_opm_residues.{extension}"),
+            help=f"Output {extension.upper()} for OPM membrane and extramembrane residue counts.",
         )
     parser.add_argument(
         "--nmr-avg-output-png",

@@ -11,7 +11,7 @@ import pytest
 
 from src.pdb_plot import PDBScientificPlotter, PlotConfig
 from src.plotting.constants import AXIS_MAJOR_TICK_LENGTH, AXIS_MINOR_TICK_LENGTH
-from src.plotting.membrane import TMDET_STATUSES, residue_map_axis_limit
+from src.plotting.membrane import residue_map_axis_limit
 
 
 def cohort_table():
@@ -19,21 +19,19 @@ def cohort_table():
         'entry_id': ['1aaa', '1bbb', '1ccc', '1ddd', '1eee', '1fff'],
         'year': [2022, 2022, 2022, 2024, 2024, 2025],
         'deposited_model_count': [20] * 6,
-        'tmdet_status': [*TMDET_STATUSES, 'membrane_detected'],
-        'tmdet_modeled_residue_count': [100, 80, 70, 10, 90, 100],
-        # 1CCC excludes an unannotated 10-residue chain: 70 modeled, 60 counted.
-        'tmdet_excluded_chain_count': [0, 0, 1, 0, None, 0],
-        'tmdet_excluded_residue_count': [0, 0, 10, 0, None, 0],
-        'tmdet_counted_residue_count': [100, 80, 60, None, None, 100],
-        'tmdet_membrane_residue_count': [25, 0, 20, None, None, 30],
-        'tmdet_other_residue_count': [75, 80, 40, None, None, 70],
+        'opm_status': ['counted', 'counted', 'counted', 'no_opm_annotation', 'coordinates_unavailable', 'counted'],
+        # 1CCC lacks 10 deposited residues in its OPM file: 70 modeled, 60 positioned.
+        'opm_absent_residue_count': [0, 0, 10, None, None, 0],
+        'opm_modeled_residue_count': [100, 80, 60, None, None, 100],
+        'opm_membrane_residue_count': [25, 0, 20, None, None, 30],
+        'opm_other_residue_count': [75, 80, 40, None, None, 70],
         # 1AAA is a homodimer of 50-residue chains with 12 and 13 membrane residues.
         'max_protein_entity_chain_count': [2, 1, 1, 1, 1, 1],
-        'tmdet_copy_mean_modeled_residue_count': [50, 80, 60, None, None, 100],
-        'tmdet_copy_mean_membrane_residue_count': [12.5, 0, 20, None, None, 30],
-        'tmdet_copy_mean_other_residue_count': [37.5, 80, 40, None, None, 70],
-        'tmdet_copy_min_membrane_residue_count': [12, 0, 20, None, None, 30],
-        'tmdet_copy_max_membrane_residue_count': [13, 0, 20, None, None, 30],
+        'opm_copy_mean_modeled_residue_count': [50, 80, 60, None, None, 100],
+        'opm_copy_mean_membrane_residue_count': [12.5, 0, 20, None, None, 30],
+        'opm_copy_mean_other_residue_count': [37.5, 80, 40, None, None, 70],
+        'opm_copy_min_membrane_residue_count': [12, 0, 20, None, None, 30],
+        'opm_copy_max_membrane_residue_count': [13, 0, 20, None, None, 30],
     })
 
 
@@ -67,9 +65,9 @@ def test_unknown_year_omissions_are_visible(plotter):
 @pytest.mark.parametrize('column,value', [
     ('entry_id', None), ('entry_id', '1BBB'), ('year', -1), ('year', np.inf),
     ('year', 2023.5), ('deposited_model_count', 1), ('deposited_model_count', None),
-    ('tmdet_status', 'unknown'), ('tmdet_membrane_residue_count', -1),
-    ('tmdet_membrane_residue_count', None), ('tmdet_other_residue_count', 100),
-    ('tmdet_counted_residue_count', 90),  # complete results count every modeled residue
+    ('opm_status', 'unknown'), ('opm_membrane_residue_count', -1),
+    ('opm_membrane_residue_count', None), ('opm_other_residue_count', 100),
+    ('opm_modeled_residue_count', 90),  # 25 + 75 != 90
 ])
 def test_invalid_metadata_never_plots_as_valid(plotter, column, value):
     table = cohort_table().astype(object)
@@ -78,25 +76,22 @@ def test_invalid_metadata_never_plots_as_valid(plotter, column, value):
         plotter._prepare_solution_nmr_membrane_table(table)
 
 
-@pytest.mark.parametrize('row,column,value', [
-    (2, 'tmdet_counted_residue_count', 61),  # 20 + 40 != 61
-    (2, 'tmdet_counted_residue_count', None),  # other count without counted residues
-    (2, 'tmdet_counted_residue_count', 80), (2, 'tmdet_other_residue_count', 60),  # above modeled 70
-    (4, 'tmdet_counted_residue_count', 90),  # failed calculations have no counts
+@pytest.mark.parametrize('row,column', [
+    (3, 'opm_modeled_residue_count'),  # no annotation has no counts
+    (4, 'opm_membrane_residue_count'),  # an unavailable file has no counts
 ])
-def test_invalid_partial_or_unavailable_counts_raise(plotter, row, column, value):
+def test_counts_without_counted_status_raise(plotter, row, column):
     table = cohort_table().astype(object)
-    table.loc[row, column] = value
+    table.loc[row, column] = 90
     with pytest.raises(ValueError):
         plotter._prepare_solution_nmr_membrane_table(table)
 
 
-def test_partial_entry_without_annotated_chains_is_unavailable(plotter):
+@pytest.mark.parametrize('status', ['error', 'structure_mismatch'])
+def test_entry_without_counts_stays_out_of_the_map(plotter, status):
     table = cohort_table().astype(object)
-    table.loc[2, ['tmdet_counted_residue_count', 'tmdet_membrane_residue_count', 'tmdet_other_residue_count',
-                  'tmdet_copy_mean_modeled_residue_count', 'tmdet_copy_mean_membrane_residue_count',
-                  'tmdet_copy_mean_other_residue_count', 'tmdet_copy_min_membrane_residue_count',
-                  'tmdet_copy_max_membrane_residue_count']] = None
+    table.loc[2, 'opm_status'] = status
+    table.loc[2, [column for column in table.columns if column.startswith(('opm_copy', 'opm_modeled', 'opm_membrane', 'opm_other'))]] = None
     prepared = plotter._prepare_solution_nmr_membrane_table(table)
     _, included, _ = plotter._prepare_membrane_copy_counts(prepared)
     assert included.tolist() == [True, True, False, False, False]
@@ -105,15 +100,15 @@ def test_partial_entry_without_annotated_chains_is_unavailable(plotter):
 @pytest.mark.parametrize('row,column,value', [
     (0, 'max_protein_entity_chain_count', 0), (0, 'max_protein_entity_chain_count', None),
     (0, 'max_protein_entity_chain_count', 1.5),
-    (0, 'tmdet_copy_mean_other_residue_count', 38),  # 12.5 + 38 != 50
-    (0, 'tmdet_copy_min_membrane_residue_count', 13), (0, 'tmdet_copy_max_membrane_residue_count', 12),
-    (0, 'tmdet_copy_min_membrane_residue_count', 11.5), (0, 'tmdet_copy_mean_membrane_residue_count', -1),
-    (0, 'tmdet_copy_mean_membrane_residue_count', np.inf),
-    (0, 'tmdet_copy_mean_modeled_residue_count', 101),  # exceeds the entry total
-    (1, 'tmdet_copy_mean_membrane_residue_count', 1),  # valid negative must stay zero
-    (1, 'tmdet_copy_mean_modeled_residue_count', 40),  # single copy must equal total
-    (1, 'tmdet_copy_mean_other_residue_count', None),  # partial set of copy counts
-    (2, 'tmdet_copy_mean_modeled_residue_count', 70),  # excluded chain must not count
+    (0, 'opm_copy_mean_other_residue_count', 38),  # 12.5 + 38 != 50
+    (0, 'opm_copy_min_membrane_residue_count', 13), (0, 'opm_copy_max_membrane_residue_count', 12),
+    (0, 'opm_copy_min_membrane_residue_count', 11.5), (0, 'opm_copy_mean_membrane_residue_count', -1),
+    (0, 'opm_copy_mean_membrane_residue_count', np.inf),
+    (0, 'opm_copy_mean_modeled_residue_count', 101),  # exceeds the entry total
+    (1, 'opm_copy_mean_membrane_residue_count', 1),  # zero membrane residues in the entry total
+    (1, 'opm_copy_mean_modeled_residue_count', 40),  # single copy must equal total
+    (1, 'opm_copy_mean_other_residue_count', None),  # partial set of copy counts
+    (2, 'opm_copy_mean_modeled_residue_count', 70),  # residues absent from OPM must not count
 ])
 def test_invalid_copy_counts_never_plot_as_valid(plotter, row, column, value):
     table = cohort_table().astype(object)
@@ -122,27 +117,27 @@ def test_invalid_copy_counts_never_plot_as_valid(plotter, row, column, value):
         plotter._prepare_membrane_copy_counts(plotter._prepare_solution_nmr_membrane_table(table))
 
 
-def test_copy_counts_for_unavailable_result_raise(plotter):
+def test_copy_counts_for_uncounted_result_raise(plotter):
     table = cohort_table().astype(object)
-    table.loc[4, ['tmdet_copy_mean_modeled_residue_count', 'tmdet_copy_mean_membrane_residue_count',
-                  'tmdet_copy_mean_other_residue_count', 'tmdet_copy_min_membrane_residue_count',
-                  'tmdet_copy_max_membrane_residue_count']] = [90, 20, 70, 20, 20]
-    with pytest.raises(ValueError, match='only for usable'):
+    table.loc[4, ['opm_copy_mean_modeled_residue_count', 'opm_copy_mean_membrane_residue_count',
+                  'opm_copy_mean_other_residue_count', 'opm_copy_min_membrane_residue_count',
+                  'opm_copy_max_membrane_residue_count']] = [90, 20, 70, 20, 20]
+    with pytest.raises(ValueError, match='only for counted'):
         plotter._prepare_membrane_copy_counts(plotter._prepare_solution_nmr_membrane_table(table))
 
 
 def test_missing_copy_columns_raise(plotter):
     table = plotter._prepare_solution_nmr_membrane_table(cohort_table())
-    with pytest.raises(ValueError, match='tmdet_copy_max_membrane_residue_count'):
-        plotter._prepare_membrane_copy_counts(table.drop(columns='tmdet_copy_max_membrane_residue_count'))
+    with pytest.raises(ValueError, match='opm_copy_max_membrane_residue_count'):
+        plotter._prepare_membrane_copy_counts(table.drop(columns='opm_copy_max_membrane_residue_count'))
 
 
-def test_usable_entry_without_copy_counts_is_omitted_visibly(plotter):
+def test_counted_entry_without_copy_counts_is_omitted_visibly(plotter):
     table = cohort_table().astype(object)
-    table.loc[0, ['tmdet_copy_mean_modeled_residue_count', 'tmdet_copy_mean_membrane_residue_count',
-                  'tmdet_copy_mean_other_residue_count', 'tmdet_copy_min_membrane_residue_count',
-                  'tmdet_copy_max_membrane_residue_count']] = None
-    with pytest.warns(RuntimeWarning, match='1 usable entries.*1AAA'):
+    table.loc[0, ['opm_copy_mean_modeled_residue_count', 'opm_copy_mean_membrane_residue_count',
+                  'opm_copy_mean_other_residue_count', 'opm_copy_min_membrane_residue_count',
+                  'opm_copy_max_membrane_residue_count']] = None
+    with pytest.warns(RuntimeWarning, match='1 counted entries.*1AAA'):
         _, included, repeated = plotter._prepare_membrane_copy_counts(
             plotter._prepare_solution_nmr_membrane_table(table))
     assert included.tolist() == [False, True, True, False, False]
@@ -151,8 +146,8 @@ def test_usable_entry_without_copy_counts_is_omitted_visibly(plotter):
 
 def test_unknown_result_not_coerced_to_zero(plotter):
     table = plotter._prepare_solution_nmr_membrane_table(cohort_table())
-    assert table.loc[table['tmdet_status'] == 'error', 'tmdet_membrane_residue_count'].isna().all()
-    assert table.loc[table['tmdet_status'] == 'no_membrane_detected', 'tmdet_membrane_residue_count'].tolist() == [0]
+    assert table.loc[table['opm_status'] != 'counted', 'opm_membrane_residue_count'].isna().all()
+    assert table.loc[table['entry_id'] == '1BBB', 'opm_membrane_residue_count'].tolist() == [0]
 
 
 @pytest.mark.parametrize('empty', [False, True])
@@ -171,7 +166,7 @@ def test_all_standard_variants_and_data_counts(plotter, tmp_path, empty):
             assert len(kwargs['fig'].axes) == 1
             if not empty:
                 # Copy means, not entry totals: the dimer is plotted at (25/2, 75/2);
-                # the partial entry counts only its annotated chains (20, 40).
+                # the third entry counts only the residues in its OPM file (20, 40).
                 np.testing.assert_array_equal(ax.collections[0].get_offsets(), [[0, 80], [20, 40]])
                 np.testing.assert_array_equal(ax.collections[1].get_offsets(), [[12.5, 37.5]])
                 # Both groups are circles of one size; only the colour differs.
@@ -216,18 +211,17 @@ def test_all_standard_variants_and_data_counts(plotter, tmp_path, empty):
     else:
         assert exported['entry_id'].tolist() == ['1AAA', '1BBB', '1CCC', '1DDD', '1EEE']
         assert exported['included_in_residue_plot'].tolist() == [True, True, True, False, False]
-        # The partial entry's fraction uses counted residues: 20 / 60, not 20 / 70.
-        assert exported['tmdet_membrane_fraction'].iloc[:3].tolist() == [.25, 0, 20 / 60]
-        assert exported['tmdet_membrane_fraction'].iloc[3:].isna().all()
-        assert exported[['tmdet_excluded_chain_count', 'tmdet_excluded_residue_count',
-                         'tmdet_counted_residue_count']].iloc[2].tolist() == [1, 10, 60]
+        # The fraction uses residues in the OPM file: 20 / 60, not 20 / 70.
+        assert exported['opm_membrane_fraction'].iloc[:3].tolist() == [.25, 0, 20 / 60]
+        assert exported['opm_membrane_fraction'].iloc[3:].isna().all()
+        assert exported[['opm_absent_residue_count', 'opm_modeled_residue_count']].iloc[2].tolist() == [10, 60]
         # Entry totals and copy means are both retained.
-        assert exported['tmdet_membrane_residue_count'].iloc[0] == 25
-        assert exported['tmdet_copy_mean_membrane_residue_count'].iloc[0] == 12.5
-        assert exported[['tmdet_copy_min_membrane_residue_count',
-                         'tmdet_copy_max_membrane_residue_count']].iloc[0].tolist() == [12, 13]
+        assert exported['opm_membrane_residue_count'].iloc[0] == 25
+        assert exported['opm_copy_mean_membrane_residue_count'].iloc[0] == 12.5
+        assert exported[['opm_copy_min_membrane_residue_count',
+                         'opm_copy_max_membrane_residue_count']].iloc[0].tolist() == [12, 13]
         assert exported['repeated_protein_chains'].tolist() == [True, False, False, False, False]
-        assert exported['tmdet_copy_mean_membrane_residue_count'].iloc[3:].isna().all()
+        assert exported['opm_copy_mean_membrane_residue_count'].iloc[3:].isna().all()
 
 
 @pytest.mark.parametrize('maximum,limit', [(0, 10), (9.5, 10), (10, 20), (80, 100), (448, 500), (500, 1000)])

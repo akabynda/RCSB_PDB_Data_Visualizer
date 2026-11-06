@@ -1,4 +1,4 @@
-"""Entry-level first-model TmDet statistics for the solution-NMR cohort."""
+"""Entry-level OPM residue statistics for the solution-NMR cohort."""
 
 from pathlib import Path
 import warnings
@@ -11,14 +11,11 @@ from matplotlib.ticker import FixedLocator, MaxNLocator, StrMethodFormatter
 from ..dataset.io.common import _atomic_write_csv_rows
 from .constants import AXIS_MAJOR_TICK_LENGTH, AXIS_MINOR_TICK_LENGTH, YEAR_MAJOR_TICK_STEP
 
-TMDET_STATUSES = (
-    'membrane_detected', 'no_membrane_detected', 'partial_annotation',
-    'no_analyzable_protein', 'error',
-)
+OPM_STATUSES = ('counted', 'no_opm_annotation', 'coordinates_unavailable', 'structure_mismatch', 'error')
 COPY_COUNT_COLUMNS = (
-    'tmdet_copy_mean_modeled_residue_count', 'tmdet_copy_mean_membrane_residue_count',
-    'tmdet_copy_mean_other_residue_count', 'tmdet_copy_min_membrane_residue_count',
-    'tmdet_copy_max_membrane_residue_count',
+    'opm_copy_mean_modeled_residue_count', 'opm_copy_mean_membrane_residue_count',
+    'opm_copy_mean_other_residue_count', 'opm_copy_min_membrane_residue_count',
+    'opm_copy_max_membrane_residue_count',
 )
 # Copy means are rationals with small denominators stored as floats; real
 # inconsistencies are at least 1/copies residues, far above this rounding bound.
@@ -33,18 +30,13 @@ RESIDUE_MAP_LINSCALE = .9
 RESIDUE_MAP_TICKS = (0, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000)
 
 
-def usable_tmdet_results(table):
-    """Complete results, plus partial ones with counts over their fully annotated chains."""
-    return table['tmdet_status'].isin(TMDET_STATUSES[:3]) & table['tmdet_other_residue_count'].notna()
-
-
 def residue_map_axis_limit(maximum):
     """Upper limit of both residue-map axes: the first major tick of at least 10 above `maximum`."""
     return next(tick for tick in RESIDUE_MAP_TICKS if tick >= RESIDUE_MAP_LINTHRESH and tick > maximum)
 
 
 class MembranePlotsMixin:
-    """Count entries once and keep failed/incomplete calculations visible."""
+    """Count entries once and keep entries without OPM counts visible."""
 
     @staticmethod
     def _prepare_membrane_copy_counts(table):
@@ -61,13 +53,13 @@ class MembranePlotsMixin:
         if chains.isna().any() or (chains < 1).any() or (chains % 1 != 0).any():
             raise ValueError(f'{name}: invalid max_protein_entity_chain_count')
         known = copies[list(COPY_COUNT_COLUMNS)].notna()
-        usable = usable_tmdet_results(table)
-        if (known.any(axis=1) != known.all(axis=1)).any() or (known.all(axis=1) & ~usable).any():
-            raise ValueError(f'{name}: copy counts must be all present, and only for usable TmDet results')
-        included = usable & known.all(axis=1)
-        unavailable = table.loc[usable & ~included, 'entry_id'].tolist()
+        counted = table['opm_status'] == 'counted'
+        if (known.any(axis=1) != known.all(axis=1)).any() or (known.all(axis=1) & ~counted).any():
+            raise ValueError(f'{name}: copy counts must be all present, and only for counted OPM results')
+        included = counted & known.all(axis=1)
+        unavailable = table.loc[counted & ~included, 'entry_id'].tolist()
         if unavailable:
-            warnings.warn(f'{name}: omitting {len(unavailable)} usable entries without copy counts: '
+            warnings.warn(f'{name}: omitting {len(unavailable)} counted entries without copy counts: '
                           + ', '.join(unavailable), RuntimeWarning, stacklevel=3)
         rows = copies.loc[included]
         modeled, membrane, other, low, high = (rows[column] for column in COPY_COUNT_COLUMNS)
@@ -78,11 +70,10 @@ class MembranePlotsMixin:
                 or (modeled <= 0).any() or (low % 1 != 0).any() or (high % 1 != 0).any()
                 or ((membrane + other - modeled).abs() > atol).any()
                 or (low > membrane + atol).any() or (membrane > high + atol).any()
-                or (modeled > totals['tmdet_counted_residue_count'] + atol).any()
-                or (membrane > totals['tmdet_membrane_residue_count'] + atol).any()
-                or (membrane[totals['tmdet_status'] == 'no_membrane_detected'] != 0).any()
-                or (modeled[single] != totals.loc[single, 'tmdet_counted_residue_count']).any()
-                or (membrane[single] != totals.loc[single, 'tmdet_membrane_residue_count']).any()):
+                or (modeled > totals['opm_modeled_residue_count'] + atol).any()
+                or (membrane > totals['opm_membrane_residue_count'] + atol).any()
+                or (modeled[single] != totals.loc[single, 'opm_modeled_residue_count']).any()
+                or (membrane[single] != totals.loc[single, 'opm_membrane_residue_count']).any()):
             raise ValueError(f'{name}: inconsistent copy-mean residue counts')
         return copies, included, chains > 1
 
@@ -92,9 +83,10 @@ class MembranePlotsMixin:
         exported = table.reindex(columns=[
             'entry_id', 'year', 'title', 'membrane_annotation_sources',
             'deposited_model_count', 'protein_entity_count', 'protein_chain_count',
-            'tmdet_status', 'tmdet_error', 'tmdet_modeled_residue_count',
-            'tmdet_excluded_chain_count', 'tmdet_excluded_residue_count', 'tmdet_counted_residue_count',
-            'tmdet_membrane_residue_count', 'tmdet_other_residue_count',
+            'opm_status', 'opm_error', 'opm_type', 'opm_membrane_name', 'opm_half_thickness_angstrom',
+            'opm_reported_thickness_angstrom', 'opm_tilt_degrees', 'opm_transfer_energy_kcal_per_mol',
+            'opm_modeled_residue_count', 'opm_absent_residue_count',
+            'opm_membrane_residue_count', 'opm_other_residue_count',
         ]).copy()
         exported['max_protein_entity_chain_count'] = copies['max_protein_entity_chain_count']
         for column in COPY_COUNT_COLUMNS:
@@ -104,14 +96,14 @@ class MembranePlotsMixin:
         ]))
         exported['repeated_protein_chains'] = repeated
         exported['included_in_residue_plot'] = included
-        exported['tmdet_membrane_fraction'] = (
-            table['tmdet_membrane_residue_count'] / table['tmdet_counted_residue_count']
+        exported['opm_membrane_fraction'] = (
+            table['opm_membrane_residue_count'] / table['opm_modeled_residue_count']
         ).where(included)
         _atomic_write_csv_rows(self._grouped_figure_output_path(output_png).with_suffix('.csv'),
                                exported.columns, exported.astype(object).where(
                                    exported.notna(), None).itertuples(index=False, name=None))
-        x = copies.loc[included, 'tmdet_copy_mean_membrane_residue_count'].to_numpy(dtype=float)
-        y = copies.loc[included, 'tmdet_copy_mean_other_residue_count'].to_numpy(dtype=float)
+        x = copies.loc[included, 'opm_copy_mean_membrane_residue_count'].to_numpy(dtype=float)
+        y = copies.loc[included, 'opm_copy_mean_other_residue_count'].to_numpy(dtype=float)
         oligomer = repeated[included].to_numpy(dtype=bool)
         # One symlog range on both axes of a square panel keeps the map 1:1.
         limit = residue_map_axis_limit(max(x.max(), y.max()) if len(x) else 0)
@@ -162,18 +154,16 @@ class MembranePlotsMixin:
     def _prepare_solution_nmr_membrane_table(cls, df):
         name = 'SOLUTION NMR membrane protein CSV'
         cls._validate_required_columns(df, {
-            'entry_id', 'year', 'deposited_model_count', 'tmdet_status',
-            'tmdet_modeled_residue_count', 'tmdet_counted_residue_count',
-            'tmdet_membrane_residue_count', 'tmdet_other_residue_count',
+            'entry_id', 'year', 'deposited_model_count', 'opm_status',
+            'opm_modeled_residue_count', 'opm_membrane_residue_count', 'opm_other_residue_count',
         }, name)
         table = df.copy()
         ids = table['entry_id'].astype('string').str.strip().str.upper()
         if ids.isna().any() or (ids == '').any() or ids.duplicated().any():
             raise ValueError(f'{name} requires one row per entry with a nonempty ID')
         table['entry_id'] = ids
-        for column in ('year', 'deposited_model_count', 'tmdet_modeled_residue_count',
-                       'tmdet_counted_residue_count', 'tmdet_membrane_residue_count',
-                       'tmdet_other_residue_count'):
+        for column in ('year', 'deposited_model_count', 'opm_modeled_residue_count',
+                       'opm_membrane_residue_count', 'opm_other_residue_count'):
             raw = table[column].astype('string').str.strip()
             numbers = pd.to_numeric(raw.mask(raw == ''), errors='raise')
             known = numbers.dropna()
@@ -184,24 +174,15 @@ class MembranePlotsMixin:
             raise ValueError('Invalid deposition year')
         if table['deposited_model_count'].isna().any() or (table['deposited_model_count'] <= 1).any():
             raise ValueError('Membrane cohort requires more than one deposited model')
-        if not table['tmdet_status'].isin(TMDET_STATUSES).all():
-            raise ValueError('Invalid TmDet status')
-        complete = table['tmdet_status'].isin(TMDET_STATUSES[:2])
-        partial = table['tmdet_status'] == 'partial_annotation'
-        counted = table[['tmdet_counted_residue_count', 'tmdet_other_residue_count']].notna()
-        usable = complete | (partial & counted.all(axis=1))
-        counts = table.loc[usable, ['tmdet_counted_residue_count', 'tmdet_membrane_residue_count',
-                                    'tmdet_other_residue_count', 'tmdet_modeled_residue_count']]
+        if not table['opm_status'].isin(OPM_STATUSES).all():
+            raise ValueError('Invalid OPM status')
+        counted = table['opm_status'] == 'counted'
+        count_columns = ['opm_modeled_residue_count', 'opm_membrane_residue_count', 'opm_other_residue_count']
+        counts = table.loc[counted, count_columns]
         if (counts.isna().any().any() or (counts.iloc[:, 0] <= 0).any()
                 or (counts.iloc[:, 1] + counts.iloc[:, 2] != counts.iloc[:, 0]).any()
-                or (counts.iloc[:, 0] > counts.iloc[:, 3]).any()
-                or (table.loc[complete, 'tmdet_counted_residue_count']
-                    != table.loc[complete, 'tmdet_modeled_residue_count']).any()
-                or (counted.any(axis=1) & ~usable).any()):
-            raise ValueError('Usable TmDet results require consistent counted/membrane/other residue counts')
-        negative = table['tmdet_status'] == 'no_membrane_detected'
-        if (table.loc[negative, 'tmdet_membrane_residue_count'] != 0).any():
-            raise ValueError('Negative TmDet results must have zero membrane residues')
+                or table.loc[~counted, count_columns].notna().any().any()):
+            raise ValueError('Only counted OPM results have consistent modeled/membrane/other residue counts')
         unknown = table.loc[table['year'].isna(), 'entry_id'].tolist()
         if unknown:
             warnings.warn(f'{name}: omitting {len(unknown)} entries with unknown deposition year: '

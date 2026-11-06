@@ -20,7 +20,7 @@ ENTRY_COLUMNS = (
     "entry_id", "year", "deposit_date", "initial_release_date", "revision_date",
     "methods", "deposited_model_count", "model_count_status", "protein_entity_count",
     "protein_chain_count", "max_protein_entity_chain_count", "membrane_entity_count", "membrane_chain_count",
-    "membrane_annotation_sources", "has_pdbtm_annotation", "pdbtm_annotated_entity_count",
+    "membrane_annotation_sources", "has_opm_annotation", "has_pdbtm_annotation", "pdbtm_annotated_entity_count",
     "pdbtm_segment_chain_count", "pdbtm_segment_status", "title", "primary_citation_doi",
     "primary_citation_pubmed_id", "primary_citation_title", "related_pdb_ids",
     "related_database_records_json", "nmr_ensemble_json", "nmr_representative_json",
@@ -59,8 +59,7 @@ class MembraneBuildResult:
     entity_rows: list[dict[str, Any]] = field(default_factory=list)
     chain_rows: list[dict[str, Any]] = field(default_factory=list)
     segment_rows: list[dict[str, Any]] = field(default_factory=list)
-    tmdet_region_rows: list[dict[str, Any]] = field(default_factory=list)
-    tmdet_residue_rows: list[dict[str, Any]] = field(default_factory=list)
+    opm_residue_rows: list[dict[str, Any]] = field(default_factory=list)
     duplicate_candidate_rows: list[dict[str, Any]] = field(default_factory=list)
     excluded: list[dict[str, Any]] = field(default_factory=list)
     filter_counts: dict[str, int] = field(default_factory=dict)
@@ -317,7 +316,8 @@ class SolutionNMRMembraneBuilder:
                 "protein_entity_count": len(entities), "protein_chain_count": len(chains),
                 "max_protein_entity_chain_count": max(entity["chain_count"] for entity in entities),
                 "membrane_entity_count": len(membrane_entities), "membrane_chain_count": len(membrane_chains),
-                "membrane_annotation_sources": ";".join(sources), "has_pdbtm_annotation": "PDBTM" in sources,
+                "membrane_annotation_sources": ";".join(sources), "has_opm_annotation": "OPM" in sources,
+                "has_pdbtm_annotation": "PDBTM" in sources,
                 "pdbtm_annotated_entity_count": sum(entity["has_pdbtm_annotation"] for entity in membrane_entities),
                 "pdbtm_segment_chain_count": sum(chain["pdbtm_valid_segment_count"] > 0 for chain in membrane_chains),
                 "pdbtm_segment_status": coverage, "title": (entry.get("struct") or {}).get("title"),
