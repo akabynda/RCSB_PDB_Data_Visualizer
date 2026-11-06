@@ -18,10 +18,9 @@ from src.dataset.cache import _atomic_write_json, _sha256_file, _utc_now_iso
 from src.dataset.client import RCSBClient
 from src.dataset.config import LOGGER, MEMBRANE_ANNOTATION_TYPES, DatasetBuildConfig
 from src.dataset.io.membrane import write_solution_nmr_membrane_csvs
+from src.dataset.opm import OPM_API_URL, OPM_COORDINATES_URL, annotate_membrane_cohort
 from src.dataset.reporting import _record_filtered_structure, _set_active_dataset_filtered_csvs
 from src.dataset.utils import chunked, collect_batch_results
-from src.dataset.tmdet import annotate_membrane_cohort
-from src.dataset.tmdet_annotations import MEMBRANE_REGION_CODES
 
 
 def _code_provenance() -> dict:
@@ -48,7 +47,7 @@ def _code_provenance() -> dict:
 def run_solution_nmr_membrane(
     args: argparse.Namespace, client: RCSBClient, config: DatasetBuildConfig
 ) -> None:
-    """Collect the cohort and annotate its first coordinate models with TmDet."""
+    """Collect the cohort and count membrane residues from OPM positions."""
     if config.graphql_batch_size < 1 or config.max_workers < 1:
         raise ValueError("Membrane batch size and worker count must be positive")
     output_path = Path(args.solution_nmr_membrane_output)
@@ -72,7 +71,7 @@ def run_solution_nmr_membrane(
     )
     for excluded in result.excluded:
         _record_filtered_structure(excluded["entry_id"], excluded["reason"], excluded["year"])
-    tmdet_sources = annotate_membrane_cohort(result, args, client, config)
+    opm_sources, opm_api_sources = annotate_membrane_cohort(result, args, client, config)
     paths = write_solution_nmr_membrane_csvs(result, output_path)
     rows = result.entry_rows
     summary = {
@@ -88,13 +87,15 @@ def run_solution_nmr_membrane(
         )),
         "missing_deposition_year": sum(row["year"] is None for row in rows),
         "duplicate_candidate_pairs": len(result.duplicate_candidate_rows),
-        "tmdet_status": dict(Counter(row["tmdet_status"] for row in rows)),
-        "tmdet_region_residue_counts": dict(Counter(
-            row["region_type"] for row in result.tmdet_residue_rows if row["region_type"] is not None
-        )),
+        "annotation_source_entry_counts": {
+            source: sum(source in row["membrane_annotation_sources"].split(";") for row in rows)
+            for source in MEMBRANE_ANNOTATION_TYPES
+        },
+        "opm_status": dict(Counter(row["opm_status"] for row in rows)),
+        "opm_type": dict(Counter(row.get("opm_type") for row in rows if row["has_opm_annotation"])),
     }
     manifest = {
-        "schema_version": "solution-nmr-membrane-v4",
+        "schema_version": "solution-nmr-membrane-v5",
         "started_at": started_at,
         "completed_at": _utc_now_iso(),
         "command": shlex.join([sys.executable, *sys.argv]),
@@ -127,17 +128,16 @@ def run_solution_nmr_membrane(
         "excluded": result.excluded,
         "summary": summary,
         "sources": cache.sources,
-        "tmdet": {
-            "model_index": 0, "input": "first PDB coordinate model, no core crop",
-            "count_unit": (
-                "modeled polypeptide residues across protein chains in each PDB entry; a chain with "
-                "any unassigned residue is excluded whole"
-            ),
+        "opm": {
+            "api_url": OPM_API_URL, "coordinates_url": OPM_COORDINATES_URL,
+            "selection": "entries with an RCSB OPM annotation on a protein entity",
+            "membrane_residue_rule": "absolute heavy-atom mean z of the residue <= half-thickness of DUM planes",
+            "count_unit": "deposited first-model polypeptide residues present in the OPM file's first model",
+            "structure_mismatch_rule": "more than half of matched residue names differ from the deposited residues",
             "copy_count_unit": "sum over protein entities of the mean chain count over that entity's copies",
-            "membrane_region_codes": sorted(MEMBRANE_REGION_CODES), "preserved_region_codes": "all",
-            "cache_directory": str(Path(args.tmdet_cache_dir).resolve()),
-            "timeout_seconds": args.tmdet_timeout_seconds,
-            "sources": tmdet_sources,
+            "cache_directory": str(Path(args.opm_cache_dir).resolve()),
+            "api_sources": opm_api_sources,
+            "sources": opm_sources,
         },
         "outputs": {
             name: {"path": str(path.resolve()), "sha256": _sha256_file(path)}
@@ -151,5 +151,5 @@ def run_solution_nmr_membrane(
     _atomic_write_json(cache.cache_dir / "manifests" / f"{manifest_hash}.json", manifest)
     LOGGER.info("Membrane cohort summary: %s", summary)
     LOGGER.info("Saved membrane CSVs to %s; manifest %s", output_path, manifest_path)
-    if summary["tmdet_status"].get("error", 0):
-        raise RuntimeError("Some TmDet calculations failed; rows and raw logs were saved. Rerun to retry failed entries.")
+    if summary["opm_status"].get("error", 0):
+        raise RuntimeError("Some OPM calculations failed; rows and sources were saved. Rerun to retry failed entries.")

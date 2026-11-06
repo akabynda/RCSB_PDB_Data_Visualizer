@@ -46,7 +46,7 @@ directory.
 | `dataset/matching.py`, `geometry.py` | Sequence matching, superposition and RMSD. |
 | `dataset/cache.py`, `downloads.py`, `ca_cache.py`, `api_cache.py` | Coordinate/API retrieval and cache validation. |
 | `dataset/stride.py`, `stride_install.py` | STRIDE installation and assignments. |
-| `dataset/tmdet.py`, `tmdet_install.py`, `tmdet_annotations.py` | TmDet installation, execution and residue mapping. |
+| `dataset/opm.py`, `opm_annotations.py` | OPM retrieval, membrane boundaries and residue counts. |
 | `dataset/programs.py`, `program_statistics.py`, `history.py` | Software-name parsing, weighted summaries and homolog date filtering. |
 | `dataset/builders/`, `io/`, `reporting.py` | Calculations, CSV schemas, checkpoints and exclusions. |
 | `dataset/arguments.py`, `cli.py`, `workflows/` | CLI options, execution order and dataset orchestration. |
@@ -99,8 +99,7 @@ Default storage paths can be changed with the corresponding CLI options:
 | First-model STRIDE assignments | `data/stride_cache/` | `--stride-cache-dir` |
 | Managed STRIDE build | `data/stride/` | `--stride-install-dir` |
 | Membrane API responses | `data/rcsb_cache/solution_nmr_membrane_proteins/` | `--solution-nmr-membrane-cache-dir` |
-| Managed TmDet build | `data/tmdet/` | `--tmdet-install-dir` |
-| TmDet inputs and results | `data/tmdet_cache/` | `--tmdet-cache-dir` |
+| OPM API responses and coordinate files | `data/opm_cache/` | `--opm-cache-dir` |
 
 Precision, X-ray RMSD and software workflows have separate coordinate-cache
 options listed by `--help`; each also defaults to `data/pdb_cache/`.
@@ -292,51 +291,47 @@ exactly `SOLUTION NMR` as the experimental-method set, more than one deposited m
 and a protein-entity annotation of type `OPM`, `PDBTM`, `MemProtMD` or `mpstruc`.
 Missing/invalid model counts are excluded. UniProt membrane annotation alone
 does not qualify. There are no monomer, HETATM, length, core or year filters.
-The unit is a PDB entry; repeated proteins are not deduplicated.
+The unit is a PDB entry; repeated proteins are not deduplicated. The manifest
+reports entries per annotation source in `annotation_source_entry_counts`.
+Membrane and other residues are counted only for entries with an `OPM` annotation
+on a protein entity.
 
-**TmDet calculation.** The coordinate file must also contain multiple models.
-The normalized first model, with all ATOM/HETATM coordinates and no core crop
-or assembly expansion, is passed to TmDet. The program applies its own atom
-and chain eligibility rules. The managed build uses revision
-`311af38c09b1ec8636810b6f9d7ab532adaa846e` (XML version 4.1.4), Gemmi 0.7.0,
-Eigen 3.4.0, nlohmann/json 3.11.3 and pugixml 1.14. Archives are hash-checked;
-CMake and a C++20 compiler are required. Build adjustments are defined in
-`dataset/tmdet_install.py`. `--tmdet-executable` selects an existing binary.
+**OPM positions.** No positioning calculation runs locally. Records come from
+`https://opm-back.cc.lehigh.edu/opm-backend/primary_structures` and coordinates
+from `https://opm-assets.storage.googleapis.com/pdb/<entry>.pdb`. OPM type,
+membrane, reported thickness or depth, tilt and transfer energy are stored as
+`opm_type`, `opm_membrane_name`, `opm_reported_thickness_angstrom`,
+`opm_tilt_degrees` and `opm_transfer_energy_kcal_per_mol`. OPM files place the
+membrane normal along z with the bilayer center at z = 0. `DUM` atoms mark the
+hydrophobic boundaries on one or both sides. The half-thickness `D` is the
+absolute z of these atoms; two planes must agree within 0.001 Å. The `REMARK`
+value is not used because it is rounded, sometimes repeated and absent from some
+files. Only the first model of a multi-model OPM file is read.
 
-Arguments are `-pi input.pdb -x result.xml -po transformed.cif -m 0 -nc`, with
-an explicit environment file. Model index `0` is the extracted first model;
-planar-membrane defaults apply, and `-nc` disables the sequence-only surface
-cache. `--tmdet-timeout-seconds` defaults to 600. Required chemical components
-and the `ZZZ` installation marker are retrieved from RCSB CCD.
-
-**Residue counts.** XML boundaries map onto observed coordinate order using
-PDB chain IDs, author numbers and insertion codes. Numbering gaps add no
-residues. Each modeled polypeptide residue is counted once across all protein
-chains, including partner chains. Polymer HETATM membership follows the shared
-coordinate rules. All XML region codes and attributes are retained. Membrane
-residues are those with the codes TmDet 4 classes as annotated membrane types
-(`Region::isAnnotatedMembraneType`): `H` (TM helix), `B` (TM β-strand), `L`
-(re-entrant loop), `F` (interfacial helix) and `N` (β-barrel inside element).
-A chain with any unassigned residue (`partial_annotation`) is excluded whole.
-Over the remaining chains, `N_membrane = N_H + N_B + N_L + N_F + N_N`,
-`f_membrane = N_membrane / N_counted`, and the other-residue count is
-`N_counted - N_membrane`. `tmdet_counted_residue_count` is `N_counted`;
-`tmdet_excluded_chain_count` and `tmdet_excluded_residue_count` record the
-exclusions. `tmdet_modeled_residue_count`, assigned/unassigned counts and
-`tmdet_region_counts_json` cover all modeled residues. RCSB
-`modeled_residue_count` is separate from the measured
-`tmdet_modeled_residue_count`.
+**Residue counts.** The deposited first model defines the protein residues, using
+PDB chain IDs, author numbers and insertion codes; polymer HETATM membership
+follows the shared coordinate rules. These keys are matched to the OPM file, so
+its ligands, ions and solvent are ignored and counted in
+`opm_unmatched_residue_count`. A blank OPM chain ID is accepted only for one
+deposited chain. For a residue with `n` heavy atoms, `z̄ = (1/n) Σ z`, using the
+first alternate position of each atom. The residue is in the membrane if
+`|z̄| ≤ D`. Over residues present in the OPM file, `N_membrane` counts these
+residues, `N_other = N_modeled - N_membrane` and
+`f_membrane = N_membrane / N_modeled`. `opm_modeled_residue_count` is `N_modeled`.
+Deposited residues absent from the OPM file have no position and are excluded;
+`opm_absent_residue_count` records them. `opm_residue_name_conflict_count`
+records matched positions whose residue names differ. If they exceed half of the
+matched positions, the OPM file holds another sequence and the entry has status
+`structure_mismatch`.
 
 **Copy counts.** `max_protein_entity_chain_count` is the largest number of
-chains of one protein entity; values above 1 mark identical chains. TmDet still
-runs on the whole first model; only aggregation differs. For entity `e` with
-chains `c`, `N_copy = Σ_e (1/n_e) Σ_c N_c`, computed separately for modeled,
-membrane and other residues (`tmdet_copy_mean_*`), over counted chains only;
-an entity without counted chains drops out. `tmdet_copy_min_membrane_residue_count`
-and `tmdet_copy_max_membrane_residue_count` sum each entity's smallest and
+chains of one protein entity; values above 1 mark identical chains. For entity `e`
+with chains `c`, `N_copy = Σ_e (1/n_e) Σ_c N_c`, computed separately for modeled,
+membrane and other residues (`opm_copy_mean_*`), over chains present in the OPM
+file; an entity without such chains drops out. `opm_copy_min_membrane_residue_count`
+and `opm_copy_max_membrane_residue_count` sum each entity's smallest and
 largest chain membrane count. Copy counts equal the entry totals when every
-entity has one counted chain. They are blank unless every protein chain other
-than the excluded ones has a complete result.
+entity has one chain in the OPM file.
 
 **Symmetry flag.** The flag uses the one RCSB assembly that lists every
 deposited protein chain and has the same protein-instance count. Its
@@ -345,24 +340,22 @@ deposited protein chain and has the same protein-instance count. Its
 blank without exactly one such assembly or global record. The flag is
 descriptive: it does not select entries or change counts.
 
-| Status | Meaning |
+| `opm_status` | Meaning |
 | --- | --- |
-| `membrane_detected` | Every modeled protein residue has an XML region assignment. |
-| `partial_annotation` | Some chains have unassigned residues. Entry: counts over the other chains, blank if none remain. Chain: membrane count of assigned residues; fraction and other-residue count are blank. |
-| `no_membrane_detected` | Valid negative result; membrane count/fraction are zero, without inferred region labels. |
-| `no_analyzable_protein` | TmDet reports `Noprotein`; membrane count/fraction are blank. |
-| `not_in_model` | Chain absent from the first model; chain membrane count/fraction are blank. |
-| `error` | Download, execution, timeout or mapping failed; reason is retained and membrane count/fraction are blank. |
+| `counted` | Counts come from the OPM file; zero membrane residues is a valid value. |
+| `no_opm_annotation` | The entry has no `OPM` annotation; counts are blank. |
+| `coordinates_unavailable` | OPM has no coordinate file for the entry; counts are blank. |
+| `structure_mismatch` | Most matched OPM residue names differ from the deposited residues; the conflict count is kept, other counts are blank. |
+| `error` | Download, parsing or mapping failed; reason is retained and counts are blank. |
 
 The main CSV is `data/solution_nmr_membrane_proteins.csv`. Companions share its stem:
 
 | Suffix | Unit and contents |
 | --- | --- |
 | `_entities.csv` | Protein entity: annotations, deposited sequence/hash, UniProt IDs. |
-| `_chains.csv` | Protein chain: label/auth IDs, PDBTM availability and TmDet counts. |
+| `_chains.csv` | Protein chain: label/auth IDs, PDBTM availability and OPM counts. |
 | `_segments.csv` | Original RCSB PDBTM interval, raw positions and validity. |
-| `_tmdet_regions.csv` | Every XML region, author boundaries and modeled residue count. |
-| `_tmdet_residues.csv` | Every modeled protein residue, all region codes and assignment status. |
+| `_opm_residues.csv` | Every deposited first-model protein residue: presence in the OPM file, OPM residue name, mean z and membrane flag. |
 | `_duplicate_candidates.csv` | One-model/ensemble audit; normally empty under the multiple-model requirement. |
 | `_filtered.csv` | Excluded entry ID, deposition year and reason. |
 | `_manifest.json` | Source/run provenance, parameters, filter counts, status/category statistics, hashes, command and software versions. |
@@ -370,34 +363,33 @@ The main CSV is `data/solution_nmr_membrane_proteins.csv`. Companions share its 
 PDBTM segment bounds are one-based `label_seq_id` positions in the deposited
 sequence. Invalid intervals are retained with reasons. PDBTM
 `complete/partial/missing` describes annotation availability; it does not assign
-biological completeness or replace the TmDet calculation.
+biological completeness.
 
-**Reuse and failures.** Raw API responses are hash-checked and revalidated after
-24 hours by default; `--solution-nmr-membrane-cache-validation-hours 0` forces
-revalidation. TmDet reuse requires matching coordinate, first-model, binary
-and CCD hashes, schema and arguments. Raw inputs, XML, available transformed
-coordinates, logs and hashes are retained. Failed calculations are retried on
-rerun. Tables are written atomically, with the manifest published last; a run
-with calculation errors saves error rows and exits unsuccessfully.
+**Reuse and failures.** Raw RCSB and OPM API responses are hash-checked and
+revalidated after 24 hours by default;
+`--solution-nmr-membrane-cache-validation-hours 0` forces revalidation. OPM
+coordinate files are kept with their source URL, retrieval time and SHA-256 and
+are reused while the hash matches. Failed entries are retried on rerun. Tables are
+written atomically, with the manifest published last. A run with `error` rows
+saves them and exits unsuccessfully; `coordinates_unavailable` and
+`structure_mismatch` rows do not fail the run.
 
 **Plots.** Entries with known deposition years through 2024 enter the annual
-entry count (`solution_nmr_membrane_proteins_by_year`) and the residue map
-(`solution_nmr_membrane_tmdet_residues`). Usable results are complete positive
-and valid negative results, plus partial ones with counted chains. The residue
-map uses usable results with copy counts: x is the copy-mean membrane count,
-y the copy-mean other count. Entries with identical chains are pink circles; all others are
-blue circles; the map has no legend. Usable entries without copy counts are
-omitted with a warning. This map alone is Figure 9. Both axes use one symlog
-scale on a square panel without marginal histograms: linear from 0 to 10
-residues, logarithmic above, with `linscale` 0.9 so that 0–10 is drawn one
-decade wide. Both run from zero to the first major tick (0, 5, 10, 20, 50, 100,
-200, 500, …) of at least 10 above the largest x or y value. Major and minor
-grid lines are drawn. The table
-`figures/solution_nmr_membrane_tmdet_residues/solution_nmr_membrane_tmdet_residues.csv`
+entry count (`solution_nmr_membrane_proteins_by_year`), with or without OPM data.
+The residue map (`solution_nmr_membrane_opm_residues`) uses `counted` entries with
+copy counts: x is the copy-mean membrane count, y the copy-mean other count.
+Entries with identical chains are pink circles; all others are blue circles; the
+map has no legend. Counted entries without copy counts are omitted with a warning.
+This map alone is Figure 9. Both axes use one symlog scale on a square panel
+without marginal histograms: linear from 0 to 10 residues, logarithmic above, with
+`linscale` 0.9 so that 0–10 is drawn one decade wide. Both run from zero to the
+first major tick (0, 5, 10, 20, 50, 100, 200, 500, …) of at least 10 above the
+largest x or y value. Major and minor grid lines are drawn. The table
+`figures/solution_nmr_membrane_opm_residues/solution_nmr_membrane_opm_residues.csv`
 retains excluded entries and marks selection with `included_in_residue_plot`.
-It keeps entry totals, exclusion counts, copy means and ranges, chain counts,
-the symmetry flag and `repeated_protein_chains`. No full-length/fragment class
-is assigned. The annual count includes every entry regardless of TmDet status.
+It keeps entry totals, absent-residue counts, OPM metadata, copy means and ranges,
+chain counts, the symmetry flag and `repeated_protein_chains`. No
+full-length/fragment class is assigned.
 
 ### `solution_nmr_program_counts`
 

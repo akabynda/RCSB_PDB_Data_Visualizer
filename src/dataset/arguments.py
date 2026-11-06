@@ -141,20 +141,8 @@ def parse_args() -> argparse.Namespace:
         help="Require deposited_model_count > 1 for the membrane cohort (enabled by default).",
     )
     parser.add_argument(
-        "--tmdet-executable", default="",
-        help="Explicit TmDet executable; otherwise build the pinned local version.",
-    )
-    parser.add_argument(
-        "--tmdet-install-dir", type=Path, default=Path("data/tmdet"),
-        help="Local TmDet source, dependencies and executable.",
-    )
-    parser.add_argument(
-        "--tmdet-cache-dir", type=Path, default=Path("data/tmdet_cache"),
-        help="Raw TmDet results, first-model inputs and CCD cache.",
-    )
-    parser.add_argument(
-        "--tmdet-timeout-seconds", type=float, default=600.0,
-        help="Time limit per TmDet structure (seconds).",
+        "--opm-cache-dir", type=Path, default=Path("data/opm_cache"),
+        help="Raw OPM API responses and coordinate files.",
     )
     parser.add_argument(
         "--solution-nmr-output",

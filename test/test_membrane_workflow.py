@@ -56,8 +56,8 @@ def test_cohort_workflow_cache_replay_and_default_filter(monkeypatch, tmp_path):
     args = _args(monkeypatch, tmp_path)
     def annotate(result, *args):
         for row in result.entry_rows:
-            row.update(tmdet_status="no_membrane_detected", tmdet_membrane_residue_count=0)
-        return []
+            row.update(opm_status="counted", opm_membrane_residue_count=0)
+        return [], []
     monkeypatch.setattr(membrane_workflow, "annotate_membrane_cohort", annotate)
     args.solution_nmr_membrane_require_multiple_models = False
     config = DatasetBuildConfig(max_workers=1)
@@ -72,10 +72,14 @@ def test_cohort_workflow_cache_replay_and_default_filter(monkeypatch, tmp_path):
         assert len(rows) == 1
         assert rows[0]["year"] == "2026"  # collection has no plotting cutoff
         assert rows[0]["deposited_model_count"] == "1"
+        assert rows[0]["has_opm_annotation"] == "true"
         assert rows[0]["has_pdbtm_annotation"] == "false"
         manifest = json.loads((tmp_path / "cohort_manifest.json").read_text())
         assert manifest["filters"]["require_multiple_models"] is False
         assert manifest["candidate_entry_ids"] == ["1ABC"]
+        assert manifest["summary"]["annotation_source_entry_counts"] == {
+            "OPM": 1, "PDBTM": 0, "MemProtMD": 0, "mpstruc": 0,
+        }
         for output in manifest["outputs"].values():
             assert _sha256_file(Path(output["path"])) == output["sha256"]
         for source in manifest["sources"]:
@@ -125,7 +129,7 @@ def test_membrane_kind_dispatch_and_model_filter_defaults(monkeypatch, tmp_path)
     assert _args(monkeypatch, tmp_path, "--solution-nmr-membrane-require-multiple-models").solution_nmr_membrane_require_multiple_models
 
 
-def test_default_filter_is_applied_before_native_stage_and_errors_remain_visible(monkeypatch, tmp_path):
+def test_default_filter_is_applied_before_opm_stage_and_errors_remain_visible(monkeypatch, tmp_path):
     args = _args(monkeypatch, tmp_path)
     client = RCSBClient(DatasetBuildConfig())
     entries = [_entry(), _entry()]
@@ -135,15 +139,35 @@ def test_default_filter_is_applied_before_native_stage_and_errors_remain_visible
     monkeypatch.setattr(client, 'fetch_membrane_entries_for_ids', lambda batch, cache: entries)
     def annotate(result, *args):
         assert [row['entry_id'] for row in result.entry_rows] == ['2ABC']
-        result.entry_rows[0].update(tmdet_status='error', tmdet_error='native failure')
-        return []
+        result.entry_rows[0].update(opm_status='error', opm_error='unreadable file')
+        return [], []
     monkeypatch.setattr(membrane_workflow, 'annotate_membrane_cohort', annotate)
     with pytest.raises(RuntimeError, match='calculations failed'):
         run_solution_nmr_membrane(args, client, client.config)
     rows = list(csv.DictReader(args.solution_nmr_membrane_output.open()))
-    assert rows[0]['tmdet_status'] == 'error'
-    assert rows[0]['tmdet_membrane_residue_count'] == ''
+    assert rows[0]['opm_status'] == 'error'
+    assert rows[0]['opm_membrane_residue_count'] == ''
     manifest = json.loads((tmp_path / 'cohort_manifest.json').read_text())
-    assert manifest['summary']['tmdet_status'] == {'error': 1}
+    assert manifest['summary']['opm_status'] == {'error': 1}
     assert manifest['filters']['require_multiple_models'] is True
+    _set_active_dataset_filtered_csvs(())
+
+
+def test_structure_mismatch_stays_visible_and_does_not_fail_the_run(monkeypatch, tmp_path):
+    args = _args(monkeypatch, tmp_path)
+    client = RCSBClient(DatasetBuildConfig())
+    entry = _entry()
+    entry['rcsb_entry_info']['deposited_model_count'] = 20
+    monkeypatch.setattr(client, 'fetch_solution_nmr_membrane_entry_ids', lambda cache: [entry['rcsb_id']])
+    monkeypatch.setattr(client, 'fetch_membrane_entries_for_ids', lambda batch, cache: [entry])
+    def annotate(result, *args):
+        result.entry_rows[0].update(opm_status='structure_mismatch', opm_error='2 of 3 names differ')
+        return [], []
+    monkeypatch.setattr(membrane_workflow, 'annotate_membrane_cohort', annotate)
+    run_solution_nmr_membrane(args, client, client.config)
+    rows = list(csv.DictReader(args.solution_nmr_membrane_output.open()))
+    assert (rows[0]['opm_status'], rows[0]['opm_error']) == ('structure_mismatch', '2 of 3 names differ')
+    assert rows[0]['opm_membrane_residue_count'] == ''
+    manifest = json.loads((tmp_path / 'cohort_manifest.json').read_text())
+    assert manifest['summary']['opm_status'] == {'structure_mismatch': 1}
     _set_active_dataset_filtered_csvs(())

@@ -77,7 +77,7 @@ class PlotConfig:
         "Solution NMR membrane protein entries by deposition year"
     )
     nmr_membrane_residues_title: str = (
-        "Delineation of membrane vs. extramembrane regions\nin NMR structures of membrane proteins"
+        "Size of membrane vs. extramembrane regions\nin NMR structures of membrane proteins"
     )
     membrane_cumulative_title: str = (
         "Cumulative number of membrane protein structures in PDB by deposition year"

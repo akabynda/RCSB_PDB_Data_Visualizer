@@ -22,6 +22,6 @@ python -m coverage run --branch --source=src -m pytest -q
 python -m coverage report -m
 ```
 
-Tests use temporary files, mocked APIs and executable fixtures. STRIDE and TmDet
+Tests use temporary files, mocked APIs and executable fixtures. STRIDE
 installation tests mock downloads and build commands. Patch dependencies in the
 module that consumes them, rather than in the public entry-point module.
