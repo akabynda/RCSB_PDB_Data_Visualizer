@@ -178,8 +178,18 @@ python src/pdb_plot.py --help
 
 ## License
 
-See [`LICENSE`](LICENSE) for the repository terms. STRIDE and Python dependencies
-are subject to their own licenses.
+The code and documentation in this repository are available under the
+[MIT License](LICENSE). It does not cover third-party software or data: Python
+dependencies and the resources below are subject to their own terms.
+
+The repository does not include STRIDE; the builder downloads and compiles it
+from [MDAnalysis/stride](https://github.com/MDAnalysis/stride). The
+[STRIDE license](https://github.com/MDAnalysis/stride/blob/867a5eb0f2479cb16615512a53ee472c54649505/LICENSE)
+grants permission for academic use only; commercial use requires a prior written
+license agreement. Publications of results based on STRIDE must cite:
+
+> Frishman D, Argos P (1995) Knowledge-based secondary structure assignment.
+> Proteins 23, 566–579.
 
 The repository does not include OPM files; the builder downloads them. The
 [OPM database](https://opm.phar.umich.edu/) (© The Regents of the University of
