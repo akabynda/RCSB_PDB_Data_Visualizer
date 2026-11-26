@@ -6,7 +6,8 @@ from unittest.mock import Mock
 import pytest
 import requests
 
-from src.dataset import opm
+from src.dataset import downloads, opm
+from src.dataset.config import DatasetBuildConfig
 from src.dataset.builders.membrane import MembraneBuildResult
 from test_opm_annotations import atom, chain, planes
 
@@ -121,3 +122,16 @@ def test_only_annotated_entries_are_counted_and_metadata_is_joined(client, tmp_p
     assert [source['entry_id'] for source in sources] == ['1ABC']
     assert len(api_sources) == 2
     assert len(result.opm_residue_rows) == 3
+
+
+@pytest.mark.parametrize('status', [404, 503])
+def test_deposited_pdb_download_failure_is_an_error_row(client, tmp_path, monkeypatch, status):
+    monkeypatch.setattr(opm, 'download_pdb_if_needed', downloads.download_pdb_if_needed)
+    client.config = DatasetBuildConfig(retries=1, backoff_seconds=0)
+    client.solution_nmr_monomer_cache_dir = tmp_path / 'pdb'
+    client.session.get.side_effect = lambda url, **kwargs: (
+        response(content=OPM_FILE.encode()) if 'opm-assets' in url else response(status=status))
+    summary, chains, residues, source = opm.count_opm_entry('1ABC', [chain()], client, tmp_path / 'opm')
+    assert summary == {'opm_status': 'error', 'opm_error': f'RuntimeError: Failed to download 1ABC: {status}'}
+    assert chains == {} and residues == []
+    assert source['error'] == summary['opm_error']

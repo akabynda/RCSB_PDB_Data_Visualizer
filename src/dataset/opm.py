@@ -64,6 +64,14 @@ def download_opm_coordinates(session, cache_dir, entry_id, timeout):
     return {**metadata, "path": str(path.resolve())}
 
 
+def _error_result(entry_id, source, exc):
+    """Keep a failure visible as an error row with its reason; counts stay blank."""
+    error = f"{type(exc).__name__}: {exc}"
+    LOGGER.warning("OPM %s: %s", entry_id, error)
+    source["error"] = error
+    return {"opm_status": "error", "opm_error": error}, {}, [], source
+
+
 def count_opm_entry(entry_id, chain_rows, client, cache_dir):
     """Keep unavailable files and failures visible instead of converting them to zero."""
     source = {"entry_id": entry_id}
@@ -74,8 +82,12 @@ def count_opm_entry(entry_id, chain_rows, client, cache_dir):
             source["error"] = message
             return {"opm_status": "coordinates_unavailable", "opm_error": message}, {}, [], source
         source.update(opm_source)
-        pdb_path = download_pdb_if_needed(client.session, client.config,
-                                          client.solution_nmr_monomer_cache_dir, entry_id)
+        try:
+            pdb_path = download_pdb_if_needed(client.session, client.config,
+                                              client.solution_nmr_monomer_cache_dir, entry_id)
+        except RuntimeError as exc:
+            # Raised when retrieval or mmCIF conversion of the deposited file fails.
+            return _error_result(entry_id, source, exc)
         models = extract_model_pdb_texts(pdb_path)
         if not models:
             raise ValueError("No coordinate model in PDB file")
@@ -90,10 +102,7 @@ def count_opm_entry(entry_id, chain_rows, client, cache_dir):
             source["error"] = summary["opm_error"]
         return summary, chains, residues, source
     except (OSError, ValueError, KeyError, TypeError, requests.RequestException) as exc:
-        error = f"{type(exc).__name__}: {exc}"
-        LOGGER.warning("OPM %s: %s", entry_id, error)
-        source["error"] = error
-        return {"opm_status": "error", "opm_error": error}, {}, [], source
+        return _error_result(entry_id, source, exc)
 
 
 def annotate_membrane_cohort(result, args, client, config):
