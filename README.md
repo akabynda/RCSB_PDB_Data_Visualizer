@@ -146,8 +146,8 @@ Dataset CSVs are saved in `data/`; their names and contents are listed in the
 
 Each figure has a directory `figures/<stem>/` containing `<stem>.png` and
 variants with suffixes `_no_title`, `_open_axes` and `_no_title_open_axes`.
-Figures 1–6 and 8 use the titled `_open_axes.png` version; Figure 7 uses the
-base PNG with a closed frame.
+Figures 1–6 and 8 use the titled `_open_axes.png` version; Figures 7 and 9 use
+the base PNG with a closed frame.
 
 | Figure | Main output stem(s) |
 | --- | --- |
