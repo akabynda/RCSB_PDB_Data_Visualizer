@@ -434,7 +434,9 @@ shows refinement-program usage by year.
 
 Program names from `REMARK 3 PROGRAM` and `REMARK 210 SOFTWARE USED` fields are
 normalized before counting. A field continues on following lines of the same
-remark up to the next named field or a blank remark line. During mmCIF-to-PDB
+remark up to the next named field or a blank remark line. Lines are joined with
+a space, except where a line ends or the next begins with a hyphen: such a wrap
+splits one word (`X` / `-PLOR` becomes `X-PLOR`). During mmCIF-to-PDB
 conversion, `_pdbx_nmr_software.name` and optional `.version` are transferred to
 `REMARK 210 SOFTWARE USED`. Missing mmCIF values (`?` and `.`) are ignored, and
 repeated name/version pairs are deduplicated. All reported NMR software roles

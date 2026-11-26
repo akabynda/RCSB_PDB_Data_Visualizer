@@ -259,6 +259,43 @@ class ExtractRefinementProgramsFromPDBTests(unittest.TestCase):
             ],
         )
 
+    def test_joins_lines_wrapped_at_a_hyphen_without_a_space(self) -> None:
+        """Rejoin X-PLOR split at its hyphen (2JN9, 2K36, 1RJH layouts)."""
+        pdb_path = self._write_pdb(
+            "\n".join(
+                [
+                    "HEADER    TEST",
+                    "REMARK   3   PROGRAM     : AUTOASSIGN 2.1, DYANA, CNS 1.1, X",
+                    "REMARK   3                 -PLOR 2.0.6",
+                    "REMARK   3   AUTHORS     : HUANG",
+                    "REMARK 210   SOFTWARE USED                 : CCPN_ANALYSIS, X-",
+                    "REMARK 210                                   PLOR NIH 2.17",
+                    "REMARK 210   METHOD USED                   : SIMULATED ANNEALING",
+                    "REMARK 210   SOFTWARE USED                 : PRONTO 20020313, X",
+                    "REMARK 210                                   -PLOR 98.1, CNS 1.1",
+                    "END",
+                ]
+            )
+        )
+
+        self.assertEqual(
+            extract_raw_refinement_program_text_from_pdb(pdb_path),
+            "AUTOASSIGN 2.1, DYANA, CNS 1.1, X-PLOR 2.0.6"
+            " || CCPN_ANALYSIS, X-PLOR NIH 2.17"
+            " || PRONTO 20020313, X-PLOR 98.1, CNS 1.1",
+        )
+        self.assertEqual(
+            extract_solution_nmr_program_clusters(
+                extract_raw_refinement_program_text_from_pdb(pdb_path)
+            ),
+            [
+                ("CLUSTER6", "DIANA_DYANA"),
+                ("CLUSTER3", "CNS"),
+                ("CLUSTER7", "XPLOR"),
+                ("CLUSTER8", "XPLOR_NIH"),
+            ],
+        )
+
     def _write_pdb(self, text: str) -> Path:
         """Write ``text`` to the temporary PDB fixture and return its path."""
         temp_dir = tempfile.TemporaryDirectory()

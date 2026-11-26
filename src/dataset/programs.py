@@ -201,6 +201,16 @@ def _prepend_mmcif_software_remarks(pdb_path: Path, cif_path: Path) -> None:
             temp_path.unlink(missing_ok=True)
 
 
+def _join_wrapped_remark_parts(parts: list[str]) -> str:
+    """Join wrapped remark lines; a wrap at a hyphen splits one word (X / -PLOR)."""
+    text = ""
+    for part in parts:
+        if text and not (text.endswith("-") or part.startswith("-")):
+            text += " "
+        text += part
+    return text
+
+
 def extract_raw_refinement_program_text_from_pdb(pdb_path: Path) -> str:
     """Read software text stored directly in REMARK 3 and REMARK 210."""
     values: list[str] = []
@@ -216,7 +226,7 @@ def extract_raw_refinement_program_text_from_pdb(pdb_path: Path) -> str:
         """Append and clear the currently buffered software text."""
         nonlocal field_parts
         if field_parts:
-            value = " ".join(field_parts).strip()
+            value = _join_wrapped_remark_parts(field_parts).strip()
             if value:
                 values.append(value)
             field_parts = []
