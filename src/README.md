@@ -262,8 +262,10 @@ incompatible selections.
 Without resume, datasets are rebuilt. Homolog resume retains completed paired
 95%/100% results only when their candidate-rejection reports are checkpointed,
 and also retains checkpointed ineligible entries. Failed or unfinished entries
-are retried. The homolog checkpoint is `<95%-output-stem>.resume.tsv` beside
-the 95% output. Precision and each selected RMSD variant resume independently.
+are retried. `_filtered.csv` keeps old rows only for retained entries; other
+entries are listed again only if this run excludes them. The homolog checkpoint
+is `<95%-output-stem>.resume.tsv` beside the 95% output. Precision and each
+selected RMSD variant resume independently.
 
 ## Dataset Reference
 

@@ -113,6 +113,28 @@ def _configure_dataset_filtered_csvs(
         _FILTERED_STRUCTURE_ROWS_BY_OUTPUT = rows_by_output
 
 
+def _keep_filtered_structures_for_entries(
+    output_paths: Iterable[Path], entry_ids: Iterable[str]
+) -> None:
+    """Drop configured report rows whose entries are not in ``entry_ids``."""
+    kept_entry_ids = {str(entry_id) for entry_id in entry_ids}
+    with _FILTERED_STRUCTURE_CSV_LOCK:
+        for output_path in output_paths:
+            rows = _FILTERED_STRUCTURE_ROWS_BY_OUTPUT.get(Path(output_path))
+            if rows is None:
+                continue
+            for key in [key for key in rows if key[0] not in kept_entry_ids]:
+                del rows[key]
+            write_csv_rows(
+                output_path=filtered_structures_csv_path(Path(output_path)),
+                header=("entry_id", "year", "reason"),
+                rows=(
+                    (entry_id, year, reason)
+                    for (entry_id, reason), year in sorted(rows.items())
+                ),
+            )
+
+
 def _normalize_filtered_structure_year(year: Any) -> str:
     """Normalize a deposit year for filtered-structure CSV serialization."""
     raw_year = str(year or "").strip()

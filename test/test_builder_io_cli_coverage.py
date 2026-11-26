@@ -639,6 +639,60 @@ class BuilderMainDispatchTests(unittest.TestCase):
                     builder.SOLUTION_NMR_MONOMER_XRAY_HOMOLOG_HEADER,
                 )
 
+    def test_main_resume_keeps_exclusions_only_for_skipped_entries(self) -> None:
+        """Drop exclusions of retried entries so a successful retry clears them."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            args = self._homolog_cli_args(root, resume=True)
+            output_95 = Path(args.solution_nmr_monomer_xray_homolog_95_output)
+            output_100 = Path(args.solution_nmr_monomer_xray_homolog_100_output)
+            self._write_homolog_checkpoint(output_95, "INELIGIBLE", "ineligible")
+            for output_path in (output_95, output_100):
+                builder.filtered_structures_csv_path(output_path).write_text(
+                    "entry_id,year,reason\n"
+                    "INELIGIBLE,2019,NMR query is too short\n"
+                    "RETRIED,2020,X-ray homology search failed: timeout\n",
+                    encoding="utf-8",
+                )
+            retried_95 = self._homolog_with_rejections("RETRIED", 95)
+            retried_100 = self._homolog_with_rejections("RETRIED", 100)
+
+            def resume_homologs(
+                *, skip_entry_ids, on_record_pair, on_entry_complete, **_kwargs
+            ):
+                self.assertEqual(skip_entry_ids, {"INELIGIBLE"})
+                on_record_pair(retried_95, retried_100)
+                on_entry_complete("RETRIED", "success")
+                return [retried_95], [retried_100]
+
+            with (
+                patch.object(dataset_cli, "parse_args", return_value=args),
+                patch.object(dataset_cli, "RCSBClient"),
+                patch.object(
+                    homolog_workflows,
+                    "ensure_stride_executable",
+                    return_value="/bin/true",
+                ),
+                patch.object(dataset_cli, "_configure_dataset_warning_logs"),
+                patch.object(
+                    homolog_workflows, "SolutionNMRMonomerXrayHomologBuilder"
+                ) as builder_class,
+            ):
+                builder_class.return_value.build.side_effect = resume_homologs
+                builder.main()
+
+            for output_path in (output_95, output_100):
+                with builder.filtered_structures_csv_path(output_path).open(
+                    newline="", encoding="utf-8"
+                ) as csvfile:
+                    self.assertEqual(
+                        [
+                            (row["entry_id"], row["reason"])
+                            for row in csv.DictReader(csvfile)
+                        ],
+                        [("INELIGIBLE", "NMR query is too short")],
+                    )
+
     def test_main_resume_recomputes_paired_rows_when_rejected_reports_are_missing(
         self,
     ) -> None:

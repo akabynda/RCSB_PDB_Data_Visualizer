@@ -26,6 +26,7 @@ from src.dataset.records import (
     RejectedXrayHomologRecord,
     SolutionNMRMonomerXrayHomologRecord,
 )
+from src.dataset.reporting import _keep_filtered_structures_for_entries
 from src.dataset.stride_install import ensure_stride_executable
 from src.dataset.workflows.homolog_resume import (
     HomologOutputPaths,
@@ -75,6 +76,10 @@ def run_homologs(
     ):
         output_path.parent.mkdir(parents=True, exist_ok=True)
     state = load_homolog_resume_state(args.resume, paths)
+    # Retried entries record their exclusions again if they still fail.
+    _keep_filtered_structures_for_entries(
+        (paths.homolog_95, paths.homolog_100), state.skip_homolog_entry_ids
+    )
     _stream_homolog_records(homolog_builder, paths, state)
 
 
