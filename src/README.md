@@ -149,6 +149,9 @@ historical-homolog datasets inherit it through their input CSVs. RMSD datasets
 take entries from the homolog CSV and apply the filter again, with current RCSB
 metadata and coordinates, to each recalculated entry; rows kept by `--resume`
 are not rechecked.
+With `--precision-input`, precision takes entries, chains and core ranges from
+that CSV and rechecks only the coordinate conditions of the filter, not the
+RCSB metadata; rows kept by `--resume` are not rechecked.
 
 The STRIDE summary additionally requires exactly one polymer entity instance.
 
@@ -253,7 +256,7 @@ Run `python src/pdb_dataset_builder.py --help` for all paths and defaults.
 | `--pdb-cache-validation-hours` | Coordinate revalidation interval; `0` validates every access. |
 | `--xray-rmsd-sequence-identity {95,100}` | Homolog input cutoff; default `100`. |
 | `--rmsd-residue-selection {core,secondary-structure}` | Atom selection; default `core`. The plotter accepts the same switch. |
-| `--precision-input PATH` | Reuse entries, chains and core ranges from a precision CSV and recompute RMSD; its `_filtered.csv` rows are imported. Input and output must differ. |
+| `--precision-input PATH` | Reuse entries, chains and core ranges from a precision CSV, recheck the coordinate filter, and recompute RMSD; its `_filtered.csv` rows are imported. Input and output must differ. |
 | `--resume` | Retain completed homolog, precision and X-ray RMSD results. |
 
 Secondary-structure selection adds `_secondary_structure` to default

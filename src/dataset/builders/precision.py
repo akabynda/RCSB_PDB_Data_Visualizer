@@ -9,6 +9,9 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from src.dataset.client.nmr import (
+    solution_nmr_monomer_coordinate_issue,
+)
 from src.dataset.config import (
     LOGGER,
 )
@@ -258,6 +261,18 @@ class SolutionNMRMonomerPrecisionStrideModeledFirstModelBuilder(
             pdb_path = self._download_pdb_if_needed(record.entry_id)
             chain_map = load_cached_chain_id_map(self.cache_dir, record.entry_id)
             chain_id = chain_map.get(record.chain_id, record.chain_id)
+            # Saved rows skip RCSB metadata; recheck the coordinate filter.
+            coordinate_issue = solution_nmr_monomer_coordinate_issue(
+                pdb_path=pdb_path,
+                entry_id=record.entry_id,
+                chain_id=record.chain_id,
+                parsed_chain_id=chain_id,
+            )
+            if coordinate_issue is not None:
+                _record_filtered_structure(
+                    record.entry_id, coordinate_issue, year=record.year
+                )
+                return None
             return self._build_record_from_core_range(
                 pdb_path=pdb_path,
                 entry_id=record.entry_id,

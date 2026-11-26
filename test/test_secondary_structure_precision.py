@@ -263,3 +263,62 @@ def test_precision_input_imports_its_exclusions(tmp_path):
             ["entry_id", "year", "reason"],
             ["1OUT", "2001", "fewer than 2 deposited models"],
         ]
+
+
+def _precision_input_pdb(path, model_residues, hetatm_residues=()):
+    lines = []
+    for model, residues in enumerate(model_residues, 1):
+        lines.append(f"MODEL     {model:>4}\n")
+        for serial, resid in enumerate(residues, 1):
+            record, name = (
+                ("HETATM", "MSE") if resid in hetatm_residues else ("ATOM", "ALA")
+            )
+            x, y = 3.8 * serial, 0.2 * model * (serial % 2)
+            lines.append(
+                f"{record:<6}{serial:>5}  CA  {name} A{resid:>4}    "
+                f"{x:8.3f}{y:8.3f}{0.0:8.3f}  1.00  0.00           C\n"
+            )
+        lines.append("ENDMDL\n")
+    path.write_text("".join(lines) + "END\n", encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    ("model_residues", "hetatm_residues", "reason"),
+    [
+        ([range(1, 7)] * 2, {3}, "HETATM CA residues"),
+        ([range(1, 11), range(1, 7)], (), "equal full-chain lengths"),
+    ],
+)
+def test_precision_input_reapplies_the_coordinate_filter(
+    tmp_path, model_residues, hetatm_residues, reason
+):
+    _precision_input_pdb(tmp_path / "TEST.pdb", model_residues, hetatm_residues)
+    builder = SolutionNMRMonomerPrecisionStrideModeledFirstModelBuilder(
+        Mock(), DatasetBuildConfig(), tmp_path, 1, "stride", tmp_path
+    )
+    record = SolutionNMRMonomerPrecisionRecord("TEST", 2020, "A", 1, 6, 2, 6, 6, 0.0)
+    with (
+        patch.object(
+            builder, "_download_pdb_if_needed", return_value=tmp_path / "TEST.pdb"
+        ),
+        patch(
+            "src.dataset.builders.precision._record_filtered_structure"
+        ) as filtered,
+    ):
+        assert builder._recompute_record(record) is None
+    filtered.assert_called_once()
+    assert reason in filtered.call_args.args[1]
+
+
+def test_precision_input_keeps_entries_that_pass_the_coordinate_filter(tmp_path):
+    _precision_input_pdb(tmp_path / "TEST.pdb", [range(1, 7)] * 2)
+    builder = SolutionNMRMonomerPrecisionStrideModeledFirstModelBuilder(
+        Mock(), DatasetBuildConfig(), tmp_path, 1, "stride", tmp_path
+    )
+    record = SolutionNMRMonomerPrecisionRecord("TEST", 2020, "A", 1, 6, 2, 6, 6, 0.0)
+    with patch.object(
+        builder, "_download_pdb_if_needed", return_value=tmp_path / "TEST.pdb"
+    ):
+        result = builder._recompute_record(record)
+    assert result is not None
+    assert result.n_ca_core_used == 6

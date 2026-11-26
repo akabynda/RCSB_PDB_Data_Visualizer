@@ -20,6 +20,54 @@ from ..structures import load_cached_chain_id_map
 from ..utils import _record_entries_missing_from_response, extract_year
 
 
+def solution_nmr_monomer_coordinate_issue(
+    pdb_path: Path,
+    entry_id: str,
+    chain_id: str,
+    parsed_chain_id: str,
+) -> str | None:
+    """Check all modeled chain positions for HETATM and equal model lengths."""
+    model_maps, _, hetatm_ids_per_model = parse_models_ca_data(
+        pdb_path=pdb_path,
+        chain_id=parsed_chain_id,
+    )
+    if len(model_maps) < 2:
+        LOGGER.info(
+            "Skipping SOLUTION NMR monomer %s chain %s: fewer than 2 coordinate models",
+            entry_id,
+            chain_id,
+        )
+        return f"fewer than 2 coordinate models (found {len(model_maps)})"
+
+    model_lengths = [len(model_map) for model_map in model_maps]
+    empty_models = [
+        str(index) for index, length in enumerate(model_lengths, 1) if length == 0
+    ]
+    if empty_models:
+        return (
+            f"no usable modeled CA residues for chain {chain_id} in coordinate "
+            f"model(s): {', '.join(empty_models)}"
+        )
+    for model_index, hetatm_ids in enumerate(hetatm_ids_per_model, 1):
+        if hetatm_ids:
+            residue_ids = ", ".join(str(key) for key in sorted(hetatm_ids)[:20])
+            if len(hetatm_ids) > 20:
+                residue_ids += f", ... ({len(hetatm_ids)} total)"
+            return (
+                f"modeled protein chain contains HETATM CA residues "
+                f"(chain {chain_id}, model {model_index}; residue IDs: {residue_ids})"
+            )
+    if len(set(model_lengths)) != 1:
+        LOGGER.info(
+            "Skipping SOLUTION NMR monomer %s chain %s: coordinate models have different full-chain lengths (%s)",
+            entry_id,
+            chain_id,
+            model_lengths,
+        )
+        return "coordinate models do not have equal full-chain lengths"
+    return None
+
+
 class SolutionNMRMixin:
     """Fetch NMR metadata and enforce the common monomer eligibility checks."""
 
@@ -133,10 +181,11 @@ class SolutionNMRMixin:
                 self.solution_nmr_monomer_cache_dir,
                 entry_id,
             )
-            parsed_chain_id = chain_map.get(chain_id, chain_id)
-            model_maps, _, hetatm_ids_per_model = parse_models_ca_data(
+            return solution_nmr_monomer_coordinate_issue(
                 pdb_path=pdb_path,
-                chain_id=parsed_chain_id,
+                entry_id=entry_id,
+                chain_id=chain_id,
+                parsed_chain_id=chain_map.get(chain_id, chain_id),
             )
         except Exception as exc:
             LOGGER.warning(
@@ -145,42 +194,6 @@ class SolutionNMRMixin:
                 exc,
             )
             return f"coordinate preparation failed: {type(exc).__name__}: {exc}"
-
-        if len(model_maps) < 2:
-            LOGGER.info(
-                "Skipping SOLUTION NMR monomer %s chain %s: fewer than 2 coordinate models",
-                entry_id,
-                chain_id,
-            )
-            return f"fewer than 2 coordinate models (found {len(model_maps)})"
-
-        model_lengths = [len(model_map) for model_map in model_maps]
-        empty_models = [
-            str(index) for index, length in enumerate(model_lengths, 1) if length == 0
-        ]
-        if empty_models:
-            return (
-                f"no usable modeled CA residues for chain {chain_id} in coordinate "
-                f"model(s): {', '.join(empty_models)}"
-            )
-        for model_index, hetatm_ids in enumerate(hetatm_ids_per_model, 1):
-            if hetatm_ids:
-                residue_ids = ", ".join(str(key) for key in sorted(hetatm_ids)[:20])
-                if len(hetatm_ids) > 20:
-                    residue_ids += f", ... ({len(hetatm_ids)} total)"
-                return (
-                    f"modeled protein chain contains HETATM CA residues "
-                    f"(chain {chain_id}, model {model_index}; residue IDs: {residue_ids})"
-                )
-        if len(set(model_lengths)) != 1:
-            LOGGER.info(
-                "Skipping SOLUTION NMR monomer %s chain %s: coordinate models have different full-chain lengths (%s)",
-                entry_id,
-                chain_id,
-                model_lengths,
-            )
-            return "coordinate models do not have equal full-chain lengths"
-        return None
 
     def fetch_solution_nmr_weight_records_for_ids(
         self, entry_ids: list[str]
