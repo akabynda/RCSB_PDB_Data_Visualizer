@@ -233,8 +233,8 @@ def test_program_cluster_loader_supports_local_and_remote_sources(
         return_value="AMBER",
     ) as extract:
         assert local._load_program_text("VALID") == "AMBER"
-        assert local._load_program_text("EMPTY") == ""
-        assert local._load_program_text("MISSING") == ""
+        assert local._load_program_text("EMPTY") is None
+        assert local._load_program_text("MISSING") is None
     extract.assert_called_once_with(valid_path)
 
     client = Mock()
@@ -255,13 +255,13 @@ def test_program_cluster_loader_supports_local_and_remote_sources(
         ),
     ):
         assert remote._load_program_text("REMOTE") == "CNS"
-        assert remote._load_program_text("BROKEN") == ""
+        assert remote._load_program_text("BROKEN") is None
 
 
 def test_program_cluster_builder_handles_empty_and_missing_program_text(
     tmp_path: Path,
 ) -> None:
-    """Assign OTHER to missing text and emit zero rows for absent clusters."""
+    """Assign OTHER to missing text and exclude entries whose PDB failed to load."""
     empty = module.SolutionNMRMonomerProgramClusterBuilder([], tmp_path, 0)
     assert empty.build() == ([], [])
 
@@ -275,22 +275,29 @@ def test_program_cluster_builder_handles_empty_and_missing_program_text(
     builder = module.SolutionNMRMonomerProgramClusterBuilder(
         quality_records, tmp_path, 1
     )
-    with patch.object(
-        builder,
-        "_load_program_text",
-        side_effect=lambda entry_id: "AMBER" if entry_id == "LATE" else "",
+    program_text_by_entry_id = {"LATE": "AMBER", "EARLY": "", "MISSING": None}
+    with (
+        patch.object(
+            builder,
+            "_load_program_text",
+            side_effect=program_text_by_entry_id.__getitem__,
+        ),
+        patch.object(
+            dataset_builders_programs, "_record_filtered_structure"
+        ) as record_filtered,
     ):
         assignments, summaries = builder.build()
 
-    assert [record.entry_id for record in assignments] == ["EARLY", "LATE", "MISSING"]
+    assert [record.entry_id for record in assignments] == ["EARLY", "LATE"]
     assert all(record.cluster_score == 1.0 for record in assignments)
     assert assignments[0].cluster_name == "OTHER"
     assert not assignments[0].has_program_text
     assert assignments[1].cluster_name == "AMBER"
     assert assignments[1].has_program_text
-    assert assignments[2].cluster_name == "OTHER"
-    assert not assignments[2].has_program_text
-    assert len(summaries) == 3 * len(module.PROGRAM_CLUSTER_DEFINITIONS)
+    record_filtered.assert_called_once_with(
+        "MISSING", "PDB file could not be loaded", year=2022
+    )
+    assert len(summaries) == 2 * len(module.PROGRAM_CLUSTER_DEFINITIONS)
 
     by_year_and_name = {
         (record.year, record.cluster_name): record for record in summaries
@@ -298,7 +305,6 @@ def test_program_cluster_builder_handles_empty_and_missing_program_text(
     assert by_year_and_name[(2020, "OTHER")].structure_count == 1.0
     assert by_year_and_name[(2020, "OTHER")].avg_clashscore == 8.0
     assert by_year_and_name[(2021, "AMBER")].avg_clashscore == 4.0
-    assert by_year_and_name[(2022, "OTHER")].avg_clashscore == 12.0
     amber = by_year_and_name[(2020, "AMBER")]
     assert amber.structure_count == 0
     assert amber.avg_clashscore is None

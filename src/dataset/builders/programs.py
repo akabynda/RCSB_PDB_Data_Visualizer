@@ -188,8 +188,8 @@ class SolutionNMRMonomerProgramClusterBuilder:
         self.client = client
         self.config = config
 
-    def _load_program_text(self, entry_id: str) -> str:
-        """Load raw refinement program text for one entry."""
+    def _load_program_text(self, entry_id: str) -> str | None:
+        """Load raw refinement program text, or None if the PDB file is unusable."""
         if self.client is not None and self.config is not None:
             try:
                 pdb_path = download_pdb_if_needed(
@@ -200,11 +200,11 @@ class SolutionNMRMonomerProgramClusterBuilder:
                 )
             except Exception as exc:
                 LOGGER.warning("Failed to get PDB for %s: %s", entry_id, exc)
-                return ""
+                return None
         else:
             pdb_path = self.cache_dir / f"{entry_id}.pdb"
         if not pdb_path.exists() or pdb_path.stat().st_size <= 0:
-            return ""
+            return None
         return extract_raw_refinement_program_text_from_pdb(pdb_path)
 
     def build(
@@ -225,7 +225,7 @@ class SolutionNMRMonomerProgramClusterBuilder:
             tuple[int, str],
             dict[str, float | int],
         ] = {}
-        missing_cache_count = 0
+        failed_load_count = 0
         empty_program_count = 0
 
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
@@ -239,10 +239,22 @@ class SolutionNMRMonomerProgramClusterBuilder:
                 entry_id = future_map[future]
                 quality_record = quality_by_entry_id[entry_id]
                 program_text = future.result()
+                processed += 1
+                if processed % 500 == 0 or processed == total:
+                    LOGGER.info(
+                        "SOLUTION NMR monomer program clusters: processed %d/%d entries",
+                        processed,
+                        total,
+                    )
+                if program_text is None:
+                    failed_load_count += 1
+                    _record_filtered_structure(
+                        entry_id,
+                        "PDB file could not be loaded",
+                        year=quality_record.year,
+                    )
+                    continue
                 if not program_text:
-                    pdb_path = self.cache_dir / f"{entry_id}.pdb"
-                    if not pdb_path.exists() or pdb_path.stat().st_size <= 0:
-                        missing_cache_count += 1
                     empty_program_count += 1
 
                 clusters = extract_solution_nmr_program_clusters(program_text)
@@ -278,26 +290,18 @@ class SolutionNMRMonomerProgramClusterBuilder:
                     )
                     total_row["clash_sum"] += quality_record.clashscore * cluster_score
 
-                processed += 1
-                if processed % 500 == 0 or processed == total:
-                    LOGGER.info(
-                        "SOLUTION NMR monomer program clusters: processed %d/%d entries",
-                        processed,
-                        total,
-                    )
-
         LOGGER.info(
             (
                 "SOLUTION NMR monomer program clusters: entries=%d, "
-                "missing_cache=%d, empty_program=%d"
+                "failed_load=%d, empty_program=%d"
             ),
             len(self.quality_records),
-            missing_cache_count,
+            failed_load_count,
             empty_program_count,
         )
 
         assignments = sorted(assignments, key=lambda r: (r.year, r.entry_id))
-        years = sorted({record.year for record in self.quality_records})
+        years = sorted({record.year for record in assignments})
         summaries: list[SolutionNMRMonomerProgramClusterSummaryRecord] = []
         for year in years:
             for cluster_id, cluster_name in PROGRAM_CLUSTER_DEFINITIONS:

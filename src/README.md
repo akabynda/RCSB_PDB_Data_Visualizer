@@ -447,10 +447,11 @@ Assigns SOLUTION NMR protein monomers to refinement-program clusters using PDB
 `REMARK 3 PROGRAM` and `REMARK 210 SOFTWARE USED`, including software carried
 over during mmCIF conversion. If a structure names `n` known clusters, each
 receives a score of `1/n`, so the total score remains `1`. `OTHER` receives
-score `1` when no known cluster is found: the entry names only unlisted programs,
-reports none (for example `NULL`), or its PDB file could not be loaded. Such
-entries are kept and are not written to `_filtered.csv`; `has_program_text` is
-`0` when no software text was read.
+score `1` when no known cluster is found: the entry names only unlisted programs
+or reports none (for example `NULL`); `has_program_text` is `0` when the PDB
+file has no software text. An entry whose PDB file cannot be downloaded or is
+missing or empty in the cache is excluded and written to `_filtered.csv` with
+reason `PDB file could not be loaded`.
 
 Wrapped `REMARK 210` fields are joined before matching. Program-aware boundaries
 prevent unrelated names such as `VARIAN` and `DISCOVERY STUDIO` from matching
