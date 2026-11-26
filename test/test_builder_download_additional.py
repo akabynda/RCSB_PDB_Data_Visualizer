@@ -429,7 +429,9 @@ def test_mmcif_404_routes_are_skipped_on_retry_before_clear_error(
     session = _Session(responses)
 
     with patch.object(builder.time, "sleep") as sleep:
-        with pytest.raises(RuntimeError, match=r"Failed to download 1ABC mmCIF: 404"):
+        with pytest.raises(
+            RuntimeError, match=r"Failed to download 1ABC mmCIF: 404"
+        ) as excinfo:
             builder._download_mmcif_if_needed_locked(
                 session=session,  # type: ignore[arg-type]
                 config=builder.DatasetBuildConfig(
@@ -446,6 +448,7 @@ def test_mmcif_404_routes_are_skipped_on_retry_before_clear_error(
     ]
     assert all(response.close_calls == 1 for response in responses)
     sleep.assert_called_once_with(0.25)
+    assert not builder._is_http_server_error(excinfo.value)
 
 
 @pytest.mark.parametrize(
@@ -473,7 +476,7 @@ def test_locked_download_reports_http_errors_and_closes_every_response(
     responses = [_Response(503) for _ in sources("1ABC")]
     session = _Session(responses)
 
-    with pytest.raises(RuntimeError, match=message):
+    with pytest.raises(RuntimeError, match=message) as excinfo:
         download(
             session=session,  # type: ignore[arg-type]
             config=builder.DatasetBuildConfig(retries=1),
@@ -484,6 +487,55 @@ def test_locked_download_reports_http_errors_and_closes_every_response(
 
     assert len(session.calls) == len(responses)
     assert all(response.close_calls == 1 for response in responses)
+    assert isinstance(excinfo.value.__cause__, requests.HTTPError)
+    assert excinfo.value.__cause__.response is responses[-1]
+    assert builder._is_http_server_error(excinfo.value)
+
+
+def test_pdb_fallback_keeps_mmcif_http_5xx_as_the_error_cause(
+    tmp_path: Path,
+) -> None:
+    """A 5xx from the mmCIF fallback stays visible to entry-level requeueing."""
+    not_found = [_Response(404) for _ in builder._pdb_download_sources("1ABC")]
+    unavailable = _Response(503)
+    session = _Session([*not_found, unavailable])
+
+    with pytest.raises(
+        RuntimeError, match="Failed to download 1ABC: HTTP 503"
+    ) as excinfo:
+        builder._download_pdb_if_needed_locked(
+            session=session,  # type: ignore[arg-type]
+            config=builder.DatasetBuildConfig(retries=1),
+            cache_dir=tmp_path,
+            entry_id="1abc",
+            observed_revision=None,
+        )
+
+    assert excinfo.value.__cause__.response is unavailable  # type: ignore[union-attr]
+    assert builder._is_http_server_error(excinfo.value)
+
+
+def test_chain_subset_download_keeps_http_5xx_as_the_error_cause(
+    tmp_path: Path,
+) -> None:
+    """Both PDB and mmCIF routes failing with 5xx leave a 5xx in the chain."""
+    pdb_responses = [_Response(503) for _ in builder._pdb_download_sources("1ABC")]
+    cif_responses = [_Response(503) for _ in builder._mmcif_download_sources("1ABC")]
+    session = _Session([*pdb_responses, *cif_responses])
+
+    with pytest.raises(
+        RuntimeError, match="Failed to download 1ABC mmCIF: HTTP 503"
+    ) as excinfo:
+        builder.download_pdb_chain_subset_if_needed(
+            session=session,  # type: ignore[arg-type]
+            config=builder.DatasetBuildConfig(retries=1),
+            cache_dir=tmp_path,
+            entry_id="1abc",
+            chain_ids=("A",),
+        )
+
+    assert not session.outcomes
+    assert builder._is_http_server_error(excinfo.value)
 
 
 def test_pdb_404_routes_fall_back_to_mmcif_and_convert_real_structure(

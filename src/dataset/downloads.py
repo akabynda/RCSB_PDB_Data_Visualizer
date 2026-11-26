@@ -295,7 +295,9 @@ def _download_pdb_if_needed_locked(
                 wait_seconds = config.backoff_seconds * attempt
                 if attempt < config.retries:
                     time.sleep(wait_seconds)
-    raise RuntimeError(f"Failed to download {normalized_entry_id}: {last_error}")
+    raise RuntimeError(
+        f"Failed to download {normalized_entry_id}: {last_error}"
+    ) from last_error
 
 
 def _download_mmcif_if_needed(
@@ -433,7 +435,9 @@ def _download_mmcif_if_needed_locked(
                 )
         if attempt < config.retries:
             time.sleep(config.backoff_seconds * attempt)
-    raise RuntimeError(f"Failed to download {normalized_entry_id} mmCIF: {last_error}")
+    raise RuntimeError(
+        f"Failed to download {normalized_entry_id} mmCIF: {last_error}"
+    ) from last_error
 
 
 def download_pdb_chain_subset_if_needed(

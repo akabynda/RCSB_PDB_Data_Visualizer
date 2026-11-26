@@ -97,4 +97,4 @@ class RCSBTransport:
                     time.sleep(wait_seconds)
         raise RuntimeError(
             f"Request failed after {self.config.retries} attempts: {last_error}"
-        )
+        ) from last_error

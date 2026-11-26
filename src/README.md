@@ -609,9 +609,11 @@ Within one NMR seed, the 95% and 100% passes share candidate metadata and the
 first-model X-ray CA cache described above. This avoids duplicate downloads and
 parses while preserving separate sequence searches and cutoff checks.
 
-After ordinary request retries, a remaining HTTP 5xx requeues the entry for at
-most three entry-level attempts. Other failures are not requeued. A final error
-removes the entry rather than writing `has_xray_homolog = 0`.
+After ordinary request retries, the entry is requeued for at most three
+entry-level attempts when the final error of the sequence search, a GraphQL
+request, or an NMR or X-ray coordinate download is an HTTP 5xx. For downloads,
+this is the error of the last source tried. Other failures are not requeued. A
+final error removes the entry rather than writing `has_xray_homolog = 0`.
 
 Outputs:
 

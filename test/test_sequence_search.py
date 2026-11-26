@@ -1,8 +1,10 @@
 """Tests for sequence-based X-ray homolog searches and resume handling."""
 
+import json
 import tempfile
 import unittest
 import math
+from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -15,6 +17,7 @@ from src.pdb_dataset_builder import (
     NMRHomologyQueryIneligibleError,
     RCSBClient,
     RejectedXrayHomologRecord,
+    ResidueId,
     SolutionNMRMonomerXrayHomologRecord,
     SolutionNMRMonomerXrayHomologBuilder,
     SolutionNMRMonomerXrayHomologSeedRecord,
@@ -49,6 +52,86 @@ class _FakeSession:
     def post(self, *args, **kwargs) -> _NullResultSetResponse:
         """Return a deterministic null-result response for any request."""
         return _NullResultSetResponse()
+
+
+def _http_response(status_code: int, payload: object = None) -> requests.Response:
+    """Return a real requests response with an optional JSON body."""
+    response = requests.Response()
+    response.status_code = status_code
+    response.url = "https://example.test"
+    response._content = json.dumps(payload).encode("utf-8")
+    return response
+
+
+class _HttpFailureSession:
+    """Answer RCSB requests and fail one request kind with HTTP status codes.
+
+    ``failures`` holds the status codes returned, in order, for the failing
+    request kind; once it is empty that kind succeeds like the others.
+    """
+
+    def __init__(self, failing_kind: str, failures: list[int]) -> None:
+        self.failing_kind = failing_kind
+        self.failures = list(failures)
+
+    def _fail(self, kind: str) -> requests.Response | None:
+        """Return the next failure for the failing kind, else ``None``.
+
+        A failed ``requests.Response`` is falsy, so callers compare with None.
+        """
+        if kind == self.failing_kind and self.failures:
+            return _http_response(self.failures.pop(0))
+        return None
+
+    def post(self, url: str, **kwargs) -> requests.Response:
+        """Return search hits or GraphQL candidate metadata."""
+        query = kwargs["json"]["query"]
+        if not isinstance(query, str):
+            failed = self._fail("sequence_search")
+            if failed is not None:
+                return failed
+            return _http_response(200, {"total_count": 1, "result_set": ["9XYZ_1"]})
+        failed = self._fail("graphql")
+        if failed is not None:
+            return failed
+        if "polymer_entities" in query:
+            return _http_response(
+                200,
+                {
+                    "data": {
+                        "polymer_entities": [
+                            {
+                                "rcsb_id": "9XYZ_1",
+                                "entity_poly": {"pdbx_strand_id": "A"},
+                                "rcsb_polymer_entity_container_identifiers": {
+                                    "entry_id": "9XYZ"
+                                },
+                            }
+                        ]
+                    }
+                },
+            )
+        if "exptl" in query:
+            return _http_response(
+                200,
+                {
+                    "data": {
+                        "entries": [
+                            {
+                                "rcsb_id": "9XYZ",
+                                "exptl": [{"method": "X-RAY DIFFRACTION"}],
+                            }
+                        ]
+                    }
+                },
+            )
+        return _http_response(200, {"data": {"entries": []}})
+
+    def get(self, url: str, **kwargs) -> requests.Response:
+        """Fail coordinate downloads; only the failing kind counts as a 5xx."""
+        kind = "nmr_download" if "1aaa" in url.lower() else "xray_download"
+        failed = self._fail(kind)
+        return failed if failed is not None else _http_response(404)
 
 
 class _NullGraphqlListClient(RCSBClient):
@@ -329,6 +412,134 @@ class SequenceSearchTests(unittest.TestCase):
             self.assertEqual(build_record_pair.call_count, 3)
             self.assertEqual(records_95, [])
             self.assertEqual(records_100, [])
+
+    def _build_with_http_failures(
+        self, failing_kind: str, failures: list[int]
+    ) -> tuple[int, list, Mock]:
+        """Run the real record builder with one failing request kind.
+
+        STRIDE, coordinate parsing and core matching are replaced unless the
+        failing request kind needs the real download path for that step.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config = DatasetBuildConfig(
+                graphql_batch_size=10,
+                max_workers=1,
+                retries=2,
+                backoff_seconds=0.0,
+            )
+            client = RCSBClient(config)
+            client.session = _HttpFailureSession(failing_kind, failures)
+            seed = SolutionNMRMonomerXrayHomologSeedRecord("1AAA", 2000, "A")
+            client.fetch_solution_nmr_monomer_xray_homolog_seed_records_for_ids = Mock(
+                return_value=[seed]
+            )
+            builder = SolutionNMRMonomerXrayHomologBuilder(
+                client=client,
+                config=config,
+                stride_executable="stride",
+                cache_dir=root,
+                stride_cache_dir=root / "stride_cache",
+            )
+            build_record_pair = builder._build_record_pair
+            entry_attempts = 0
+
+            def counted_record_pair(record_seed):
+                nonlocal entry_attempts
+                entry_attempts += 1
+                return build_record_pair(record_seed)
+
+            module = "src.dataset.builders.homologs"
+            with ExitStack() as stack:
+                stack.enter_context(
+                    patch(
+                        f"{module}.fetch_solution_nmr_entry_ids", return_value=["1AAA"]
+                    )
+                )
+                record_filtered = stack.enter_context(
+                    patch(f"{module}._record_filtered_structure")
+                )
+                stack.enter_context(
+                    patch(
+                        f"{module}.find_modeled_ca_core_identity_matches",
+                        return_value=[object()],
+                    )
+                )
+                stack.enter_context(
+                    patch.object(
+                        builder, "_build_record_pair", side_effect=counted_record_pair
+                    )
+                )
+                if failing_kind != "nmr_download":
+                    stack.enter_context(
+                        patch.object(
+                            builder,
+                            "_build_stride_core_query_sequence",
+                            return_value=(
+                                "ACDEFGHIKLM",
+                                ResidueId(1, ""),
+                                ResidueId(11, ""),
+                                [CAResidueRecord(1, "A", True)],
+                            ),
+                        )
+                    )
+                if failing_kind != "xray_download":
+                    stack.enter_context(
+                        patch(
+                            f"{module}.download_pdb_chain_subset_if_needed",
+                            return_value=(root / "9XYZ.pdb", {}),
+                        )
+                    )
+                    stack.enter_context(
+                        patch(
+                            f"{module}.load_cached_first_model_ca_data",
+                            return_value=((CAResidueRecord(1, "A", True),), None),
+                        )
+                    )
+                records_95, _ = builder.build()
+            return entry_attempts, records_95, record_filtered
+
+    def test_homolog_build_requeues_persistent_http_5xx_from_every_request_kind(
+        self,
+    ) -> None:
+        """Search, GraphQL and download 5xx errors get three entry attempts."""
+        for failing_kind in (
+            "sequence_search",
+            "graphql",
+            "nmr_download",
+            "xray_download",
+        ):
+            with self.subTest(failing_kind=failing_kind):
+                attempts, records, record_filtered = self._build_with_http_failures(
+                    failing_kind, [503] * 100
+                )
+                self.assertEqual(attempts, 3)
+                self.assertEqual(records, [])
+                record_filtered.assert_called_once()
+                self.assertIn("503", record_filtered.call_args.args[1])
+
+    def test_homolog_build_recovers_after_transient_graphql_http_5xx(self) -> None:
+        """A requeued entry is built once GraphQL answers again."""
+        attempts, records, record_filtered = self._build_with_http_failures(
+            "graphql", [503, 503]
+        )
+        self.assertEqual(attempts, 2)
+        self.assertEqual(
+            [(record.entry_id, record.xray_homolog_entity_ids) for record in records],
+            [("1AAA", ("9XYZ_1",))],
+        )
+        record_filtered.assert_not_called()
+
+    def test_homolog_build_does_not_requeue_coordinate_http_404(self) -> None:
+        """A missing coordinate file is final and is not retried per entry."""
+        attempts, records, record_filtered = self._build_with_http_failures(
+            "nmr_download", []
+        )
+        self.assertEqual(attempts, 1)
+        self.assertEqual(records, [])
+        record_filtered.assert_called_once()
+        self.assertIn("404", record_filtered.call_args.args[1])
 
     def test_treats_null_result_set_as_empty_search_result(self) -> None:
         """Treat a null REST result set as an empty sequence-search result."""

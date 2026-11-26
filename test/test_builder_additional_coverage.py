@@ -1236,6 +1236,60 @@ def test_client_post_json_raises_after_last_attempt_without_final_sleep() -> Non
     sleep.assert_called_once_with(1.0)
 
 
+def _status_response(status_code: int) -> requests.Response:
+    """Return a real requests response with only a status code and URL."""
+    response = requests.Response()
+    response.status_code = status_code
+    response.url = "https://example.test"
+    return response
+
+
+def test_client_post_json_keeps_last_http_5xx_as_the_error_cause() -> None:
+    client = builder.RCSBClient(
+        builder.DatasetBuildConfig(retries=2, backoff_seconds=0.0)
+    )
+    responses = [_status_response(503), _status_response(502)]
+    client.session = SimpleNamespace(post=Mock(side_effect=responses))
+    with pytest.raises(RuntimeError, match="after 2 attempts: 502") as excinfo:
+        client._post_json("https://example.test", {})
+
+    assert isinstance(excinfo.value.__cause__, requests.HTTPError)
+    assert excinfo.value.__cause__.response is responses[-1]
+    assert builder._is_http_server_error(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    "last_outcome",
+    [
+        _status_response(404),
+        _status_response(429),
+        requests.Timeout("offline"),
+        {"data": None},
+    ],
+    ids=["http-404", "http-429", "timeout", "malformed-graphql"],
+)
+def test_client_post_json_does_not_report_earlier_5xx_as_final_cause(
+    last_outcome: object,
+) -> None:
+    """Only the final attempt decides whether the failure counts as a 5xx."""
+    client = builder.RCSBClient(
+        builder.DatasetBuildConfig(retries=2, backoff_seconds=0.0)
+    )
+    if isinstance(last_outcome, dict):
+        response = MagicMock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = last_outcome
+        last_outcome = response
+    client.session = SimpleNamespace(
+        post=Mock(side_effect=[_status_response(503), last_outcome])
+    )
+    with pytest.raises(RuntimeError, match="after 2 attempts") as excinfo:
+        client._post_json("https://example.test", {"query": "query { x }"})
+
+    assert excinfo.value.__cause__ is not None
+    assert not builder._is_http_server_error(excinfo.value)
+
+
 def test_fetch_entry_ids_for_method_set_builds_group_query_and_batches_filters() -> (
     None
 ):

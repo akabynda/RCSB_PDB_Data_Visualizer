@@ -514,9 +514,9 @@ class SolutionNMRMonomerXrayHomologBuilder:
                             future_map[retry_future] = seed
                             pending.add(retry_future)
                             LOGGER.warning(
-                                "SOLUTION NMR monomer X-ray homolog sequence search "
-                                "returned an HTTP 5xx error for %s; moved to the end "
-                                "of the queue (next attempt %d/%d): %s",
+                                "SOLUTION NMR monomer X-ray homolog search got an "
+                                "HTTP 5xx error for %s; moved to the end of the "
+                                "queue (next attempt %d/%d): %s",
                                 seed.entry_id,
                                 next_attempt,
                                 XRAY_HOMOLOG_SEARCH_MAX_ATTEMPTS,
@@ -532,16 +532,16 @@ class SolutionNMRMonomerXrayHomologBuilder:
                         )
                         if is_server_error:
                             LOGGER.warning(
-                                "SOLUTION NMR monomer X-ray homolog sequence search "
-                                "failed for %s after %d attempts: %s",
+                                "SOLUTION NMR monomer X-ray homolog search failed "
+                                "for %s after %d attempts: %s",
                                 seed.entry_id,
                                 attempt,
                                 exc,
                             )
                         else:
                             LOGGER.warning(
-                                "SOLUTION NMR monomer X-ray homolog sequence search "
-                                "failed for %s: %s",
+                                "SOLUTION NMR monomer X-ray homolog search failed "
+                                "for %s: %s",
                                 seed.entry_id,
                                 exc,
                             )
