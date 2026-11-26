@@ -18,6 +18,9 @@ from src.dataset.config import (
 PROGRAM_REMARK_PATTERN = re.compile(r"^REMARK\s+3\s+PROGRAM\s*:\s*(.*)$")
 
 
+REFINEMENT_REMARK_PATTERN = re.compile(r"^REMARK\s+3(?=\s|$)(?P<payload>.*)$")
+
+
 NMR_SOFTWARE_REMARK_PATTERN = re.compile(
     r"^REMARK\s+210\s+SOFTWARE\s+USED\s*:\s*(.*)$",
     re.IGNORECASE,
@@ -201,57 +204,52 @@ def _prepend_mmcif_software_remarks(pdb_path: Path, cif_path: Path) -> None:
 def extract_raw_refinement_program_text_from_pdb(pdb_path: Path) -> str:
     """Read software text stored directly in REMARK 3 and REMARK 210."""
     values: list[str] = []
-    nmr_software_parts: list[str] = []
-    collecting_nmr_software = False
+    field_parts: list[str] = []
+    # Remark pattern for continuation lines of the field being collected.
+    continuation_pattern: re.Pattern[str] | None = None
+    field_patterns = (
+        (PROGRAM_REMARK_PATTERN, REFINEMENT_REMARK_PATTERN),
+        (NMR_SOFTWARE_REMARK_PATTERN, NMR_REMARK_PATTERN),
+    )
 
-    def flush_nmr_software() -> None:
-        """Append and clear the currently buffered NMR software text."""
-        nonlocal nmr_software_parts
-        if nmr_software_parts:
-            value = " ".join(nmr_software_parts).strip()
+    def flush_field() -> None:
+        """Append and clear the currently buffered software text."""
+        nonlocal field_parts
+        if field_parts:
+            value = " ".join(field_parts).strip()
             if value:
                 values.append(value)
-            nmr_software_parts = []
+            field_parts = []
 
     with pdb_path.open("r", encoding="utf-8", errors="ignore") as handle:
         for line in handle:
             if line[:6].strip() in {"ATOM", "HETATM", "MODEL"}:
                 break
-            match = PROGRAM_REMARK_PATTERN.match(line)
-            if match:
-                value = match.group(1).strip()
-                if value:
-                    values.append(value)
-                continue
+            for field_pattern, remark_pattern in field_patterns:
+                field_match = field_pattern.match(line)
+                if field_match:
+                    flush_field()
+                    continuation_pattern = remark_pattern
+                    value = field_match.group(1).strip()
+                    if value:
+                        field_parts.append(value)
+                    break
+            else:
+                if continuation_pattern is None:
+                    continue
+                remark_match = continuation_pattern.match(line)
+                payload = remark_match.group("payload") if remark_match else ""
+                stripped_payload = payload.strip()
+                if (
+                    not stripped_payload
+                    or NMR_REMARK_FIELD_PATTERN.match(payload) is not None
+                ):
+                    flush_field()
+                    continuation_pattern = None
+                    continue
+                field_parts.append(stripped_payload)
 
-            software_match = NMR_SOFTWARE_REMARK_PATTERN.match(line)
-            if software_match:
-                flush_nmr_software()
-                collecting_nmr_software = True
-                value = software_match.group(1).strip()
-                if value:
-                    nmr_software_parts.append(value)
-                continue
-
-            if not collecting_nmr_software:
-                continue
-            remark_match = NMR_REMARK_PATTERN.match(line)
-            if not remark_match:
-                flush_nmr_software()
-                collecting_nmr_software = False
-                continue
-            payload = remark_match.group("payload")
-            stripped_payload = payload.strip()
-            if (
-                not stripped_payload
-                or NMR_REMARK_FIELD_PATTERN.match(payload) is not None
-            ):
-                flush_nmr_software()
-                collecting_nmr_software = False
-                continue
-            nmr_software_parts.append(stripped_payload)
-
-    flush_nmr_software()
+    flush_field()
     return " || ".join(values)
 
 

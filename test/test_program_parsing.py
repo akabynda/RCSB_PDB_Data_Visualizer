@@ -218,6 +218,47 @@ class ExtractRefinementProgramsFromPDBTests(unittest.TestCase):
             ],
         )
 
+    def test_joins_remark_3_program_continuation_lines(self) -> None:
+        """Read wrapped REMARK 3 PROGRAM fields up to the next field (1ZG2, 1DO9)."""
+        pdb_path = self._write_pdb(
+            "\n".join(
+                [
+                    "HEADER    TEST",
+                    "REMARK   3   PROGRAM     : XWINNMR 3.5PL6, AUTOSTRUCTURE 2.1.0, "
+                    "XPLOR-NIH",
+                    "REMARK   3                 2.0.6, CNS 1.1",
+                    "REMARK   3   AUTHORS     : BRUKER (XWINNMR), HUANG, MONTELIONE",
+                    "REMARK   3                 (AUTOSTRUCTURE), AMBER AUTHORS",
+                    "REMARK   3   PROGRAM     : DYANA 1.5 MODIFIED FOR USING",
+                    "REMARK   3                 AS CONSTRAINTS, AMBER 4.0",
+                    "REMARK   3",
+                    "REMARK   3                 NOT A CONTINUATION, ARIA",
+                    "REMARK   3   PROGRAM     : CYANA",
+                    "REMARK 300 BIOMOLECULE: 1, ARIA",
+                    "END",
+                ]
+            )
+        )
+
+        self.assertEqual(
+            extract_raw_refinement_program_text_from_pdb(pdb_path),
+            "XWINNMR 3.5PL6, AUTOSTRUCTURE 2.1.0, XPLOR-NIH 2.0.6, CNS 1.1"
+            " || DYANA 1.5 MODIFIED FOR USING AS CONSTRAINTS, AMBER 4.0"
+            " || CYANA",
+        )
+        self.assertEqual(
+            extract_solution_nmr_program_clusters(
+                extract_raw_refinement_program_text_from_pdb(pdb_path)
+            ),
+            [
+                ("CLUSTER8", "XPLOR_NIH"),
+                ("CLUSTER3", "CNS"),
+                ("CLUSTER6", "DIANA_DYANA"),
+                ("CLUSTER1", "AMBER"),
+                ("CLUSTER4", "CYANA"),
+            ],
+        )
+
     def _write_pdb(self, text: str) -> Path:
         """Write ``text`` to the temporary PDB fixture and return its path."""
         temp_dir = tempfile.TemporaryDirectory()

@@ -432,14 +432,15 @@ Collects exact single-method `SOLUTION NMR` entries, downloads PDB files into
 the cache, and extracts refinement program names from PDB remarks. The output
 shows refinement-program usage by year.
 
-Program names from `REMARK 3 PROGRAM` and wrapped `REMARK 210 SOFTWARE USED`
-fields are normalized before counting. During mmCIF-to-PDB conversion,
-`_pdbx_nmr_software.name` and optional `.version` are transferred to
+Program names from `REMARK 3 PROGRAM` and `REMARK 210 SOFTWARE USED` fields are
+normalized before counting. A field continues on following lines of the same
+remark up to the next named field or a blank remark line. During mmCIF-to-PDB
+conversion, `_pdbx_nmr_software.name` and optional `.version` are transferred to
 `REMARK 210 SOFTWARE USED`. Missing mmCIF values (`?` and `.`) are ignored, and
 repeated name/version pairs are deduplicated. All reported NMR software roles
-are included, matching the scope of `SOFTWARE USED`. Long fields are wrapped
-at word boundaries into continuation lines. Each entry contributes once to
-each distinct normalized name it reports.
+are included, matching the scope of `SOFTWARE USED`. Long fields are wrapped at
+word boundaries into continuation lines. Each entry contributes once to each
+distinct normalized name it reports.
 
 Output:
 
@@ -457,9 +458,9 @@ file has no software text. An entry whose PDB file cannot be downloaded or is
 missing or empty in the cache is excluded and written to `_filtered.csv` with
 reason `PDB file could not be loaded`.
 
-Wrapped `REMARK 210` fields are joined before matching. Program-aware boundaries
-prevent unrelated names such as `VARIAN` and `DISCOVERY STUDIO` from matching
-`ARIA` or `DISCOVER`.
+Wrapped `REMARK 3` and `REMARK 210` fields are joined before matching.
+Program-aware boundaries prevent unrelated names such as `VARIAN` and
+`DISCOVERY STUDIO` from matching `ARIA` or `DISCOVER`.
 
 Matching is case-insensitive and accepts versions, separators, compound program
 strings, and these aliases:
