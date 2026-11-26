@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+from collections.abc import Callable
 from pathlib import Path
 
 from src.dataset.arguments import parse_args
@@ -100,6 +101,38 @@ def _selected_dataset_output_paths(
     return {dataset: all_paths[dataset] for dataset in args.datasets}
 
 
+_RMSD_DATASET_KINDS = frozenset(
+    {
+        DatasetKind.SOLUTION_NMR_MONOMER_XRAY_RMSD,
+        DatasetKind.SOLUTION_NMR_MONOMER_XRAY_RMSD_HISTORICAL,
+        DatasetKind.SOLUTION_NMR_MONOMER_XRAY_RMSD_EXTREMES,
+        DatasetKind.SOLUTION_NMR_MONOMER_XRAY_RMSD_EXTREMES_HISTORICAL,
+    }
+)
+
+
+def _run_with_dataset_reports(
+    args: argparse.Namespace,
+    output_paths_by_dataset: dict[DatasetKind, tuple[Path, ...]],
+    run: Callable[[], None],
+) -> None:
+    """Start fresh logs and exclusion tables just before their datasets run."""
+    _configure_dataset_warning_logs(output_paths_by_dataset)
+    preserved_filter_outputs: tuple[Path, ...] = ()
+    if args.resume:
+        preserved_filter_outputs = output_paths_by_dataset.get(
+            DatasetKind.SOLUTION_NMR_MONOMER_XRAY_HOMOLOGS, ()
+        )
+    _configure_dataset_filtered_csvs(
+        output_paths_by_dataset,
+        preserve_existing_output_paths=preserved_filter_outputs,
+    )
+    _set_active_dataset_warning_logs(
+        path for paths in output_paths_by_dataset.values() for path in paths
+    )
+    run()
+
+
 def main() -> None:
     """Run the requested dataset collection workflow from the CLI."""
     print(f"Using up to {DEFAULT_MAX_WORKERS} worker threads for concurrent tasks")
@@ -109,16 +142,6 @@ def main() -> None:
         format="%(asctime)s | %(levelname)s | %(message)s",
     )
     output_paths_by_dataset = _selected_dataset_output_paths(args)
-    _configure_dataset_warning_logs(output_paths_by_dataset)
-    preserved_filter_outputs: list[Path] = []
-    if args.resume and DatasetKind.SOLUTION_NMR_MONOMER_XRAY_HOMOLOGS in args.datasets:
-        preserved_filter_outputs.extend(
-            output_paths_by_dataset[DatasetKind.SOLUTION_NMR_MONOMER_XRAY_HOMOLOGS]
-        )
-    _configure_dataset_filtered_csvs(
-        output_paths_by_dataset,
-        preserve_existing_output_paths=preserved_filter_outputs,
-    )
     config = DatasetBuildConfig(
         page_size=args.page_size,
         graphql_batch_size=args.batch_size,
@@ -153,7 +176,20 @@ def main() -> None:
     )
     for dataset_kind, runner in runners:
         if dataset_kind in args.datasets:
-            _set_active_dataset_warning_logs(output_paths_by_dataset[dataset_kind])
-            runner(args, client, config)
+            _run_with_dataset_reports(
+                args,
+                {dataset_kind: output_paths_by_dataset[dataset_kind]},
+                lambda runner=runner: runner(args, client, config),
+            )
 
-    run_xray_rmsd(args, client, config, output_paths_by_dataset)
+    rmsd_paths_by_dataset = {
+        dataset_kind: paths
+        for dataset_kind, paths in output_paths_by_dataset.items()
+        if dataset_kind in _RMSD_DATASET_KINDS
+    }
+    if rmsd_paths_by_dataset:
+        _run_with_dataset_reports(
+            args,
+            rmsd_paths_by_dataset,
+            lambda: run_xray_rmsd(args, client, config, output_paths_by_dataset),
+        )

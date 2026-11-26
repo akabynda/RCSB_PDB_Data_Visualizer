@@ -95,10 +95,11 @@ entry, including between processes on POSIX.
 Each primary `name.csv` has a warning/error log `name.log` and an exclusion
 table `name_filtered.csv` containing `entry_id`, deposition `year` and `reason`.
 Missing years remain empty; duplicate
-entry/reason pairs are suppressed. Exclusions cover entries considered after
-the initial API search. Derived datasets import upstream exclusions. Homolog
-outputs also record individual rejected X-ray candidates separately from
-excluded NMR entries.
+entry/reason pairs are suppressed. Both files are recreated when their dataset
+starts; a failed build records its error in `name.log`. Exclusions cover
+entries considered after the initial API search. Derived datasets import
+upstream exclusions. Homolog outputs also record individual rejected X-ray
+candidates separately from excluded NMR entries.
 
 Default storage paths can be changed with the corresponding CLI options:
 

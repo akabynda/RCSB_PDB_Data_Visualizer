@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import logging
 import sys
 import tempfile
 import unittest
@@ -833,6 +834,58 @@ class BuilderMainDispatchTests(unittest.TestCase):
                 builder.read_rejected_xray_homolog_csv(rejected_100_path),
                 [audit_100],
             )
+
+    def test_failed_dataset_leaves_reports_of_unstarted_datasets(self) -> None:
+        """Leave reports of datasets that never started after an early failure."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            args = self._homolog_cli_args(root)
+            args.datasets.append(
+                builder.DatasetKind.SOLUTION_NMR_MONOMER_XRAY_HOMOLOGS_HISTORICAL
+            )
+            args.solution_nmr_monomer_xray_homolog_95_historical_output = (
+                root / "historical_95.csv"
+            )
+            args.solution_nmr_monomer_xray_homolog_100_historical_output = (
+                root / "historical_100.csv"
+            )
+            historical_reports = {}
+            for output_path in (
+                args.solution_nmr_monomer_xray_homolog_95_historical_output,
+                args.solution_nmr_monomer_xray_homolog_100_historical_output,
+            ):
+                for report_path, text in (
+                    (
+                        builder.filtered_structures_csv_path(output_path),
+                        "entry_id,year,reason\n1OLD,2000,old reason\n",
+                    ),
+                    (output_path.with_suffix(".log"), "old warning\n"),
+                ):
+                    report_path.write_text(text, encoding="utf-8")
+                    historical_reports[report_path] = text
+            root_logger = logging.getLogger()
+            handlers_before = list(root_logger.handlers)
+
+            def remove_new_handlers() -> None:
+                for handler in list(root_logger.handlers):
+                    if handler not in handlers_before:
+                        root_logger.removeHandler(handler)
+                        handler.close()
+
+            self.addCleanup(remove_new_handlers)
+
+            with (
+                patch.object(dataset_cli, "parse_args", return_value=args),
+                patch.object(dataset_cli, "RCSBClient"),
+                patch.object(
+                    homolog_workflows, "ensure_stride_executable", return_value=None
+                ),
+                self.assertRaises(SystemExit),
+            ):
+                builder.main()
+
+            for report_path, text in historical_reports.items():
+                self.assertEqual(report_path.read_text(encoding="utf-8"), text)
 
     def test_main_dispatches_all_dataset_builders_without_network(self) -> None:
         """Keep CLI argument and builder APIs wired together across all datasets."""
