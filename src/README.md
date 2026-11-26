@@ -368,7 +368,7 @@ The main CSV is `data/solution_nmr_membrane_proteins.csv`. Companions share its 
 | `_entities.csv` | Protein entity: annotations, deposited sequence/hash, UniProt IDs. |
 | `_chains.csv` | Protein chain: label/auth IDs, PDBTM availability and OPM counts. |
 | `_segments.csv` | Original RCSB PDBTM interval, raw positions and validity. |
-| `_opm_residues.csv` | Every deposited first-model protein residue: presence in the OPM file, OPM residue name, mean z and membrane flag. |
+| `_opm_residues.csv` | Every deposited first-model protein residue of `counted` entries: presence in the OPM file, OPM residue name, mean z and membrane flag. |
 | `_duplicate_candidates.csv` | One-model/ensemble audit; normally empty under the multiple-model requirement. |
 | `_filtered.csv` | Excluded entry ID, deposition year and reason. |
 | `_manifest.json` | Source/run provenance, parameters, filter counts, status/category statistics, hashes, command and software versions. |
