@@ -600,10 +600,11 @@ homolog.
 Every hit rejected by the method or modeled-core check is written to the
 cutoff-specific `*_rejected.csv` report. Each row records the NMR chain and core,
 X-ray entry/entity and chains, cutoff, and reason. Rows are deduplicated by NMR
-entry, cutoff, and X-ray entity. Missing candidate metadata, or coordinate errors
-that leave a candidate without either a confirmed match or a complete rejection,
-fail the complete NMR entry rather than creating a normal rejection row. A
-confirmed match in another chain is sufficient even if one chain failed.
+entry, cutoff, and X-ray entity. Missing candidate metadata, including an empty
+experimental-method list, or coordinate errors that leave a candidate without
+either a confirmed match or a complete rejection, fail the complete NMR entry
+rather than creating a normal rejection row. A confirmed match in another chain
+is sufficient even if one chain failed.
 
 Within one NMR seed, the 95% and 100% passes share candidate metadata and the
 first-model X-ray CA cache described above. This avoids duplicate downloads and

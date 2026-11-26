@@ -268,6 +268,18 @@ class SolutionNMRMonomerXrayHomologBuilder:
             raise XrayHomologEvaluationError(
                 "Missing X-ray candidate metadata for: " + ", ".join(missing_entity_ids)
             )
+        # The sequence search already requires X-RAY DIFFRACTION, so an empty
+        # method set means the metadata is missing, not that the method differs.
+        entity_ids_without_methods = [
+            entity_id
+            for entity_id in xray_entity_ids
+            if not candidate_by_entity_id[entity_id].experimental_methods
+        ]
+        if entity_ids_without_methods:
+            raise XrayHomologEvaluationError(
+                "Missing X-ray candidate experimental methods for: "
+                + ", ".join(entity_ids_without_methods)
+            )
 
         filtered_entity_ids: list[str] = []
         for entity_id in xray_entity_ids:

@@ -21,6 +21,7 @@ from src.pdb_dataset_builder import (
     SolutionNMRMonomerXrayHomologRecord,
     SolutionNMRMonomerXrayHomologBuilder,
     SolutionNMRMonomerXrayHomologSeedRecord,
+    XrayHomologEvaluationError,
     XrayPolymerEntityCandidateRecord,
     XRAY_HOMOLOG_METHOD_REJECTION_REASON,
     _read_xray_homolog_resume_checkpoint,
@@ -1011,6 +1012,186 @@ class SequenceSearchTests(unittest.TestCase):
                 modeled_core_check.call_args.kwargs["candidate"].polymer_entity_id,
                 "1PURE_1",
             )
+
+    @staticmethod
+    def _candidate_metadata_client(
+        exptl_entries: list[dict | None],
+    ) -> RCSBClient:
+        """Return a client whose GraphQL reports two hits and given methods."""
+        client = RCSBClient(DatasetBuildConfig())
+        client.fetch_xray_polymer_entity_ids_by_sequence = Mock(
+            return_value=["9XYZ_1", "1PUR_1"]
+        )
+
+        def post_json(url: str, payload: dict) -> dict:
+            query = payload["query"]
+            if "polymer_entities" in query:
+                return {
+                    "data": {
+                        "polymer_entities": [
+                            {
+                                "rcsb_id": entity_id,
+                                "entity_poly": {"pdbx_strand_id": "A"},
+                                "rcsb_polymer_entity_container_identifiers": {
+                                    "entry_id": entity_id.split("_")[0]
+                                },
+                            }
+                            for entity_id in payload["variables"]["ids"]
+                        ]
+                    }
+                }
+            if "exptl" in query:
+                return {
+                    "data": {
+                        "entries": [
+                            {
+                                "rcsb_id": "1PUR",
+                                "exptl": [{"method": "X-RAY DIFFRACTION"}],
+                            },
+                            *exptl_entries,
+                        ]
+                    }
+                }
+            return {"data": {"entries": []}}
+
+        client._post_json = post_json
+        return client
+
+    def _build_record_with_candidate_methods(
+        self, exptl_entries: list[dict | None]
+    ) -> tuple[SolutionNMRMonomerXrayHomologRecord | Exception, Mock]:
+        """Build one 95% record through the real candidate metadata parser."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            builder = SolutionNMRMonomerXrayHomologBuilder(
+                client=self._candidate_metadata_client(exptl_entries),
+                config=DatasetBuildConfig(),
+                stride_executable="stride",
+                cache_dir=root,
+                stride_cache_dir=root / "stride_cache",
+            )
+            sequence = "ACDEFGHIKLM"
+            nmr_residues = [
+                CAResidueRecord(index, identity, True)
+                for index, identity in enumerate(sequence, start=1)
+            ]
+            seed = SolutionNMRMonomerXrayHomologSeedRecord("3NMR", 2003, "N")
+            with patch.object(
+                builder,
+                "_xray_candidate_has_modeled_core_match",
+                return_value=True,
+            ) as modeled_core_check:
+                try:
+                    result = builder._build_record(
+                        seed,
+                        sequence_identity_percent=95,
+                        core_query=(sequence, 1, 11, nmr_residues),
+                    )
+                except Exception as exc:
+                    result = exc
+            return result, modeled_core_check
+
+    def test_build_record_fails_entry_when_candidate_methods_are_missing(
+        self,
+    ) -> None:
+        """Absent methods are a metadata error, not a method rejection."""
+        cases = {
+            "entry absent": [],
+            "null entry": [None],
+            "null exptl": [{"rcsb_id": "9XYZ", "exptl": None}],
+            "empty exptl": [{"rcsb_id": "9XYZ", "exptl": []}],
+            "null method": [{"rcsb_id": "9XYZ", "exptl": [{"method": None}]}],
+        }
+        for label, exptl_entries in cases.items():
+            with self.subTest(case=label):
+                result, modeled_core_check = self._build_record_with_candidate_methods(
+                    exptl_entries
+                )
+                self.assertIsInstance(result, XrayHomologEvaluationError)
+                self.assertIn("9XYZ_1", str(result))
+                self.assertNotIn("1PUR_1", str(result))
+                modeled_core_check.assert_not_called()
+
+    def test_build_record_keeps_reported_hybrid_methods_as_rejections(
+        self,
+    ) -> None:
+        """Reported non-X-ray methods still produce a normal rejection row."""
+        result, modeled_core_check = self._build_record_with_candidate_methods(
+            [
+                {
+                    "rcsb_id": "9XYZ",
+                    "exptl": [
+                        {"method": "X-RAY DIFFRACTION"},
+                        {"method": "NEUTRON DIFFRACTION"},
+                    ],
+                }
+            ]
+        )
+        self.assertIsInstance(result, SolutionNMRMonomerXrayHomologRecord)
+        self.assertEqual(result.xray_homolog_entity_ids, ("1PUR_1",))
+        self.assertEqual(
+            [
+                (rejected.xray_entity_id, rejected.reason)
+                for rejected in result.rejected_xray_homologs
+            ],
+            [("9XYZ_1", XRAY_HOMOLOG_METHOD_REJECTION_REASON)],
+        )
+        modeled_core_check.assert_called_once()
+
+    def test_homolog_build_excludes_entry_with_missing_candidate_methods(
+        self,
+    ) -> None:
+        """Missing methods remove the entry instead of writing a false zero."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            client = self._candidate_metadata_client([])
+            client.fetch_xray_polymer_entity_ids_by_sequence = Mock(
+                return_value=["9XYZ_1"]
+            )
+            seed = SolutionNMRMonomerXrayHomologSeedRecord("3NMR", 2003, "N")
+            client.fetch_solution_nmr_monomer_xray_homolog_seed_records_for_ids = Mock(
+                return_value=[seed]
+            )
+            builder = SolutionNMRMonomerXrayHomologBuilder(
+                client=client,
+                config=DatasetBuildConfig(max_workers=1),
+                stride_executable="stride",
+                cache_dir=root,
+                stride_cache_dir=root / "stride_cache",
+            )
+            sequence = "ACDEFGHIKLM"
+            nmr_residues = [
+                CAResidueRecord(index, identity, True)
+                for index, identity in enumerate(sequence, start=1)
+            ]
+            completed: list[tuple[str, str]] = []
+            with (
+                patch(
+                    "src.dataset.builders.homologs.fetch_solution_nmr_entry_ids",
+                    return_value=["3NMR"],
+                ),
+                patch(
+                    "src.dataset.builders.homologs._record_filtered_structure"
+                ) as record_filtered,
+                patch.object(
+                    builder,
+                    "_build_stride_core_query_sequence",
+                    return_value=(sequence, 1, 11, nmr_residues),
+                ) as core_query,
+            ):
+                records_95, records_100 = builder.build(
+                    on_entry_complete=lambda entry_id, status: completed.append(
+                        (entry_id, status)
+                    )
+                )
+
+            self.assertEqual(records_95, [])
+            self.assertEqual(records_100, [])
+            core_query.assert_called_once()
+            record_filtered.assert_called_once()
+            self.assertEqual(record_filtered.call_args.args[0], "3NMR")
+            self.assertIn("9XYZ_1", record_filtered.call_args.args[1])
+            self.assertNotIn(("3NMR", "success"), completed)
 
     def test_rejected_xray_homolog_csv_path_round_trip_and_empty_header(
         self,
