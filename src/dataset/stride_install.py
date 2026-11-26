@@ -190,8 +190,7 @@ def download_and_build_stride(install_dir: Path) -> Path:
         if os.name == "nt":
             raise RuntimeError(
                 "Automatic STRIDE builds are supported on macOS and Linux. "
-                "On native Windows, use WSL or pass a built executable with "
-                "--solution-nmr-monomer-stride-executable."
+                "On Windows, use WSL."
             )
 
         if checkout_dir.exists() or checkout_dir.is_symlink():

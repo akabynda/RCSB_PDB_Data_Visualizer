@@ -29,7 +29,7 @@ figures for the accompanying article. Plots include deposition years through
 - Sufficient disk space for downloaded coordinates and calculations; a full
   build can require about 100 GiB.
 - Figures 3–7: STRIDE, or Git, GNU Make and a C compiler for its automatic
-  installation on macOS/Linux. On Windows, use WSL or supply a prebuilt STRIDE.
+  installation on macOS/Linux. On Windows, use WSL.
 
 ## Setup
 
