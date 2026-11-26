@@ -52,7 +52,9 @@ python src/pdb_dataset_builder.py --datasets all
 python src/pdb_plot.py --plots all
 ```
 
-This runs all supported analyses, including those beyond the article figures.
+This runs every dataset and plot kind with default settings (core residues,
+X-ray RMSD against 100%-identity homologs), including those beyond the article
+figures.
 The full build downloads coordinates, searches for homologs and calculates
 structural comparisons, so it can take a long time.
 
