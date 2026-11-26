@@ -505,8 +505,10 @@ blank author chain only when the input actually contains a blank chain.
 
 The stored `stride_secondary_structure_percent` is `100 * (1 - C)` and includes
 turns (`T`). Figure 3 does not use it: the plot computes
-`100 * (H + G + I + E + B)`, removes values outside 0–100%, and takes the
-arithmetic mean for each year.
+`100 * (H + G + I + E + B)` from the stored six-decimal fractions, sets values
+up to `0.00025` percentage points above 100% (the maximum rounding error of five
+fractions) to 100%, removes values outside 0–100%, and takes the arithmetic mean
+for each year.
 
 Output:
 

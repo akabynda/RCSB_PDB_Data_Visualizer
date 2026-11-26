@@ -8,6 +8,11 @@ import matplotlib.pyplot as plt
 import pandas as pd
 
 
+# Five fractions stored with six decimals can sum above 100% by at most
+# 5 * 0.5e-6 * 100 percentage points.
+STRIDE_PERCENT_ROUNDING_TOLERANCE = 5 * 0.5e-6 * 100.0
+
+
 class QualityPlotsMixin:
     """Plot NMR secondary structure, ensemble precision, and validation metrics."""
 
@@ -58,8 +63,14 @@ class QualityPlotsMixin:
         ) * 100.0
         filtered = table.loc[
             (table["stride_hgieb_percent"] >= 0.0)
-            & (table["stride_hgieb_percent"] <= 100.0)
+            & (
+                table["stride_hgieb_percent"]
+                <= 100.0 + STRIDE_PERCENT_ROUNDING_TOLERANCE
+            )
         ].copy()
+        filtered["stride_hgieb_percent"] = filtered["stride_hgieb_percent"].clip(
+            upper=100.0
+        )
         yearly_mean = (
             filtered.groupby("year", as_index=True)["stride_hgieb_percent"]
             .mean()
