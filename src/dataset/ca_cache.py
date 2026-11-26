@@ -19,11 +19,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 from Bio.SeqUtils import seq1
 
-from src.dataset.cache import (
-    _cached_pdb_matches_metadata,
-    _load_pdb_cache_metadata,
-    _sha256_file,
-)
+from src.dataset.cache import _sha256_file
 from src.dataset.coordinates import (
     _is_better_ca_candidate,
     _parse_first_model_ca_line_fields,
@@ -97,12 +93,7 @@ def _first_model_ca_cache_lock(cache_path: Path) -> Iterator[None]:
 
 
 def _coordinate_source_sha256(pdb_path: Path) -> str:
-    """Return a trusted coordinate SHA, hashing local fixtures when necessary."""
-    metadata = _load_pdb_cache_metadata(pdb_path)
-    if metadata is not None and _cached_pdb_matches_metadata(pdb_path, metadata):
-        value = metadata.get("sha256")
-        if isinstance(value, str) and len(value) == 64:
-            return value
+    """Return the SHA-256 of the coordinate bytes currently on disk."""
     return _sha256_file(pdb_path)
 
 

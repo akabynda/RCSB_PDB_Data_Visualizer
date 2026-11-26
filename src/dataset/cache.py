@@ -132,15 +132,17 @@ def _load_pdb_cache_metadata(pdb_path: Path) -> dict[str, Any] | None:
 
 
 def _cached_pdb_matches_metadata(pdb_path: Path, metadata: dict[str, Any]) -> bool:
-    """Return whether the local file still matches its recorded size and mtime."""
+    """Return whether the local file matches its recorded size, mtime and SHA-256."""
     if not pdb_path.exists() or pdb_path.stat().st_size <= 0:
         return False
     stat = pdb_path.stat()
+    recorded_sha256 = metadata.get("sha256")
     return (
         metadata.get("size_bytes") == stat.st_size
         and metadata.get("mtime_ns") == stat.st_mtime_ns
-        and isinstance(metadata.get("sha256"), str)
-        and bool(metadata["sha256"])
+        and isinstance(recorded_sha256, str)
+        and bool(recorded_sha256)
+        and _sha256_file(pdb_path) == recorded_sha256
     )
 
 

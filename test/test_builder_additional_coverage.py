@@ -246,13 +246,16 @@ def test_cached_coordinate_metadata_must_match_nonempty_file_stats(
     valid = {
         "size_bytes": stat.st_size,
         "mtime_ns": stat.st_mtime_ns,
-        "sha256": "a" * 64,
+        "sha256": hashlib.sha256(b"ATOM\n").hexdigest(),
     }
     assert builder._cached_pdb_matches_metadata(pdb_path, valid)
     assert not builder._cached_pdb_matches_metadata(
         pdb_path, {**valid, "mtime_ns": stat.st_mtime_ns + 1}
     )
     assert not builder._cached_pdb_matches_metadata(pdb_path, {**valid, "sha256": ""})
+    assert not builder._cached_pdb_matches_metadata(
+        pdb_path, {**valid, "sha256": "a" * 64}
+    )
 
 
 def test_cache_validation_freshness_handles_invalid_naive_and_future_dates() -> None:
@@ -977,31 +980,22 @@ def test_hetatm_split_and_identity_match_input_validation() -> None:
     )
 
 
-def test_coordinate_hash_prefers_valid_metadata_and_falls_back_to_file(
-    tmp_path: Path,
-) -> None:
+def test_coordinate_hash_is_computed_from_file_bytes(tmp_path: Path) -> None:
     pdb_path = tmp_path / "1ABC.pdb"
     pdb_path.write_bytes(b"fixture")
-    trusted_sha = "a" * 64
-    with (
-        patch.object(
-            builder_ca_cache,
-            "_load_pdb_cache_metadata",
-            return_value={"sha256": trusted_sha},
-        ),
-        patch.object(
-            builder_ca_cache, "_cached_pdb_matches_metadata", return_value=True
-        ),
-        patch.object(builder_ca_cache, "_sha256_file") as hash_file,
-    ):
-        assert builder._coordinate_source_sha256(pdb_path) == trusted_sha
-        hash_file.assert_not_called()
-
-    with patch.object(builder_ca_cache, "_load_pdb_cache_metadata", return_value=None):
-        assert (
-            builder._coordinate_source_sha256(pdb_path)
-            == hashlib.sha256(b"fixture").hexdigest()
-        )
+    stat = pdb_path.stat()
+    stale_metadata = {
+        "sha256": "a" * 64,
+        "size_bytes": stat.st_size,
+        "mtime_ns": stat.st_mtime_ns,
+    }
+    pdb_path.with_suffix(".pdb.cache.json").write_text(
+        json.dumps(stale_metadata), encoding="utf-8"
+    )
+    assert (
+        builder._coordinate_source_sha256(pdb_path)
+        == hashlib.sha256(b"fixture").hexdigest()
+    )
 
 
 def test_first_model_ca_cache_roundtrip_supports_empty_and_coordinate_less_chains(

@@ -2,6 +2,8 @@
 
 import src.dataset.ca_cache as dataset_ca_cache
 
+import hashlib
+import json
 import os
 import tempfile
 import time
@@ -14,6 +16,7 @@ from unittest.mock import patch
 import numpy as np
 
 import src.pdb_dataset_builder as builder
+from src.dataset.cache import _pdb_cache_metadata_path
 
 
 def _ca_line(
@@ -178,6 +181,32 @@ class XrayCaCacheTests(unittest.TestCase):
         np.testing.assert_allclose(initial_coords[1], [1.0, 2.0, 3.0])
         np.testing.assert_allclose(refreshed_coords[1], [9.0, 2.0, 3.0])
         self.assertEqual(parse_source.call_count, 1)
+
+    def test_same_stat_edit_with_cache_sidecar_invalidates_parsed_coordinates(
+        self,
+    ) -> None:
+        """Hash the source bytes even when a download sidecar records a SHA-256."""
+        stat = self.pdb_path.stat()
+        _pdb_cache_metadata_path(self.pdb_path).write_text(
+            json.dumps(
+                {
+                    "sha256": hashlib.sha256(self.pdb_path.read_bytes()).hexdigest(),
+                    "size_bytes": stat.st_size,
+                    "mtime_ns": stat.st_mtime_ns,
+                }
+            ),
+            encoding="utf-8",
+        )
+        builder.load_cached_first_model_ca_data(self.pdb_path, "A")
+
+        _write_fixture(self.pdb_path, first_x=9.0)
+        os.utime(self.pdb_path, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+        self.assertEqual(self.pdb_path.stat().st_size, stat.st_size)
+        _, refreshed_coords = builder.load_cached_first_model_ca_data(
+            self.pdb_path, "A"
+        )
+
+        np.testing.assert_allclose(refreshed_coords[1], [9.0, 2.0, 3.0])
 
     def test_corrupt_cache_is_treated_as_a_miss_and_replaced(self) -> None:
         """Recover from a truncated cache without leaking the parse error."""

@@ -1,7 +1,9 @@
 """Tests for safe PDB and mmCIF coordinate-file caching."""
 
 import gzip
+import hashlib
 import json
+import os
 import tempfile
 import threading
 import time
@@ -12,6 +14,7 @@ from unittest.mock import patch
 
 import requests
 
+from src.dataset.downloads import _load_valid_cached_chain_subset
 from src.pdb_dataset_builder import (
     DatasetBuildConfig,
     _download_mmcif_if_needed,
@@ -141,6 +144,18 @@ def _compressed_pdb(program: str) -> bytes:
 def _compressed_mmcif(entry_id: str = "1ABC") -> bytes:
     """Return gzipped minimal mmCIF content for ``entry_id``."""
     return gzip.compress((f"data_{entry_id}\n#\n_entry.id 1ABC\n#\n").encode("utf-8"))
+
+
+def _replace_keeping_size_and_mtime(path: Path, old: bytes, new: bytes) -> None:
+    """Edit cached bytes while restoring the size and mtime recorded in its sidecar."""
+    assert len(old) == len(new)
+    stat = path.stat()
+    content = path.read_bytes()
+    assert old in content
+    path.write_bytes(content.replace(old, new, 1))
+    os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+    assert path.stat().st_size == stat.st_size
+    assert path.stat().st_mtime_ns == stat.st_mtime_ns
 
 
 class SafePDBCacheTests(unittest.TestCase):
@@ -296,6 +311,131 @@ class SafePDBCacheTests(unittest.TestCase):
         self.assertEqual(len(session.calls), 2)
         self.assertIn("PROGRAM     : CNS", first_path.read_text(encoding="utf-8"))
         self.assertIn("PROGRAM     : CYANA", second_path.read_text(encoding="utf-8"))
+
+    def test_same_stat_edit_inside_interval_is_downloaded_again(self) -> None:
+        """Compare the SHA-256 on a fresh cache hit, not only size and mtime."""
+        session = _FakeSession(
+            [
+                _FakeResponse(200, _compressed_pdb("CNS"), {"ETag": '"v1"'}),
+                _FakeResponse(200, _compressed_pdb("CNS"), {"ETag": '"v1"'}),
+            ]
+        )
+        config = DatasetBuildConfig(retries=1, pdb_cache_validation_hours=24)
+        path = download_pdb_if_needed(
+            session=session,  # type: ignore[arg-type]
+            config=config,
+            cache_dir=self.cache_dir,
+            entry_id="1ABC",
+        )
+        original_bytes = path.read_bytes()
+        _replace_keeping_size_and_mtime(path, b"CNS", b"XYZ")
+
+        download_pdb_if_needed(
+            session=session,  # type: ignore[arg-type]
+            config=config,
+            cache_dir=self.cache_dir,
+            entry_id="1ABC",
+        )
+
+        self.assertEqual(len(session.calls), 2)
+        self.assertEqual(session.calls[1]["headers"], {})
+        self.assertEqual(path.read_bytes(), original_bytes)
+
+    def test_same_stat_edit_is_not_revalidated_by_304(self) -> None:
+        """Do not let a not-modified reply bless a locally changed file."""
+        session = _FakeSession(
+            [
+                _FakeResponse(200, _compressed_pdb("CNS"), {"ETag": '"v1"'}),
+                _FakeResponse(200, _compressed_pdb("CNS"), {"ETag": '"v1"'}),
+            ]
+        )
+        config = DatasetBuildConfig(retries=1, pdb_cache_validation_hours=0)
+        path = download_pdb_if_needed(
+            session=session,  # type: ignore[arg-type]
+            config=config,
+            cache_dir=self.cache_dir,
+            entry_id="1ABC",
+        )
+        original_bytes = path.read_bytes()
+        _replace_keeping_size_and_mtime(path, b"CNS", b"XYZ")
+
+        download_pdb_if_needed(
+            session=session,  # type: ignore[arg-type]
+            config=config,
+            cache_dir=self.cache_dir,
+            entry_id="1ABC",
+        )
+
+        self.assertEqual(session.calls[1]["headers"], {})
+        self.assertEqual(path.read_bytes(), original_bytes)
+
+    def test_same_stat_mmcif_edit_is_downloaded_again(self) -> None:
+        """Apply the checksum comparison to cached mmCIF files as well."""
+        session = _FakeSession(
+            [
+                _FakeResponse(200, _compressed_mmcif(), {"ETag": '"v1"'}),
+                _FakeResponse(200, _compressed_mmcif(), {"ETag": '"v1"'}),
+            ]
+        )
+        config = DatasetBuildConfig(retries=1, pdb_cache_validation_hours=24)
+        path = _download_mmcif_if_needed(
+            session=session,  # type: ignore[arg-type]
+            config=config,
+            cache_dir=self.cache_dir,
+            entry_id="1ABC",
+        )
+        original_bytes = path.read_bytes()
+        _replace_keeping_size_and_mtime(path, b"data_1ABC", b"data_9XYZ")
+
+        _download_mmcif_if_needed(
+            session=session,  # type: ignore[arg-type]
+            config=config,
+            cache_dir=self.cache_dir,
+            entry_id="1ABC",
+        )
+
+        self.assertEqual(len(session.calls), 2)
+        self.assertEqual(path.read_bytes(), original_bytes)
+
+    def test_same_stat_chain_subset_edit_is_not_reused(self) -> None:
+        """Reject a cached chain subset whose bytes differ from its checksum."""
+        cif_path = self.cache_dir / "4W2E.cif"
+        cif_path.write_text("data_4W2E\n#\n", encoding="utf-8")
+        cif_path.with_suffix(".cif.cache.json").write_text(
+            json.dumps({"sha256": "c" * 64}), encoding="utf-8"
+        )
+        subset_path = self.cache_dir / "4W2E.chains-A.pdb"
+        subset_path.write_text(
+            "ATOM      1  CA  ALA A   1       0.000   0.000   0.000"
+            "  1.00 20.00           C  \nEND\n",
+            encoding="utf-8",
+        )
+        stat = subset_path.stat()
+        subset_path.with_suffix(".pdb.cache.json").write_text(
+            json.dumps(
+                {
+                    "source_cif_sha256": "c" * 64,
+                    "chain_ids": ["A"],
+                    "chain_id_map": {"A": "A"},
+                    "sha256": hashlib.sha256(subset_path.read_bytes()).hexdigest(),
+                    "size_bytes": stat.st_size,
+                    "mtime_ns": stat.st_mtime_ns,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        def load() -> tuple[Path, dict[str, str]] | None:
+            """Try to reuse the cached one-chain subset."""
+            return _load_valid_cached_chain_subset(
+                subset_path=subset_path,
+                cif_path=cif_path,
+                selected_chain_ids={"A"},
+            )
+
+        self.assertEqual(load(), (subset_path, {"A": "A"}))
+        _replace_keeping_size_and_mtime(subset_path, b"ALA", b"GLY")
+        self.assertIsNone(load())
 
     def test_stale_metadata_uses_conditional_get_and_accepts_304(self) -> None:
         """Revalidate stale data conditionally and accept not-modified responses."""

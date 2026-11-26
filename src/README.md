@@ -77,11 +77,18 @@ X-ray calculations can instead convert only requested mmCIF chains, retaining
 an author-chain mapping. Converted coordinates preserve NMR software metadata.
 All coordinate consumers use the same conformer normalization described below.
 
-Coordinate validation checks checksums and remote validators, with a default
-24-hour interval. Chain subsets additionally require matching source hashes and
-requested chains. First-model X-ray CA records are reused only while the source
-PDB hash matches. Updates are atomic and locked per PDB entry, including between
-processes on POSIX.
+Each access to a cached RCSB coordinate file (PDB, mmCIF or chain subset)
+compares its size, modification time and SHA-256 with the values recorded when
+it was saved. A file that does not match is not used: it is downloaded again or,
+for a chain subset, rebuilt from the cached mmCIF. After 24 hours by default, a
+downloaded file is revalidated with its source using the stored
+`ETag`/`Last-Modified`; it is downloaded again when neither is stored or when the
+PDB was converted from mmCIF. Chain subsets follow the revalidation of their
+source mmCIF. If no source responds, the access fails. Chain subsets
+additionally require the recorded SHA-256 of their source mmCIF and the
+requested chains to match. First-model X-ray CA records are reused only while
+the SHA-256 of the source PDB matches. Updates are atomic and locked per PDB
+entry, including between processes on POSIX.
 
 Each primary `name.csv` has a warning/error log `name.log` and an exclusion
 table `name_filtered.csv` containing `entry_id`, deposition `year` and `reason`.
