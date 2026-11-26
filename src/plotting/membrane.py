@@ -31,7 +31,7 @@ RESIDUE_MAP_TICKS = (0, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000)
 
 
 def residue_map_axis_limit(maximum):
-    """Upper limit of both residue-map axes: the first major tick of at least 10 above `maximum`."""
+    """Upper limit of both residue-map axes: the first major tick that is at least 10 and above `maximum`."""
     return next(tick for tick in RESIDUE_MAP_TICKS if tick >= RESIDUE_MAP_LINTHRESH and tick > maximum)
 
 
