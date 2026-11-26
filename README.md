@@ -25,7 +25,7 @@ figures for the accompanying article. Plots include deposition years through
 
 ## Requirements
 
-- Python 3.10 or newer and network access.
+- Python 3.10 (the tested version) and network access.
 - Sufficient disk space for downloaded coordinates and calculations; a full
   build can require about 100 GiB.
 - Figures 3–7: STRIDE, or Git, GNU Make and a C compiler for its automatic
