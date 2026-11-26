@@ -646,12 +646,15 @@ d_eh = RMSD_superposed(NMR_e,model1, Xray_h,model1)
 The coordinates are centered and optimally superposed before RMSD is calculated
 in Å.
 
-If one chain has several exact matching windows, the window with the lowest RMSD
-is used. Within an entity, the chain with the most CA pairs is selected, using
-lower RMSD to break a tie. The ordinary CSV then keeps the first usable candidate
-after sorting known resolutions from lowest to highest, followed by entry and
-entity ID; missing resolutions sort last. It is not replaced by the minimum-RMSD
-candidate used by `*_extremes`.
+A matching window is usable only if every matched CA has first-model
+coordinates. If one chain has several usable windows, the window with the lowest
+RMSD is used. Within an entity, chains are ranked by the number of CA pairs and
+then by lower RMSD. Every window pairs the same NMR CA positions (the full core
+or its secondary-structure subset), so the CA-pair counts are equal and the
+chain with the lowest RMSD is used. The ordinary CSV then keeps the first usable
+candidate after sorting known resolutions from lowest to highest, followed by
+entry and entity ID; missing resolutions sort last. It is not replaced by the
+minimum-RMSD candidate used by `*_extremes`.
 
 When several RMSD variants are selected together, all usable candidate pairs are
 computed once per NMR entry. Historical outputs filter that shared set to
@@ -693,7 +696,8 @@ Y_y = median_{e: year(e)=y}(d_e,min).
 The precision-correlation plot compares `d_e,min` with ensemble precision `P`.
 An entry is written only if at least one candidate produces a usable RMSD. The
 minimum and maximum are computed after the per-entity chain selection described
-above.
+above, so `d_e,max` is the largest per-entity minimum, not the maximum over
+all chains or windows.
 
 Output:
 
