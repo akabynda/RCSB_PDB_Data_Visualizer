@@ -7,6 +7,7 @@ from pathlib import Path
 
 import numpy as np
 
+from ..dataset.arguments import DefaultsHelpFormatter
 from .cli_options.count_output import add_count_output_arguments
 from .cli_options.homolog_output import add_homolog_output_arguments
 from .cli_options.input import add_input_arguments
@@ -88,6 +89,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Plot publication-ready figures from PDB CSV datasets.",
         parents=[selection_parser],
+        formatter_class=DefaultsHelpFormatter,
     )
     parser.add_argument(
         "--plots",

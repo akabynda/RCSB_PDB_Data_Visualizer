@@ -14,6 +14,30 @@ from src.dataset.config import (
 )
 
 
+class DefaultsHelpFormatter(argparse.HelpFormatter):
+    """Append option defaults to help text, skipping unset values and flags."""
+
+    def _get_help_string(self, action: argparse.Action) -> str:
+        help_text = action.help or ""
+        default = action.default
+        # Flags, unset values and help that already states its default are
+        # left unchanged; lists print their enum values, not reprs.
+        if (
+            not action.option_strings
+            or "(default:" in help_text
+            or default is None
+            or default is argparse.SUPPRESS
+            or isinstance(default, bool)
+            or default in ("", [])
+        ):
+            return help_text
+        if isinstance(default, (list, tuple)):
+            shown = ", ".join(str(getattr(item, "value", item)) for item in default)
+        else:
+            shown = str(default)
+        return f"{help_text} (default: {shown.replace('%', '%%')})"
+
+
 def parse_dataset_kinds(raw_value: str) -> list[DatasetKind]:
     """Parse comma-separated dataset names into DatasetKind values."""
     if raw_value.strip().lower() == "all":
@@ -53,7 +77,8 @@ def parse_dataset_kinds(raw_value: str) -> list[DatasetKind]:
 def parse_args() -> argparse.Namespace:
     """Parse command-line arguments for the builder CLI."""
     parser = argparse.ArgumentParser(
-        description="Collect extensible PDB datasets from RCSB APIs."
+        description="Collect extensible PDB datasets from RCSB APIs.",
+        formatter_class=DefaultsHelpFormatter,
     )
     parser.add_argument(
         "--datasets",
