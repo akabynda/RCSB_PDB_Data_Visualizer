@@ -112,11 +112,23 @@ def test_blank_opm_chain_maps_only_onto_a_single_deposited_chain():
 
 
 def test_polymer_hetatm_counts_but_ligand_does_not():
-    text = atom(1) + atom(1, atom_name='N') + atom(2, atom_name='N') + atom(3, name='MSE', kind='HETATM') + atom(4, name='HOH', kind='HETATM')
+    text = atom(1) + atom(1, atom_name='N') + atom(2, atom_name='N') + atom(2) + atom(3, name='MSE', kind='HETATM') + atom(4, name='HOH', kind='HETATM')
     metadata = PDBPolymerMetadata(seqres_by_chain={'A': {'ALA', 'MSE'}})
     rows = collect_modeled_residues(text, [chain('label', 'original')], metadata, {'original': 'A'})
     assert [row['auth_seq_id'] for row in rows] == [1, 2, 3]
     assert rows[0]['auth_asym_id'] == 'original'
+
+
+def test_positions_without_a_positive_occupancy_carbon_ca_are_not_residues():
+    unoccupied = atom(3)
+    unoccupied = unoccupied[:54] + f'{0.:6.2f}' + unoccupied[60:]
+    text = (atom(1, name='ACE', kind='HETATM', atom_name='CH3') + atom(1, name='ACE', kind='HETATM', atom_name='C')
+            + atom(2, atom_name='N') + atom(2) + unoccupied + atom(3, atom_name='N')
+            + atom(4, atom_name='CA', element='CA') + atom(5, name='NH2', kind='HETATM', atom_name='N'))
+    metadata = PDBPolymerMetadata(seqres_by_chain={'A': {'ACE', 'ALA', 'NH2'}})
+    rows = collect_modeled_residues(text, [chain()], metadata, {})
+    # Terminal caps (ACE, NH2), a zero-occupancy CA and a calcium-element CA give no position.
+    assert [row['auth_seq_id'] for row in rows] == [2]
 
 
 def counted(entity, modeled, membrane):

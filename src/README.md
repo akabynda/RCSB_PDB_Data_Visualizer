@@ -320,16 +320,17 @@ absolute z of these atoms; two planes must agree within 0.001 Å. The `REMARK`
 value is not used because it is rounded, sometimes repeated and absent from some
 files. Only the first model of a multi-model OPM file is read.
 
-**Residue counts.** The deposited first model defines the protein residues, using
-PDB chain IDs, author numbers and insertion codes; polymer HETATM membership
-follows the shared coordinate rules. These keys are matched to the OPM file, so
-its ligands, ions and solvent are ignored and counted in
-`opm_unmatched_residue_count`. A blank OPM chain ID is accepted only for one
-deposited chain. For a residue with `n` heavy atoms, `z̄ = (1/n) Σ z`, using the
-first record of each atom regardless of altLoc and occupancy; the residue name
-comes from its first heavy-atom record. The residue is in the membrane if
-`|z̄| ≤ D`. Over residues present in the OPM file, `N_membrane` counts these
-residues, `N_other = N_modeled - N_membrane` and
+**Residue counts.** The deposited first model defines the protein residues: its
+[modeled CA positions](#modeled-part), keyed by PDB chain IDs, author numbers and
+insertion codes. Terminal caps such as ACE and NH2 have no CA and are not
+residues. These keys are matched to the OPM file; its ligands, ions, solvent and
+residues at positions without a modeled CA, such as caps, are ignored and
+counted in `opm_unmatched_residue_count`. A blank OPM chain ID is accepted only
+for one deposited chain. For a residue with `n` heavy atoms, `z̄ = (1/n) Σ z`,
+using the first record of each atom regardless of altLoc and occupancy; the
+residue name comes from its first heavy-atom record. The residue is in the
+membrane if `|z̄| ≤ D`. Over residues present in the OPM file, `N_membrane`
+counts these residues, `N_other = N_modeled - N_membrane` and
 `f_membrane = N_membrane / N_modeled`. `opm_modeled_residue_count` is `N_modeled`.
 Deposited residues absent from the OPM file have no position and are excluded;
 `opm_absent_residue_count` records them. `opm_residue_name_conflict_count`

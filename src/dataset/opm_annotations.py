@@ -3,6 +3,7 @@
 from collections import defaultdict
 from fractions import Fraction
 
+from src.dataset.coordinates import _parse_first_model_ca_line_fields
 from src.dataset.pdb_normalization import pdb_atom_field_offset
 
 OPM_SUMMARY_COLUMNS = (
@@ -30,7 +31,11 @@ OPM_PLANE_ATOL = 1e-3
 
 
 def collect_modeled_residues(model_text, chain_rows, polymer_metadata, chain_id_map):
-    """List each deposited protein residue with coordinates once, preserving author keys."""
+    """List each deposited protein residue with a modeled CA once, preserving author keys.
+
+    As in the shared coordinate rules, a position needs a positive-occupancy
+    carbon CA; terminal caps such as ACE and NH2 have none and are not residues.
+    """
     chain_lookup = {}
     for chain in chain_rows:
         auth_id = chain["auth_asym_id"]
@@ -40,7 +45,7 @@ def collect_modeled_residues(model_text, chain_rows, polymer_metadata, chain_id_
         if pdb_chain in chain_lookup:
             raise ValueError(f"Ambiguous PDB chain mapping: {pdb_chain}")
         chain_lookup[pdb_chain] = chain
-    residues = {}
+    residues, with_ca = {}, set()
     for line in model_text.splitlines():
         if not line.startswith(("ATOM  ", "HETATM")):
             continue
@@ -61,7 +66,10 @@ def collect_modeled_residues(model_text, chain_rows, polymer_metadata, chain_id_
         })
         if row["residue_name"] != name:
             raise ValueError(f"Conflicting residue names at {key}")
-    return list(residues.values())
+        ca = _parse_first_model_ca_line_fields(line, polymer_metadata)
+        if ca is not None and ca[4] > 0:
+            with_ca.add(key)
+    return [row for key, row in residues.items() if key in with_ca]
 
 
 def _is_heavy_atom(line, atom_name):
@@ -125,8 +133,8 @@ def _summarize(rows):
 def count_membrane_residues(deposited, positions, half_thickness, chain_rows):
     """Match deposited residues to OPM positions; |mean z| <= D places one in the membrane.
 
-    Matching by chain, author number and insertion code ignores OPM ligands, ions
-    and solvent. A blank OPM chain ID is accepted only for one deposited chain.
+    Matching by chain, author number and insertion code ignores OPM ligands, ions,
+    solvent and residues at positions without a modeled CA. A blank OPM chain ID is accepted only for one deposited chain.
     Isolated name conflicts (mutations, modified residues) are only recorded; when
     they are the majority, the file holds another sequence and yields no counts.
     """
