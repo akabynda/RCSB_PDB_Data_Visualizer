@@ -50,7 +50,10 @@ def run_program_clusters(
     args: argparse.Namespace, client: RCSBClient, config: DatasetBuildConfig
 ) -> None:
     """Build program cluster assignments and quality summaries."""
-    quality_input_path = Path(args.solution_nmr_monomer_program_cluster_input)
+    quality_input_path = Path(
+        args.solution_nmr_monomer_program_cluster_input
+        or args.solution_nmr_monomer_quality_output
+    )
     _import_filtered_structures(quality_input_path)
     quality_records = read_solution_nmr_monomer_quality_csv(quality_input_path)
     if not quality_records:

@@ -71,6 +71,10 @@ Required inputs:
 | Current X-ray RMSD variants | Current homolog dataset at the selected cutoff |
 | Historical X-ray RMSD variants | Historical homolog dataset at the selected cutoff |
 
+A derived dataset reads its required dataset from that dataset's output path
+option. Program clusters read `--solution-nmr-monomer-program-cluster-input`
+instead when it is given.
+
 Coordinate downloads try RCSB, wwPDB, PDBe and the EBI archive. A failed native
 PDB download with at least one HTTP 404 permits an RCSB mmCIF conversion fallback.
 X-ray calculations can instead convert only requested mmCIF chains, retaining

@@ -266,10 +266,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--solution-nmr-monomer-program-cluster-input",
         type=Path,
-        default=Path("data/solution_nmr_monomer_quality_metrics.csv"),
+        default=None,
         help=(
             "Input CSV path for solution_nmr_monomer_program_clusters dataset. "
-            "Expected format: solution_nmr_monomer_quality_metrics.csv."
+            "Expected format: solution_nmr_monomer_quality_metrics.csv. "
+            "(default: --solution-nmr-monomer-quality-output)"
         ),
     )
     parser.add_argument(
