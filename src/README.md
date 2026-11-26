@@ -635,7 +635,9 @@ the historical input. The coordinate calculation requires an exact core match
 at either cutoff. Default inputs are
 `data/solution_nmr_monomer_xray_homologs_<cutoff>.csv` or
 `data/solution_nmr_monomer_xray_homologs_<cutoff>_historical.csv`.
-Use separate output paths to retain both cutoff runs.
+Use separate output paths to retain both cutoff runs. Input entries without
+X-ray homologs in that view, or without a core range, are listed in each
+output's `_filtered.csv`.
 
 Computes CA RMSD between an NMR STRIDE core and an exactly matching HETATM-free
 X-ray region. It uses at least three matched `ATOM` CA pairs from the first NMR

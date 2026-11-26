@@ -433,6 +433,26 @@ def build_solution_nmr_monomer_xray_rmsd_outputs_to_csv(
         )
         existing_records_by_output[output_name] = existing
         existing_entry_ids = set(existing_by_entry_id)
+        _set_active_dataset_filtered_csvs((output_path,))
+        for record in sorted(
+            homolog_maps[view].values(), key=lambda r: (r.year, r.entry_id)
+        ):
+            if record.entry_id in existing_entry_ids:
+                continue
+            if (
+                record.nmr_core_start_seq_id is None
+                or record.nmr_core_end_seq_id is None
+            ):
+                _record_filtered_structure(
+                    record.entry_id, "NMR core range is missing", year=record.year
+                )
+            elif not record.xray_homolog_entity_ids:
+                _record_filtered_structure(
+                    record.entry_id,
+                    f"no X-ray homologs at {sequence_identity_percent}% sequence "
+                    f"identity in the {view} homolog view",
+                    year=record.year,
+                )
         eligible_missing = sorted(
             (
                 record

@@ -1,7 +1,9 @@
 """Tests for projecting shared X-ray RMSD candidate calculations."""
 
+import csv
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -10,11 +12,14 @@ from src.pdb_dataset_builder import (
     RCSBClient,
     SolutionNMRMonomerXrayHomologRecord,
     SolutionNMRMonomerXrayRmsdBuilder,
+    DatasetKind,
     SolutionNMRMonomerXrayRmsdRecord,
     _build_xray_rmsd_extremes_record_from_candidates,
+    _configure_dataset_filtered_csvs,
     _select_ordinary_xray_rmsd_record,
     _set_active_dataset_filtered_csvs,
     build_solution_nmr_monomer_xray_rmsd_outputs_to_csv,
+    filtered_structures_csv_path,
     read_solution_nmr_monomer_xray_rmsd_csv,
     read_solution_nmr_monomer_xray_rmsd_extremes_csv,
     write_solution_nmr_monomer_xray_homolog_csv,
@@ -77,6 +82,18 @@ class CombinedXrayRmsdProjectionTests(unittest.TestCase):
     def tearDown(self) -> None:
         """Prevent coordinator output routing from leaking into another test."""
         _set_active_dataset_filtered_csvs(())
+        _configure_dataset_filtered_csvs({})
+
+    @staticmethod
+    def _filtered_rows(output_path: Path) -> list[tuple[str, str, str]]:
+        """Read one output's exclusion table as (entry, year, reason) tuples."""
+        with filtered_structures_csv_path(output_path).open(
+            newline="", encoding="utf-8"
+        ) as csvfile:
+            return [
+                (row["entry_id"], row["year"], row["reason"])
+                for row in csv.DictReader(csvfile)
+            ]
 
     @staticmethod
     def _run_outputs_coordinator(
@@ -277,6 +294,75 @@ class CombinedXrayRmsdProjectionTests(unittest.TestCase):
             self.assertEqual(historical_extremes.best_xray_homolog_entity_id, "3CCC_1")
             self.assertEqual(historical_extremes.worst_xray_homolog_entity_id, "2BBB_1")
             self.assertEqual(historical_extremes.xray_homolog_count, 2)
+
+    def test_entries_without_rmsd_work_are_recorded_per_view(self) -> None:
+        """Explain homolog entries that no RMSD output can compute."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            current_input = root / "current_homologs.csv"
+            historical_input = root / "historical_homologs.csv"
+            outputs = {
+                name: root / f"{name}.csv"
+                for name in ("ordinary", "ordinary_historical", "extremes")
+            }
+            no_homolog = replace(_homolog_record(()), entry_id="2NOH")
+            no_core = replace(
+                _homolog_record(("1AAA_1",)),
+                entry_id="3NOC",
+                nmr_core_start_seq_id=None,
+                nmr_core_end_seq_id=None,
+            )
+            write_solution_nmr_monomer_xray_homolog_csv(
+                [_homolog_record(("1AAA_1",)), no_homolog, no_core], current_input
+            )
+            write_solution_nmr_monomer_xray_homolog_csv(
+                [
+                    _homolog_record(("1AAA_1",)),
+                    no_homolog,
+                    replace(
+                        no_core, xray_homolog_entry_ids=(), xray_homolog_entity_ids=()
+                    ),
+                ],
+                historical_input,
+            )
+            _configure_dataset_filtered_csvs(
+                {DatasetKind.SOLUTION_NMR_MONOMER_XRAY_RMSD: tuple(outputs.values())}
+            )
+            candidates = (_candidate_record("1AAA_1", rmsd=1.0, resolution=1.0),)
+
+            with patch.object(
+                SolutionNMRMonomerXrayRmsdBuilder,
+                "build_candidate_sets",
+                autospec=True,
+                side_effect=self._candidate_set_side_effect(candidates),
+            ):
+                self._run_outputs_coordinator(
+                    root=root,
+                    current_input=current_input,
+                    historical_input=historical_input,
+                    ordinary_output=outputs["ordinary"],
+                    historical_ordinary_output=outputs["ordinary_historical"],
+                    extremes_output=outputs["extremes"],
+                    historical_extremes_output=None,
+                )
+
+            for name, view in (
+                ("ordinary", "current"),
+                ("ordinary_historical", "historical"),
+                ("extremes", "current"),
+            ):
+                self.assertEqual(
+                    self._filtered_rows(outputs[name]),
+                    [
+                        (
+                            "2NOH",
+                            "2001",
+                            "no X-ray homologs at 100% sequence identity "
+                            f"in the {view} homolog view",
+                        ),
+                        ("3NOC", "2001", "NMR core range is missing"),
+                    ],
+                )
 
     def test_historical_only_does_not_require_current_homolog_path(self) -> None:
         """Build a historical output when no current homolog input is supplied."""
