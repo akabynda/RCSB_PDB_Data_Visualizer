@@ -728,8 +728,10 @@ The homolog-timing plot also exports yearly counts. Membrane exports are
 specified in the [dataset reference](#solution_nmr_membrane_proteins).
 
 For the median precision plot,
-`--nmr-monomer-precision-secondary-structure-input PATH` adds core/secondary-
-structure comparisons while `--rmsd-residue-selection` remains `core`. The
+`--nmr-monomer-precision-secondary-structure-input PATH` requires
+`--rmsd-residue-selection core` and writes core/secondary-structure comparisons
+instead of the ordinary Figure 4 files; a run without the option creates or
+refreshes the ordinary files. Existing outputs are not removed. The
 second input is built with the builder's `secondary-structure` selection.
 Comparisons join entries by `entry_id`; the yearly curve uses the original core
 sample. Histograms use 0.1 Å bins below 3 Å and one `≥3 Å` category. Their shared
@@ -737,4 +739,6 @@ table keeps unrounded RMSDs in Å, deposition year, chain/core boundaries and
 model/CA counts, sorted by decreasing core RMSD. Both RMSDs use the ensemble
 precision formula above. The comparison outputs use the suffixes
 `_with_histogram`, `_comparison_panels` and `_histogram`; the shared CSV is saved
-beside the standalone histogram.
+beside the standalone histogram. Histograms keep a closed frame in every
+variant: open-axes variants open only the trend axes, that is the
+`_with_histogram` main plot and `_comparison_panels` panel A.
