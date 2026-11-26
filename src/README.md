@@ -75,7 +75,9 @@ Coordinate downloads try RCSB, wwPDB, PDBe and the EBI archive. A failed native
 PDB download with at least one HTTP 404 permits an RCSB mmCIF conversion fallback.
 X-ray calculations can instead convert only requested mmCIF chains, retaining
 an author-chain mapping. Converted coordinates preserve NMR software metadata.
-All coordinate consumers use the same conformer normalization described below.
+All consumers of these coordinates use the same conformer normalization
+described below. OPM coordinate files are not normalized; see
+[`solution_nmr_membrane_proteins`](#solution_nmr_membrane_proteins).
 
 Each access to a cached RCSB coordinate file (PDB, mmCIF or chain subset)
 compares its size, modification time and SHA-256 with the values recorded when
@@ -321,7 +323,8 @@ follows the shared coordinate rules. These keys are matched to the OPM file, so
 its ligands, ions and solvent are ignored and counted in
 `opm_unmatched_residue_count`. A blank OPM chain ID is accepted only for one
 deposited chain. For a residue with `n` heavy atoms, `z̄ = (1/n) Σ z`, using the
-first alternate position of each atom. The residue is in the membrane if
+first record of each atom regardless of altLoc and occupancy; the residue name
+comes from its first heavy-atom record. The residue is in the membrane if
 `|z̄| ≤ D`. Over residues present in the OPM file, `N_membrane` counts these
 residues, `N_other = N_modeled - N_membrane` and
 `f_membrane = N_membrane / N_modeled`. `opm_modeled_residue_count` is `N_modeled`.
