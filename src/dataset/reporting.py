@@ -10,6 +10,7 @@ from threading import Lock
 from typing import TYPE_CHECKING, Any
 
 from src.dataset.io.common import (
+    _atomic_write_csv_rows,
     write_csv_rows,
 )
 
@@ -29,6 +30,9 @@ _FILTERED_STRUCTURE_ROWS_BY_OUTPUT: dict[Path, dict[tuple[str, str], str]] = {}
 
 
 _FILTERED_STRUCTURE_PATHS_BY_ENTRY_ID: dict[str, frozenset[Path]] = {}
+
+
+_DEFERRED_FILTERED_CSV_PATHS: frozenset[Path] = frozenset()
 
 
 _FILTERED_STRUCTURE_CSV_LOCK = Lock()
@@ -81,13 +85,19 @@ def filtered_structures_csv_path(output_path: Path) -> Path:
 def _configure_dataset_filtered_csvs(
     output_paths_by_dataset: dict[DatasetKind, tuple[Path, ...]],
     preserve_existing_output_paths: Iterable[Path] = (),
+    deferred_output_paths: Iterable[Path] = (),
 ) -> None:
-    """Create fresh per-output CSV reports for structures rejected by filters."""
-    global _FILTERED_STRUCTURE_ROWS_BY_OUTPUT
+    """Create fresh per-output CSV reports for structures rejected by filters.
+
+    Reports of ``deferred_output_paths`` stay in memory and keep their old file
+    until ``_publish_filtered_structures_csv`` replaces it.
+    """
+    global _FILTERED_STRUCTURE_ROWS_BY_OUTPUT, _DEFERRED_FILTERED_CSV_PATHS
     output_paths = {
         Path(path) for paths in output_paths_by_dataset.values() for path in paths
     }
     preserved_paths = {Path(path) for path in preserve_existing_output_paths}
+    deferred_paths = frozenset(Path(path) for path in deferred_output_paths)
     with _FILTERED_STRUCTURE_CSV_LOCK:
         rows_by_output: dict[Path, dict[tuple[str, str], str]] = {}
         for output_path in sorted(output_paths, key=str):
@@ -102,6 +112,8 @@ def _configure_dataset_filtered_csvs(
                         if entry_id and reason:
                             existing_rows[(entry_id, reason)] = year
             rows_by_output[output_path] = existing_rows
+            if output_path in deferred_paths:
+                continue
             write_csv_rows(
                 output_path=filtered_path,
                 header=("entry_id", "year", "reason"),
@@ -111,6 +123,33 @@ def _configure_dataset_filtered_csvs(
                 ),
             )
         _FILTERED_STRUCTURE_ROWS_BY_OUTPUT = rows_by_output
+        _DEFERRED_FILTERED_CSV_PATHS = deferred_paths
+
+
+def _defer_filtered_structures_csv(output_path: Path) -> None:
+    """Collect a report in memory from now on, leaving its old file in place."""
+    global _DEFERRED_FILTERED_CSV_PATHS
+    output_path = Path(output_path)
+    with _FILTERED_STRUCTURE_CSV_LOCK:
+        _FILTERED_STRUCTURE_ROWS_BY_OUTPUT[output_path] = {}
+        _DEFERRED_FILTERED_CSV_PATHS = _DEFERRED_FILTERED_CSV_PATHS | {output_path}
+
+
+def _publish_filtered_structures_csv(output_path: Path) -> Path:
+    """Atomically write a report's recorded rows and return the report path."""
+    output_path = Path(output_path)
+    filtered_path = filtered_structures_csv_path(output_path)
+    with _FILTERED_STRUCTURE_CSV_LOCK:
+        rows = _FILTERED_STRUCTURE_ROWS_BY_OUTPUT.get(output_path, {})
+        _atomic_write_csv_rows(
+            output_path=filtered_path,
+            header=("entry_id", "year", "reason"),
+            rows=[
+                (entry_id, year, reason)
+                for (entry_id, reason), year in sorted(rows.items())
+            ],
+        )
+    return filtered_path
 
 
 def _keep_filtered_structures_for_entries(
@@ -171,6 +210,8 @@ def _record_filtered_structure(
             if existing_year is not None:
                 if not existing_year and normalized_year:
                     rows[key] = normalized_year
+                    if output_path in _DEFERRED_FILTERED_CSV_PATHS:
+                        continue
                     filtered_path = filtered_structures_csv_path(output_path)
                     write_csv_rows(
                         output_path=filtered_path,
@@ -184,12 +225,14 @@ def _record_filtered_structure(
                         ),
                     )
                 continue
+            rows[key] = normalized_year
+            if output_path in _DEFERRED_FILTERED_CSV_PATHS:
+                continue
             filtered_path = filtered_structures_csv_path(output_path)
             with filtered_path.open("a", newline="", encoding="utf-8") as csvfile:
                 csv.writer(csvfile).writerow(
                     (normalized_entry_id, normalized_year, normalized_reason)
                 )
-            rows[key] = normalized_year
 
 
 def _import_filtered_structures(input_dataset_path: Path) -> None:

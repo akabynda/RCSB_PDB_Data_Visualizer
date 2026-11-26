@@ -80,6 +80,9 @@ def test_cohort_workflow_cache_replay_and_default_filter(monkeypatch, tmp_path):
         assert manifest["summary"]["annotation_source_entry_counts"] == {
             "OPM": 1, "PDBTM": 0, "MemProtMD": 0, "mpstruc": 0,
         }
+        assert manifest["outputs"]["filtered"]["path"] == str(
+            (tmp_path / "cohort_filtered.csv").resolve()
+        )
         for output in manifest["outputs"].values():
             assert _sha256_file(Path(output["path"])) == output["sha256"]
         for source in manifest["sources"]:
@@ -110,6 +113,41 @@ def test_failed_fetch_does_not_publish_empty_success(monkeypatch, tmp_path):
     assert args.solution_nmr_membrane_output.read_text() == "previous result\n"
     assert not (tmp_path / "cohort_manifest.json").exists()
     _set_active_dataset_filtered_csvs(())
+
+
+def test_direct_run_publishes_its_own_exclusions(monkeypatch, tmp_path):
+    args = _args(monkeypatch, tmp_path)
+    monkeypatch.setattr(membrane_workflow, "annotate_membrane_cohort", lambda *a: ([], []))
+    (tmp_path / "cohort_filtered.csv").write_text("entry_id,year,reason\n1OLD,2001,old\n")
+    config = DatasetBuildConfig(max_workers=1)
+    client = RCSBClient(config)
+    monkeypatch.setattr(client, "_post_json", Mock(side_effect=_network))
+    try:
+        run_solution_nmr_membrane(args, client, config)
+    finally:
+        _set_active_dataset_filtered_csvs(())
+        _configure_dataset_filtered_csvs({})
+    rejected = list(csv.DictReader((tmp_path / "cohort_filtered.csv").open()))
+    assert rejected == [{"entry_id": "1ABC", "year": "2026", "reason": "not more than one deposited model"}]
+
+
+def test_failed_cli_run_keeps_previous_exclusion_table(monkeypatch, tmp_path):
+    args = _args(monkeypatch, tmp_path)
+    filtered_path = tmp_path / "cohort_filtered.csv"
+    previous = "entry_id,year,reason\n1OLD,2001,not more than one deposited model\n"
+    filtered_path.write_text(previous)
+    client = RCSBClient(DatasetBuildConfig())
+    monkeypatch.setattr(client, "_post_json", Mock(side_effect=RuntimeError("unavailable")))
+    monkeypatch.setattr(cli, "parse_args", lambda: args)
+    monkeypatch.setattr(cli, "RCSBClient", Mock(return_value=client))
+    monkeypatch.setattr(cli, "_configure_dataset_warning_logs", Mock())
+    try:
+        with pytest.raises(RuntimeError, match="unavailable"):
+            cli.main()
+    finally:
+        _set_active_dataset_filtered_csvs(())
+        _configure_dataset_filtered_csvs({})
+    assert filtered_path.read_text() == previous
 
 
 def test_membrane_kind_dispatch_and_model_filter_defaults(monkeypatch, tmp_path):

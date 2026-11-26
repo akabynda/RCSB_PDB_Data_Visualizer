@@ -19,7 +19,12 @@ from src.dataset.client import RCSBClient
 from src.dataset.config import LOGGER, MEMBRANE_ANNOTATION_TYPES, DatasetBuildConfig
 from src.dataset.io.membrane import write_solution_nmr_membrane_csvs
 from src.dataset.opm import OPM_API_URL, OPM_COORDINATES_URL, annotate_membrane_cohort
-from src.dataset.reporting import _record_filtered_structure, _set_active_dataset_filtered_csvs
+from src.dataset.reporting import (
+    _defer_filtered_structures_csv,
+    _publish_filtered_structures_csv,
+    _record_filtered_structure,
+    _set_active_dataset_filtered_csvs,
+)
 from src.dataset.utils import chunked, collect_batch_results
 
 
@@ -52,6 +57,7 @@ def run_solution_nmr_membrane(
         raise ValueError("Membrane batch size and worker count must be positive")
     output_path = Path(args.solution_nmr_membrane_output)
     _set_active_dataset_filtered_csvs((output_path,))
+    _defer_filtered_structures_csv(output_path)
     cache = CachedJSONRequests(
         client._post_json,
         Path(args.solution_nmr_membrane_cache_dir),
@@ -72,7 +78,10 @@ def run_solution_nmr_membrane(
     for excluded in result.excluded:
         _record_filtered_structure(excluded["entry_id"], excluded["reason"], excluded["year"])
     opm_sources, opm_api_sources = annotate_membrane_cohort(result, args, client, config)
-    paths = write_solution_nmr_membrane_csvs(result, output_path)
+    paths = {
+        **write_solution_nmr_membrane_csvs(result, output_path),
+        "filtered": _publish_filtered_structures_csv(output_path),
+    }
     rows = result.entry_rows
     summary = {
         "entries": len(rows),

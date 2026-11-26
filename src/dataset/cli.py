@@ -126,6 +126,10 @@ def _run_with_dataset_reports(
     _configure_dataset_filtered_csvs(
         output_paths_by_dataset,
         preserve_existing_output_paths=preserved_filter_outputs,
+        # The membrane workflow publishes its table with its manifest.
+        deferred_output_paths=output_paths_by_dataset.get(
+            DatasetKind.SOLUTION_NMR_MEMBRANE_PROTEINS, ()
+        ),
     )
     _set_active_dataset_warning_logs(
         path for paths in output_paths_by_dataset.values() for path in paths
