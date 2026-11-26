@@ -18,6 +18,12 @@ from ..records import (
 from ..reporting import _record_filtered_structure
 from ..structures import load_cached_chain_id_map
 from ..utils import _record_entries_missing_from_response, extract_year
+from ..validation_reports import (
+    QUALITY_METRIC_ATTRIBUTES,
+    REPORT_READ_ERRORS,
+    download_validation_report,
+    read_quality_metrics,
+)
 
 
 def solution_nmr_monomer_coordinate_issue(
@@ -309,7 +315,11 @@ class SolutionNMRMixin:
     def fetch_solution_nmr_monomer_quality_records_for_ids(
         self, entry_ids: list[str]
     ) -> list[SolutionNMRMonomerQualityRecord]:
-        """Fetch validation quality metrics for SOLUTION NMR monomers."""
+        """Read core validation metrics for SOLUTION NMR monomers from wwPDB XML.
+
+        GraphQL only selects eligible monomers: it returns null for both a zero
+        and an uncomputed NMR metric, while the XML report tells them apart.
+        """
         query = """
         query($ids:[String!]!) {
           entries(entry_ids:$ids) {
@@ -319,11 +329,6 @@ class SolutionNMRMixin:
             }
             rcsb_accession_info {
               deposit_date
-            }
-            pdbx_vrpt_summary_geometry {
-              clashscore
-              percent_ramachandran_outliers
-              percent_rotamer_outliers
             }
             polymer_entities {
               entity_poly {
@@ -348,20 +353,33 @@ class SolutionNMRMixin:
             if context is None:
                 continue
             entry_id, year, _, _, _ = context
-            quality_items = entry.get("pdbx_vrpt_summary_geometry") or []
-            if not quality_items:
+            try:
+                report_path = download_validation_report(
+                    self.session,
+                    self.validation_report_cache_dir,
+                    entry_id,
+                    timeout=self.config.timeout_seconds,
+                    retries=self.config.retries,
+                    backoff_seconds=self.config.backoff_seconds,
+                )
+                if report_path is None:
+                    _record_filtered_structure(
+                        entry_id, "validation report is missing", year=year
+                    )
+                    continue
+                metrics = read_quality_metrics(report_path)
+            except REPORT_READ_ERRORS as exc:
                 _record_filtered_structure(
-                    entry_id, "validation quality metrics are missing", year=year
+                    entry_id, f"validation report is unreadable: {exc}", year=year
                 )
                 continue
-            quality = quality_items[0] or {}
-            clashscore = quality.get("clashscore")
-            rama = quality.get("percent_ramachandran_outliers")
-            rotamer = quality.get("percent_rotamer_outliers")
+            clashscore, rama, rotamer = (
+                metrics[name] for name in QUALITY_METRIC_ATTRIBUTES
+            )
             if clashscore is None or rama is None or rotamer is None:
                 _record_filtered_structure(
                     entry_id,
-                    "one or more validation quality metrics are missing",
+                    "one or more validation quality metrics were not computed",
                     year=year,
                 )
                 continue

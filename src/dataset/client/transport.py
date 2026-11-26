@@ -45,6 +45,7 @@ class RCSBTransport:
         self,
         config: DatasetBuildConfig,
         solution_nmr_monomer_cache_dir: Path | None = None,
+        validation_report_cache_dir: Path | None = None,
     ) -> None:
         """Initialize the RCSB API client session and configuration."""
         self.config = config
@@ -52,6 +53,11 @@ class RCSBTransport:
             Path(solution_nmr_monomer_cache_dir)
             if solution_nmr_monomer_cache_dir is not None
             else Path("data/pdb_cache")
+        )
+        self.validation_report_cache_dir = (
+            Path(validation_report_cache_dir)
+            if validation_report_cache_dir is not None
+            else Path("data/validation_report_cache")
         )
         self.session = ThreadLocalRequestsSession("pdb-extensible-builder/1.0")
 

@@ -554,54 +554,47 @@ class RCSBClientMetadataTests(unittest.TestCase):
 
     def test_quality_and_seed_fetchers_skip_invalid_rows(self) -> None:
         quality_entries = [
-            {
-                "rcsb_id": "GOOD",
-                "pdbx_vrpt_summary_geometry": [
-                    {
-                        "clashscore": "1.5",
-                        "percent_ramachandran_outliers": 2,
-                        "percent_rotamer_outliers": 3,
-                    }
-                ],
-            },
-            {"rcsb_id": "NO_QUALITY", "pdbx_vrpt_summary_geometry": []},
-            {
-                "rcsb_id": "MISSING_METRIC",
-                "pdbx_vrpt_summary_geometry": [
-                    {
-                        "clashscore": 1,
-                        "percent_ramachandran_outliers": None,
-                        "percent_rotamer_outliers": 3,
-                    }
-                ],
-            },
-            {
-                "rcsb_id": "BAD_METRIC",
-                "pdbx_vrpt_summary_geometry": [
-                    {
-                        "clashscore": "bad",
-                        "percent_ramachandran_outliers": 2,
-                        "percent_rotamer_outliers": 3,
-                    }
-                ],
-            },
-            {"rcsb_id": "SKIP"},
-            None,
-        ]
+            {"rcsb_id": entry_id}
+            for entry_id in ["GOOD", "NO_REPORT", "MISSING_METRIC", "BAD_METRIC", "SKIP"]
+        ] + [None]
+        metrics = {
+            "GOOD": ("1.5", "2", "3"),
+            "MISSING_METRIC": ("1", None, "3"),
+            "BAD_METRIC": ("bad", "2", "3"),
+        }
         self.client._post_json = Mock(
             return_value={"data": {"entries": quality_entries}}
         )
-        with patch.object(
-            self.client,
-            "_extract_solution_nmr_monomer_context",
-            side_effect=lambda entry: (
-                None
-                if entry.get("rcsb_id") == "SKIP"
-                else (entry["rcsb_id"], 2020, 2, {}, "A")
+        with (
+            patch.object(
+                self.client,
+                "_extract_solution_nmr_monomer_context",
+                side_effect=lambda entry: (
+                    None
+                    if entry.get("rcsb_id") == "SKIP"
+                    else (entry["rcsb_id"], 2020, 2, {}, "A")
+                ),
+            ),
+            patch.object(
+                nmr_client,
+                "download_validation_report",
+                side_effect=lambda session, cache_dir, entry_id, **kwargs: (
+                    None if entry_id == "NO_REPORT" else Path(entry_id)
+                ),
+            ),
+            patch.object(
+                nmr_client,
+                "read_quality_metrics",
+                side_effect=lambda path: dict(
+                    zip(
+                        nmr_client.QUALITY_METRIC_ATTRIBUTES,
+                        metrics[str(path)],
+                    )
+                ),
             ),
         ):
             records = self.client.fetch_solution_nmr_monomer_quality_records_for_ids(
-                ["GOOD", "NO_QUALITY", "MISSING_METRIC", "BAD_METRIC", "SKIP"]
+                ["GOOD", "NO_REPORT", "MISSING_METRIC", "BAD_METRIC", "SKIP"]
             )
         self.assertEqual(
             records,

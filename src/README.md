@@ -115,6 +115,7 @@ Default storage paths can be changed with the corresponding CLI options:
 | Managed STRIDE build | `data/stride/` | `--stride-install-dir` |
 | Membrane API responses | `data/rcsb_cache/solution_nmr_membrane_proteins/` | `--solution-nmr-membrane-cache-dir` |
 | OPM API responses and coordinate files | `data/opm_cache/` | `--opm-cache-dir` |
+| wwPDB validation reports | `data/validation_report_cache/` | `--validation-report-cache-dir` |
 
 Precision, X-ray RMSD and software workflows have separate coordinate-cache
 options listed by `--help`; each also defaults to `data/pdb_cache/`.
@@ -570,9 +571,20 @@ Output:
 
 Collects validation metrics for eligible SOLUTION NMR protein monomers:
 clashscore, Ramachandran outlier percentage, and sidechain rotamer outlier
-percentage. The values are read from the first RCSB
-`pdbx_vrpt_summary_geometry` record and are not recomputed locally. An entry is
-omitted unless all three values are present and numeric.
+percentage. The values are the `clashscore`, `percent-rama-outliers` and
+`percent-rota-outliers` attributes of the `Entry` element in the wwPDB
+validation report
+(`files.rcsb.org/pub/pdb/validation_reports/<ab>/<id>/<id>_validation.xml.gz`)
+and are not recomputed locally. For NMR entries wwPDB computes them with
+MolProbity over the well-defined (core) residues of all models.
+
+The report writes a zero as `0.00` and omits a metric that was not computed.
+RCSB GraphQL returns null for both, so it is used only to select eligible
+monomers. An entry is omitted if its report is missing or unreadable, or unless
+all three metrics are computed and numeric, so every quality panel uses the
+same entries. A downloaded report is parsed before it is cached; each cached
+report has a SHA-256 sidecar checked on every access, and a missing or
+mismatched file is downloaded again.
 
 Output:
 

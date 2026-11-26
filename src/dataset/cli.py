@@ -162,6 +162,7 @@ def main() -> None:
     client = RCSBClient(
         config=config,
         solution_nmr_monomer_cache_dir=Path(args.solution_nmr_monomer_cache_dir),
+        validation_report_cache_dir=Path(args.validation_report_cache_dir),
     )
 
     # Keep prerequisites before the workflows that consume their CSV outputs.

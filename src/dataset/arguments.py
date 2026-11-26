@@ -264,6 +264,15 @@ def parse_args() -> argparse.Namespace:
         help="Output CSV path for solution_nmr_monomer_quality dataset.",
     )
     parser.add_argument(
+        "--validation-report-cache-dir",
+        type=Path,
+        default=Path("data/validation_report_cache"),
+        help=(
+            "Directory to cache wwPDB validation XML reports for "
+            "solution_nmr_monomer_quality dataset."
+        ),
+    )
+    parser.add_argument(
         "--solution-nmr-monomer-program-cluster-input",
         type=Path,
         default=None,
