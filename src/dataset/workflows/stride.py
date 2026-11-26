@@ -64,10 +64,15 @@ def run_precision(
     args: argparse.Namespace, client: RCSBClient, config: DatasetBuildConfig
 ) -> None:
     """Build STRIDE-core precision records with optional resume."""
-    precision_stride_executable = ensure_stride_executable(
-        args.solution_nmr_monomer_stride_executable,
-        Path(args.stride_install_dir),
-    )
+    residue_selection = getattr(args, "rmsd_residue_selection", "core")
+    precision_input = getattr(args, "precision_input", None)
+    precision_stride_executable: str | None = ""
+    # Saved core ranges with the full core need no STRIDE assignment.
+    if precision_input is None or residue_selection != "core":
+        precision_stride_executable = ensure_stride_executable(
+            args.solution_nmr_monomer_stride_executable,
+            Path(args.stride_install_dir),
+        )
     if precision_stride_executable is None:
         raise RuntimeError(
             "STRIDE executable not found for "
@@ -80,9 +85,7 @@ def run_precision(
     precision_stride_output_path = Path(
         args.solution_nmr_monomer_precision_stride_modeled_first_model_output
     )
-    residue_selection = getattr(args, "rmsd_residue_selection", "core")
     source_records = None
-    precision_input = getattr(args, "precision_input", None)
     if precision_input is not None:
         precision_input = Path(precision_input)
         if precision_input.resolve() == precision_stride_output_path.resolve():

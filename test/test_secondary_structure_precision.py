@@ -173,3 +173,49 @@ def test_legacy_precision_resume_cannot_silently_reuse_core_values(tmp_path):
         with pytest.raises(ValueError, match="different residue selection"):
             run_precision(args, Mock(), DatasetBuildConfig())
     assert output.read_bytes() == original
+
+
+@pytest.mark.parametrize(
+    ("selection", "needs_stride"), [("core", False), ("secondary-structure", True)]
+)
+def test_precision_input_requires_stride_only_for_secondary_selection(
+    tmp_path, selection, needs_stride
+):
+    source = tmp_path / "source.csv"
+    with source.open("w", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(SOLUTION_NMR_MONOMER_PRECISION_HEADER)
+        writer.writerow(_solution_nmr_monomer_precision_csv_row(_record()))
+    args = _args(
+        "--precision-input",
+        str(source),
+        "--rmsd-residue-selection",
+        selection,
+        "--solution-nmr-monomer-precision-stride-modeled-first-model-output",
+        str(tmp_path / "out.csv"),
+        "--stride-cache-dir",
+        str(tmp_path / "stride_cache"),
+    )
+    builder = Mock()
+    builder.return_value.build.return_value = []
+    with (
+        patch(
+            "src.dataset.workflows.stride.ensure_stride_executable",
+            return_value=None,
+        ) as ensure,
+        patch(
+            "src.dataset.workflows.stride."
+            "SolutionNMRMonomerPrecisionStrideModeledFirstModelBuilder",
+            builder,
+        ),
+    ):
+        if needs_stride:
+            with pytest.raises(RuntimeError, match="STRIDE executable not found"):
+                run_precision(args, Mock(), DatasetBuildConfig())
+        else:
+            run_precision(args, Mock(), DatasetBuildConfig())
+    assert ensure.called is needs_stride
+    if not needs_stride:
+        assert builder.return_value.build.call_args.kwargs["source_records"] == [
+            _record()
+        ]

@@ -218,8 +218,11 @@ a missing endpoint in another model cannot change that span.
 
 ## STRIDE
 
-STRIDE is required by the modeled-state, ensemble-precision and homolog-search
-builders. Executable lookup order is the explicit
+STRIDE is required by the modeled-state, ensemble-precision and current
+homolog-search builders and by the four X-ray RMSD datasets with
+`--rmsd-residue-selection secondary-structure`. An executable must be available
+even when all assignments are cached. Precision with `--precision-input` and the
+default core selection does not use STRIDE. Executable lookup order is the explicit
 `--solution-nmr-monomer-stride-executable`, `stride` in `PATH`, the managed build,
 `/tmp/stride_src/src/stride`, then automatic installation. An invalid explicit
 path fails without falling back.
