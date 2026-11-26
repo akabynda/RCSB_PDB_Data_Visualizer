@@ -106,7 +106,7 @@ Default storage paths can be changed with the corresponding CLI options:
 
 | Contents | Default path | Option |
 | --- | --- | --- |
-| Coordinates for monomer eligibility and membrane calculations | `data/pdb_cache/` | `--solution-nmr-monomer-cache-dir` |
+| Coordinates for monomer eligibility, membrane calculations, the first-model STRIDE summary and homolog searches (including every X-ray candidate) | `data/pdb_cache/` | `--solution-nmr-monomer-cache-dir` |
 | First-model STRIDE assignments | `data/stride_cache/` | `--stride-cache-dir` |
 | Managed STRIDE build | `data/stride/` | `--stride-install-dir` |
 | Membrane API responses | `data/rcsb_cache/solution_nmr_membrane_proteins/` | `--solution-nmr-membrane-cache-dir` |
