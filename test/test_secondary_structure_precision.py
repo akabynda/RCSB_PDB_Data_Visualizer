@@ -13,13 +13,18 @@ from src.dataset.builders.precision import (
     SolutionNMRMonomerPrecisionBuilder,
     SolutionNMRMonomerPrecisionStrideModeledFirstModelBuilder,
 )
-from src.dataset.config import DatasetBuildConfig
+from src.dataset.config import DatasetBuildConfig, DatasetKind
 from src.dataset.io.nmr import (
     SOLUTION_NMR_MONOMER_PRECISION_HEADER,
     _solution_nmr_monomer_precision_csv_row,
     read_solution_nmr_monomer_precision_csv,
 )
 from src.dataset.records import ResidueId, SolutionNMRMonomerPrecisionRecord
+from src.dataset.reporting import (
+    _configure_dataset_filtered_csvs,
+    _set_active_dataset_filtered_csvs,
+    filtered_structures_csv_path,
+)
 from src.dataset.stride import compute_stride_secondary_residue_ids_in_first_model
 from src.dataset.workflows.stride import run_precision
 
@@ -218,4 +223,43 @@ def test_precision_input_requires_stride_only_for_secondary_selection(
     if not needs_stride:
         assert builder.return_value.build.call_args.kwargs["source_records"] == [
             _record()
+        ]
+
+
+def test_precision_input_imports_its_exclusions(tmp_path):
+    source = tmp_path / "source.csv"
+    with source.open("w", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(SOLUTION_NMR_MONOMER_PRECISION_HEADER)
+        writer.writerow(_solution_nmr_monomer_precision_csv_row(_record()))
+    filtered_structures_csv_path(source).write_text(
+        "entry_id,year,reason\n1OUT,2001,fewer than 2 deposited models\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "out.csv"
+    args = _args(
+        "--precision-input",
+        str(source),
+        "--solution-nmr-monomer-precision-stride-modeled-first-model-output",
+        str(output),
+    )
+    builder = Mock()
+    builder.return_value.build.return_value = []
+    dataset = DatasetKind.SOLUTION_NMR_MONOMER_PRECISION_STRIDE_MODELED_FIRST_MODEL
+    _configure_dataset_filtered_csvs({dataset: (output,)})
+    _set_active_dataset_filtered_csvs((output,))
+    try:
+        with patch(
+            "src.dataset.workflows.stride."
+            "SolutionNMRMonomerPrecisionStrideModeledFirstModelBuilder",
+            builder,
+        ):
+            run_precision(args, Mock(), DatasetBuildConfig())
+    finally:
+        _set_active_dataset_filtered_csvs(())
+        _configure_dataset_filtered_csvs({})
+    with filtered_structures_csv_path(output).open(newline="") as handle:
+        assert list(csv.reader(handle)) == [
+            ["entry_id", "year", "reason"],
+            ["1OUT", "2001", "fewer than 2 deposited models"],
         ]

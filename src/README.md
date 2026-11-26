@@ -250,7 +250,7 @@ Run `python src/pdb_dataset_builder.py --help` for all paths and defaults.
 | `--pdb-cache-validation-hours` | Coordinate revalidation interval; `0` validates every access. |
 | `--xray-rmsd-sequence-identity {95,100}` | Homolog input cutoff; default `100`. |
 | `--rmsd-residue-selection {core,secondary-structure}` | Atom selection; default `core`. The plotter accepts the same switch. |
-| `--precision-input PATH` | Reuse entries, chains and core ranges from a precision CSV and recompute RMSD. Input and output must differ. |
+| `--precision-input PATH` | Reuse entries, chains and core ranges from a precision CSV and recompute RMSD; its `_filtered.csv` rows are imported. Input and output must differ. |
 | `--resume` | Retain completed homolog, precision and X-ray RMSD results. |
 
 Secondary-structure selection adds `_secondary_structure` to default

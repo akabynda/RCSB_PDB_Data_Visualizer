@@ -22,6 +22,7 @@ from src.dataset.io.nmr import (
     stream_solution_nmr_monomer_stride_modeled_first_model_csv,
 )
 from src.dataset.records import SolutionNMRMonomerPrecisionRecord
+from src.dataset.reporting import _import_filtered_structures
 from src.dataset.stride_install import ensure_stride_executable
 
 
@@ -93,6 +94,7 @@ def run_precision(
         source_records = read_solution_nmr_monomer_precision_csv(precision_input)
         if not source_records:
             raise ValueError(f"No precision records found in {precision_input}")
+        _import_filtered_structures(precision_input)
         LOGGER.info(
             "Reusing %d precision cores from %s", len(source_records), precision_input
         )
