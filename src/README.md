@@ -144,9 +144,11 @@ structural filters:
 A model-length difference outside the STRIDE core therefore still excludes the
 entry. The equal-length test compares the number of selected CA positions, not
 their residue-number sets; precision later uses the positions shared by all
-models. Direct monomer datasets apply the filter themselves, while
-program-cluster, historical, and RMSD datasets inherit it through their input
-CSVs.
+models. Direct monomer datasets apply the filter themselves. Program-cluster and
+historical-homolog datasets inherit it through their input CSVs. RMSD datasets
+take entries from the homolog CSV and apply the filter again, with current RCSB
+metadata and coordinates, to each recalculated entry; rows kept by `--resume`
+are not rechecked.
 
 The STRIDE summary additionally requires exactly one polymer entity instance.
 
