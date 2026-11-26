@@ -446,8 +446,11 @@ Output:
 Assigns SOLUTION NMR protein monomers to refinement-program clusters using PDB
 `REMARK 3 PROGRAM` and `REMARK 210 SOFTWARE USED`, including software carried
 over during mmCIF conversion. If a structure names `n` known clusters, each
-receives a score of `1/n`, so the total score remains `1`. `OTHER` is used only
-when no known cluster is found.
+receives a score of `1/n`, so the total score remains `1`. `OTHER` receives
+score `1` when no known cluster is found: the entry names only unlisted programs,
+reports none (for example `NULL`), or its PDB file could not be loaded. Such
+entries are kept and are not written to `_filtered.csv`; `has_program_text` is
+`0` when no software text was read.
 
 Wrapped `REMARK 210` fields are joined before matching. Program-aware boundaries
 prevent unrelated names such as `VARIAN` and `DISCOVERY STUDIO` from matching
@@ -466,7 +469,7 @@ strings, and these aliases:
   XPLOR-NIH name; a compound software field can contain both clusters
 - `CLUSTER8` — `XPLOR_NIH` (also underscore, reversed `NIH-XPLOR`, compact
   `NIHXPLOR`, parenthesized NIH, and the observed `NHI` typo)
-- `CLUSTER9` — `OTHER`, used only when no known cluster matches
+- `CLUSTER9` — `OTHER`, used when no known cluster matches
 
 For example, `CNS ARIA` contributes `0.5` to both `CLUSTER3` and `CLUSTER2`.
 `cluster_score`, per-cluster `structure_count`, and per-cluster quality means use
