@@ -35,6 +35,7 @@ from src.dataset.reporting import (
     _import_filtered_structures,
     _record_filtered_structure,
     _set_active_dataset_filtered_csvs,
+    _set_filtered_structure_routes,
 )
 
 if TYPE_CHECKING:
@@ -433,7 +434,6 @@ def build_solution_nmr_monomer_xray_rmsd_outputs_to_csv(
         )
         existing_records_by_output[output_name] = existing
         existing_entry_ids = set(existing_by_entry_id)
-        _set_active_dataset_filtered_csvs((output_path,))
         for record in sorted(
             homolog_maps[view].values(), key=lambda r: (r.year, r.entry_id)
         ):
@@ -444,7 +444,10 @@ def build_solution_nmr_monomer_xray_rmsd_outputs_to_csv(
                 or record.nmr_core_end_seq_id is None
             ):
                 _record_filtered_structure(
-                    record.entry_id, "NMR core range is missing", year=record.year
+                    record.entry_id,
+                    "NMR core range is missing",
+                    year=record.year,
+                    output_paths=(output_path,),
                 )
             elif not record.xray_homolog_entity_ids:
                 _record_filtered_structure(
@@ -452,6 +455,7 @@ def build_solution_nmr_monomer_xray_rmsd_outputs_to_csv(
                     f"no X-ray homologs at {sequence_identity_percent}% sequence "
                     f"identity in the {view} homolog view",
                     year=record.year,
+                    output_paths=(output_path,),
                 )
         eligible_missing = sorted(
             (
@@ -511,6 +515,18 @@ def build_solution_nmr_monomer_xray_rmsd_outputs_to_csv(
     )
     new_record_counts = {output_name: 0 for output_name in output_specs}
     with ExitStack() as stack:
+        # Shared calculations report an entry only to outputs that need it.
+        _set_filtered_structure_routes(
+            {
+                entry_id: tuple(
+                    output_specs[output_name][0]
+                    for output_name, target_ids in target_entry_ids_by_output.items()
+                    if entry_id in target_ids
+                )
+                for entry_id in work_entry_ids
+            }
+        )
+        stack.callback(_set_filtered_structure_routes, {})
         csvfiles: dict[str, Any] = {}
         writers: dict[str, Any] = {}
         for output_name, (output_path, _, is_extremes) in output_specs.items():
@@ -540,7 +556,7 @@ def build_solution_nmr_monomer_xray_rmsd_outputs_to_csv(
         ) -> None:
             """Project one shared pair set and checkpoint every missing output."""
             entry_id = computed_homolog.entry_id
-            for output_name, (_, view, is_extremes) in output_specs.items():
+            for output_name, (output_path, view, is_extremes) in output_specs.items():
                 if entry_id not in target_entry_ids_by_output[output_name]:
                     continue
                 view_homolog = homolog_maps[view][entry_id]
@@ -559,6 +575,7 @@ def build_solution_nmr_monomer_xray_rmsd_outputs_to_csv(
                         entry_id,
                         f"no successful X-ray RMSD candidate in the {view} homolog view",
                         year=view_homolog.year,
+                        output_paths=(output_path,),
                     )
                     continue
                 writers[output_name].writerow(

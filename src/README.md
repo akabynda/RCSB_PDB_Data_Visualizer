@@ -666,7 +666,8 @@ computed once per NMR entry. Historical outputs filter that shared set to
 historical entity IDs and recompute their own total homolog counts; historical
 extremes also recomputes its successful homolog counts. When both current and
 historical variants are selected, their core metadata and the historical-subset
-invariant are validated before the shared run.
+invariant are validated before the shared run. Exclusions from the shared
+calculation are recorded only for the outputs that needed the entry.
 
 Output:
 

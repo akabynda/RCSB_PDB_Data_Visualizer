@@ -364,6 +364,141 @@ class CombinedXrayRmsdProjectionTests(unittest.TestCase):
                     ],
                 )
 
+    def test_view_projection_failure_is_recorded_only_for_that_view(self) -> None:
+        """Keep a historical-only projection failure out of current reports."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            current_input = root / "current_homologs.csv"
+            historical_input = root / "historical_homologs.csv"
+            outputs = {
+                name: root / f"{name}.csv"
+                for name in (
+                    "ordinary",
+                    "ordinary_historical",
+                    "extremes",
+                    "extremes_historical",
+                )
+            }
+            write_solution_nmr_monomer_xray_homolog_csv(
+                [_homolog_record(("1AAA_1", "2BBB_1"))], current_input
+            )
+            write_solution_nmr_monomer_xray_homolog_csv(
+                [_homolog_record(("2BBB_1",))], historical_input
+            )
+            _configure_dataset_filtered_csvs(
+                {DatasetKind.SOLUTION_NMR_MONOMER_XRAY_RMSD: tuple(outputs.values())}
+            )
+            candidates = (_candidate_record("1AAA_1", rmsd=1.0, resolution=1.0),)
+
+            with patch.object(
+                SolutionNMRMonomerXrayRmsdBuilder,
+                "build_candidate_sets",
+                autospec=True,
+                side_effect=self._candidate_set_side_effect(candidates),
+            ):
+                self._run_outputs_coordinator(
+                    root=root,
+                    current_input=current_input,
+                    historical_input=historical_input,
+                    ordinary_output=outputs["ordinary"],
+                    historical_ordinary_output=outputs["ordinary_historical"],
+                    extremes_output=outputs["extremes"],
+                    historical_extremes_output=outputs["extremes_historical"],
+                )
+
+            historical_row = (
+                "1NMR",
+                "2001",
+                "no successful X-ray RMSD candidate in the historical homolog view",
+            )
+            self.assertEqual(self._filtered_rows(outputs["ordinary"]), [])
+            self.assertEqual(self._filtered_rows(outputs["extremes"]), [])
+            self.assertEqual(
+                self._filtered_rows(outputs["ordinary_historical"]), [historical_row]
+            )
+            self.assertEqual(
+                self._filtered_rows(outputs["extremes_historical"]), [historical_row]
+            )
+
+    def test_shared_calculation_failure_skips_outputs_that_retained_entry(
+        self,
+    ) -> None:
+        """Report a failed shared calculation only where the entry was needed."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            current_input = root / "current_homologs.csv"
+            ordinary_output = root / "ordinary.csv"
+            extremes_output = root / "extremes.csv"
+            write_solution_nmr_monomer_xray_homolog_csv(
+                [_homolog_record(("1AAA_1",))], current_input
+            )
+            write_solution_nmr_monomer_xray_rmsd_csv(
+                [
+                    _candidate_record(
+                        "1AAA_1", rmsd=9.0, resolution=0.8, source_homolog_count=1
+                    )
+                ],
+                ordinary_output,
+            )
+            _configure_dataset_filtered_csvs(
+                {
+                    DatasetKind.SOLUTION_NMR_MONOMER_XRAY_RMSD: (
+                        ordinary_output,
+                        extremes_output,
+                    )
+                }
+            )
+
+            def work_items(builder, skip_entry_ids, progress_prefix):
+                del skip_entry_ids, progress_prefix
+                return [
+                    (homolog, "A", (object(),)) for homolog in builder.homolog_records
+                ]
+
+            with (
+                patch.object(
+                    SolutionNMRMonomerXrayRmsdBuilder,
+                    "_prepare_work_items",
+                    autospec=True,
+                    side_effect=work_items,
+                ),
+                patch.object(
+                    SolutionNMRMonomerXrayRmsdBuilder,
+                    "_download_pdb_if_needed",
+                    side_effect=RuntimeError("download failed"),
+                ),
+            ):
+                self._run_outputs_coordinator(
+                    root=root,
+                    current_input=current_input,
+                    historical_input=None,
+                    ordinary_output=ordinary_output,
+                    historical_ordinary_output=None,
+                    extremes_output=extremes_output,
+                    historical_extremes_output=None,
+                    resume=True,
+                )
+
+            self.assertEqual(
+                len(read_solution_nmr_monomer_xray_rmsd_csv(ordinary_output)), 1
+            )
+            self.assertEqual(self._filtered_rows(ordinary_output), [])
+            self.assertEqual(
+                self._filtered_rows(extremes_output),
+                [
+                    (
+                        "1NMR",
+                        "2001",
+                        "X-ray RMSD calculation failed: download failed",
+                    ),
+                    (
+                        "1NMR",
+                        "2001",
+                        "no successful X-ray RMSD candidate in the current homolog view",
+                    ),
+                ],
+            )
+
     def test_historical_only_does_not_require_current_homolog_path(self) -> None:
         """Build a historical output when no current homolog input is supplied."""
         with tempfile.TemporaryDirectory() as tmpdir:

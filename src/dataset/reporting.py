@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import csv
 import logging
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 from threading import Lock
 from typing import TYPE_CHECKING, Any
@@ -26,6 +26,9 @@ _ACTIVE_DATASET_FILTERED_CSV_PATHS: frozenset[Path] = frozenset()
 
 
 _FILTERED_STRUCTURE_ROWS_BY_OUTPUT: dict[Path, dict[tuple[str, str], str]] = {}
+
+
+_FILTERED_STRUCTURE_PATHS_BY_ENTRY_ID: dict[str, frozenset[Path]] = {}
 
 
 _FILTERED_STRUCTURE_CSV_LOCK = Lock()
@@ -56,6 +59,17 @@ def _set_active_dataset_filtered_csvs(output_paths: Iterable[Path]) -> None:
     """Override the active filtered-structure reports within a dataset build."""
     global _ACTIVE_DATASET_FILTERED_CSV_PATHS
     _ACTIVE_DATASET_FILTERED_CSV_PATHS = frozenset(Path(path) for path in output_paths)
+
+
+def _set_filtered_structure_routes(
+    output_paths_by_entry_id: Mapping[str, Iterable[Path]],
+) -> None:
+    """Route listed entries' exclusions to these reports instead of all active."""
+    global _FILTERED_STRUCTURE_PATHS_BY_ENTRY_ID
+    _FILTERED_STRUCTURE_PATHS_BY_ENTRY_ID = {
+        str(entry_id): frozenset(Path(path) for path in paths)
+        for entry_id, paths in output_paths_by_entry_id.items()
+    }
 
 
 def filtered_structures_csv_path(output_path: Path) -> Path:
@@ -107,15 +121,26 @@ def _normalize_filtered_structure_year(year: Any) -> str:
     return ""
 
 
-def _record_filtered_structure(entry_id: Any, reason: str, year: Any = None) -> None:
-    """Append one deduplicated filter decision to every active dataset report."""
+def _record_filtered_structure(
+    entry_id: Any,
+    reason: str,
+    year: Any = None,
+    output_paths: Iterable[Path] | None = None,
+) -> None:
+    """Append one deduplicated filter decision to the given or active reports."""
     normalized_entry_id = str(entry_id or "").strip()
     normalized_year = _normalize_filtered_structure_year(year)
     normalized_reason = " ".join(str(reason).split())
     if not normalized_entry_id or not normalized_reason:
         return
     with _FILTERED_STRUCTURE_CSV_LOCK:
-        for output_path in _ACTIVE_DATASET_FILTERED_CSV_PATHS:
+        if output_paths is not None:
+            target_paths = frozenset(Path(path) for path in output_paths)
+        else:
+            target_paths = _FILTERED_STRUCTURE_PATHS_BY_ENTRY_ID.get(
+                normalized_entry_id, _ACTIVE_DATASET_FILTERED_CSV_PATHS
+            )
+        for output_path in target_paths:
             rows = _FILTERED_STRUCTURE_ROWS_BY_OUTPUT.get(output_path)
             if rows is None:
                 continue
