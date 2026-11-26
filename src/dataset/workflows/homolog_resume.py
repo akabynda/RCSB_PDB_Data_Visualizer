@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from src.dataset.config import LOGGER
+from src.dataset.io.common import require_complete_last_row
 from src.dataset.io.homologs import (
     _read_rejected_xray_homolog_csv_with_status,
     _read_xray_homolog_resume_checkpoint,
@@ -50,6 +51,14 @@ def load_homolog_resume_state(
     existing_rejected_100: list[RejectedXrayHomologRecord] = []
     skip_homolog_entry_ids: set[str] = set()
     if resume:
+        for output_path in (
+            paths.homolog_95,
+            paths.homolog_100,
+            paths.rejected_95,
+            paths.rejected_100,
+        ):
+            if output_path.exists():
+                require_complete_last_row(output_path)
         records_95_by_entry_id = {
             record.entry_id: record
             for record in read_solution_nmr_monomer_xray_homolog_csv(paths.homolog_95)

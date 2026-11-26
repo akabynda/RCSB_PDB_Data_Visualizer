@@ -267,7 +267,9 @@ and also retains checkpointed ineligible entries. Failed or unfinished entries
 are retried. `_filtered.csv` keeps old rows only for retained entries; other
 entries are listed again only if this run excludes them. The homolog checkpoint
 is `<95%-output-stem>.resume.tsv` beside the 95% output. Precision and each
-selected RMSD variant resume independently.
+selected RMSD variant resume independently. Resume stops if a homolog,
+rejection, precision or RMSD CSV ends without a line terminator (a row cut off
+mid-write); remove that row and run again.
 
 ## Dataset Reference
 

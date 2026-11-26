@@ -15,6 +15,7 @@ from src.dataset.config import (
     LOGGER,
     DatasetBuildConfig,
 )
+from src.dataset.io.common import require_complete_last_row
 from src.dataset.io.nmr import (
     SOLUTION_NMR_MONOMER_PRECISION_HEADER,
     _solution_nmr_monomer_precision_csv_row,
@@ -99,6 +100,7 @@ def run_precision(
             "Reusing %d precision cores from %s", len(source_records), precision_input
         )
     if args.resume and precision_stride_output_path.exists():
+        require_complete_last_row(precision_stride_output_path)
         existing_records = read_solution_nmr_monomer_precision_csv(
             precision_stride_output_path
         )

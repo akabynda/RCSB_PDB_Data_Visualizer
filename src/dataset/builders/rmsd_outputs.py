@@ -20,6 +20,7 @@ from src.dataset.config import (
     DEFAULT_STRIDE_CACHE_DIR,
     LOGGER,
 )
+from src.dataset.io.common import require_complete_last_row
 from src.dataset.io.homologs import (
     read_solution_nmr_monomer_xray_homolog_csv,
 )
@@ -105,6 +106,7 @@ def build_solution_nmr_monomer_xray_rmsd_to_csv(
         homolog_input_path,
     )
     if resume and output_path.exists():
+        require_complete_last_row(output_path)
         existing_records = read_solution_nmr_monomer_xray_rmsd_csv(output_path)
         _check_resume_residue_selection(
             existing_records, output_path, residue_selection
@@ -208,6 +210,7 @@ def build_solution_nmr_monomer_xray_rmsd_extremes_to_csv(
         homolog_input_path,
     )
     if resume and output_path.exists():
+        require_complete_last_row(output_path)
         existing_records = read_solution_nmr_monomer_xray_rmsd_extremes_csv(output_path)
         _check_resume_residue_selection(
             existing_records, output_path, residue_selection
@@ -403,6 +406,7 @@ def build_solution_nmr_monomer_xray_rmsd_outputs_to_csv(
     for output_name, (output_path, view, is_extremes) in output_specs.items():
         existing: list[Any] = []
         if resume and output_path.exists():
+            require_complete_last_row(output_path)
             loaded: list[Any]
             if is_extremes:
                 loaded = read_solution_nmr_monomer_xray_rmsd_extremes_csv(output_path)
