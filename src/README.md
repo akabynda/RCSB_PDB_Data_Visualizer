@@ -476,7 +476,8 @@ strings, and these aliases:
 - `CLUSTER7` — `XPLOR` (also `X-PLOR`), for occurrences outside a recognized
   XPLOR-NIH name; a compound software field can contain both clusters
 - `CLUSTER8` — `XPLOR_NIH` (also underscore, reversed `NIH-XPLOR`, compact
-  `NIHXPLOR`, parenthesized NIH, and the observed `NHI` typo)
+  `NIHXPLOR`, parenthesized NIH, also after a version as in `X-PLOR 2.0.4 (NIH)`,
+  and the observed `NHI` typo)
 - `CLUSTER9` — `OTHER`, used when no known cluster matches
 
 For example, `CNS ARIA` contributes `0.5` to both `CLUSTER3` and `CLUSTER2`.

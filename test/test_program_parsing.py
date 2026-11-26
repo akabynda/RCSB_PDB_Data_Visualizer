@@ -96,6 +96,8 @@ class ExtractSolutionNMRProgramClustersTests(unittest.TestCase):
             "NIHXPLOR",
             "XPLOR-NHI",
             "X-PLOR (NIH) 2.9",
+            "X-PLOR 2.0.4 (NIH)",
+            "X-PLOR 2.0.4 (NIH), AUTOSTRUCTURE 2.0.0",
         ):
             with self.subTest(value=value):
                 self.assertEqual(

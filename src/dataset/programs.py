@@ -106,6 +106,8 @@ XPLOR_PATTERN = re.compile(r"X[-_ ]?PLOR")
 
 XPLOR_NIH_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"X[-_ ]?PLOR[-_ ]*\(?N(?:IH|HI)\)?"),
+    # A version may precede the parenthesized NIH, as in X-PLOR 2.0.4 (NIH).
+    re.compile(r"X[-_ ]?PLOR[-_ ]*\d[\d.]*\s*\(N(?:IH|HI)\)"),
     re.compile(r"N(?:IH|HI)[-_ ]*X[-_ ]?PLOR"),
 )
 
