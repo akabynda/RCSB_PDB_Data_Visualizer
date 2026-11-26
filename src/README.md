@@ -389,9 +389,11 @@ saves them and exits unsuccessfully; `coordinates_unavailable` and
 `structure_mismatch` rows do not fail the run.
 
 **Plots.** Entries with known deposition years through 2024 enter the annual
-entry count (`solution_nmr_membrane_proteins_by_year`), with or without OPM data.
-The residue map (`solution_nmr_membrane_opm_residues`) uses `counted` entries with
-copy counts: x is the copy-mean membrane count, y the copy-mean other count.
+entry count (`solution_nmr_membrane_proteins_by_year`), with or without OPM data,
+and the residue-map table; entries with unknown years are omitted with a warning,
+later ones without. The residue map (`solution_nmr_membrane_opm_residues`) uses
+`counted` entries with copy counts: x is the copy-mean membrane count, y the
+copy-mean other count.
 Entries with identical chains are pink circles; all others are blue circles; the
 map has no legend. Counted entries without copy counts are omitted with a warning.
 This map alone is Figure 9. Both axes use one symlog scale on a square panel
@@ -400,10 +402,10 @@ without marginal histograms: linear from 0 to 10 residues, logarithmic above, wi
 first major tick (0, 5, 10, 20, 50, 100, 200, 500, …) that is at least 10 and
 greater than the largest x or y value. Major and minor grid lines are drawn. The table
 `figures/solution_nmr_membrane_opm_residues/solution_nmr_membrane_opm_residues.csv`
-retains excluded entries and marks selection with `included_in_residue_plot`.
-It keeps entry totals, absent-residue counts, OPM metadata, copy means and ranges,
-chain counts, the symmetry flag and `repeated_protein_chains`. No
-full-length/fragment class is assigned.
+lists every entry of the annual count and marks map selection with
+`included_in_residue_plot`. It keeps entry totals, absent-residue counts, OPM
+metadata, copy means and ranges, chain counts, the symmetry flag and
+`repeated_protein_chains`. No full-length/fragment class is assigned.
 
 ### `solution_nmr_program_counts`
 
