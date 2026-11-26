@@ -6,6 +6,7 @@ figures for the accompanying article. Plots include deposition years through
 
 ## Table of Contents
 
+- [Article Version](#article-version)
 - [Requirements](#requirements)
 - [Setup](#setup)
 - [Reproduce All Figures](#reproduce-all-figures)
@@ -22,6 +23,13 @@ figures for the accompanying article. Plots include deposition years through
 - [Outputs](#outputs)
 - [Reference](#reference)
 - [License](#license)
+
+## Article Version
+
+The article figures were generated with commit
+[`bf81ae2`](https://github.com/akabynda/RCSB_PDB_Data_Visualizer/tree/bf81ae24bf14f7d6b23f868847c641076a90f8f7)
+(6 November 2026). Later commits fix only usage scenarios and minor edge cases
+that have little effect on the article data.
 
 ## Requirements
 
