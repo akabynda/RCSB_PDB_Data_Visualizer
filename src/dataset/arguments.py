@@ -407,7 +407,9 @@ def parse_args() -> argparse.Namespace:
         help="Parallel workers for GraphQL calls.",
     )
     parser.add_argument(
-        "--log-level", default="INFO", help="Logging level (DEBUG/INFO/WARNING/ERROR)."
+        "--log-level",
+        default="INFO",
+        help="Console logging level (DEBUG/INFO/WARNING/ERROR).",
     )
     selection_parser = argparse.ArgumentParser(add_help=False)
     selection_parser.add_argument("--rmsd-residue-selection", default="core")

@@ -887,6 +887,57 @@ class BuilderMainDispatchTests(unittest.TestCase):
             for report_path, text in historical_reports.items():
                 self.assertEqual(report_path.read_text(encoding="utf-8"), text)
 
+    def test_console_log_level_does_not_filter_dataset_warning_logs(self) -> None:
+        """Keep warnings in name.log when the console shows only errors."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            with patch.object(
+                sys,
+                "argv",
+                [
+                    "pdb_dataset_builder.py",
+                    "--datasets",
+                    "method_counts",
+                    "--log-level",
+                    "ERROR",
+                ],
+            ):
+                args = builder.parse_args()
+            args.counts_output = root / "counts.csv"
+            root_logger = logging.getLogger()
+            level_before = root_logger.level
+            original_handlers = list(root_logger.handlers)
+            root_logger.handlers = []
+
+            def restore_logging() -> None:
+                for handler in root_logger.handlers:
+                    handler.close()
+                root_logger.handlers = original_handlers
+                root_logger.setLevel(level_before)
+
+            self.addCleanup(restore_logging)
+
+            def warn(*_args) -> None:
+                logging.getLogger("src.pdb_dataset_builder").warning("kept warning")
+
+            with (
+                patch.object(dataset_cli, "parse_args", return_value=args),
+                patch.object(dataset_cli, "RCSBClient"),
+                patch.object(dataset_cli, "run_method_counts", side_effect=warn),
+            ):
+                builder.main()
+
+            self.assertIn(
+                "WARNING | kept warning",
+                (root / "counts.log").read_text(encoding="utf-8"),
+            )
+            console_levels = [
+                handler.level
+                for handler in root_logger.handlers
+                if not isinstance(handler, logging.FileHandler)
+            ]
+            self.assertEqual(console_levels, [logging.ERROR])
+
     def test_main_dispatches_all_dataset_builders_without_network(self) -> None:
         """Keep CLI argument and builder APIs wired together across all datasets."""
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -137,10 +137,17 @@ def main() -> None:
     """Run the requested dataset collection workflow from the CLI."""
     print(f"Using up to {DEFAULT_MAX_WORKERS} worker threads for concurrent tasks")
     args = parse_args()
+    console_level = getattr(logging, args.log_level.upper(), logging.INFO)
+    root_logger = logging.getLogger()
+    handlers_before = set(root_logger.handlers)
+    # The level applies to the console; dataset logs always receive warnings.
     logging.basicConfig(
-        level=getattr(logging, args.log_level.upper(), logging.INFO),
+        level=min(console_level, logging.WARNING),
         format="%(asctime)s | %(levelname)s | %(message)s",
     )
+    for handler in root_logger.handlers:
+        if handler not in handlers_before:
+            handler.setLevel(console_level)
     output_paths_by_dataset = _selected_dataset_output_paths(args)
     config = DatasetBuildConfig(
         page_size=args.page_size,

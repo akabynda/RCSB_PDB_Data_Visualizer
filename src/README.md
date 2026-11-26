@@ -246,7 +246,7 @@ Run `python src/pdb_dataset_builder.py --help` for all paths and defaults.
 | --- | --- |
 | `--workers`, `--precision-workers`, `--xray-rmsd-workers` | Concurrency for collection, precision and X-ray RMSD. |
 | `--batch-size`, `--page-size` | GraphQL batch and Search API page sizes. |
-| `--log-level` | Logging verbosity. |
+| `--log-level` | Console logging verbosity; `name.log` always records warnings and errors. |
 | `--pdb-cache-validation-hours` | Coordinate revalidation interval; `0` validates every access. |
 | `--xray-rmsd-sequence-identity {95,100}` | Homolog input cutoff; default `100`. |
 | `--rmsd-residue-selection {core,secondary-structure}` | Atom selection; default `core`. The plotter accepts the same switch. |
