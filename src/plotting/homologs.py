@@ -72,8 +72,10 @@ class HomologPlotsMixin:
         return yearly_share, cumulative_share
 
     @classmethod
-    def _prepare_monomer_xray_homolog_table(cls, df: pd.DataFrame) -> pd.DataFrame:
-        """Validate homolog-search records and exclude short query sequences."""
+    def _prepare_monomer_xray_homolog_table(
+        cls, df: pd.DataFrame, filter_rows: bool = True
+    ) -> pd.DataFrame:
+        """Validate homolog-search records and optionally apply plot filters."""
         prepared = cls._prepare_typed_table(
             df=df,
             required_columns={
@@ -91,8 +93,15 @@ class HomologPlotsMixin:
             },
             dataset_name="Monomer X-ray homolog CSV",
         )
-        prepared = prepared[prepared["nmr_query_sequence_length"] > 10].copy()
-        return cls._limit_year_column(prepared)
+        if not filter_rows:
+            return prepared
+        return cls._filter_monomer_xray_homolog_rows(prepared)
+
+    @classmethod
+    def _filter_monomer_xray_homolog_rows(cls, table: pd.DataFrame) -> pd.DataFrame:
+        """Keep query sequences longer than 10 residues through the plot year."""
+        filtered = table[table["nmr_query_sequence_length"] > 10].copy()
+        return cls._limit_year_column(filtered)
 
     def plot_solution_nmr_monomer_xray_homologs(
         self,
@@ -244,18 +253,18 @@ class HomologPlotsMixin:
 
         counts_95 = self._build_xray_homolog_timing_count_table(
             regular_table=self._prepare_monomer_xray_homolog_table(
-                self._read_csv(regular_data_95_path)
+                self._read_csv(regular_data_95_path), filter_rows=False
             ),
             historical_table=self._prepare_monomer_xray_homolog_table(
-                self._read_csv(historical_data_95_path)
+                self._read_csv(historical_data_95_path), filter_rows=False
             ),
         )
         counts_100 = self._build_xray_homolog_timing_count_table(
             regular_table=self._prepare_monomer_xray_homolog_table(
-                self._read_csv(regular_data_100_path)
+                self._read_csv(regular_data_100_path), filter_rows=False
             ),
             historical_table=self._prepare_monomer_xray_homolog_table(
-                self._read_csv(historical_data_100_path)
+                self._read_csv(historical_data_100_path), filter_rows=False
             ),
         )
         self._write_xray_homolog_timing_counts_csv(
@@ -281,20 +290,114 @@ class HomologPlotsMixin:
         )
 
     @staticmethod
+    def _residue_id_text(value: object) -> str:
+        """Return a residue ID cell as text, whether read as a number or not."""
+        if pd.isna(value):
+            return ""
+        if isinstance(value, float) and value.is_integer():
+            return str(int(value))
+        return str(value).strip()
+
+    @staticmethod
+    def _homolog_entity_id_set(value: object) -> frozenset[str]:
+        """Parse a semicolon-separated X-ray entity-ID cell."""
+        if pd.isna(value):
+            return frozenset()
+        return frozenset(item.strip() for item in str(value).split(";") if item.strip())
+
+    @classmethod
     def _build_xray_homolog_timing_count_table(
+        cls,
         regular_table: pd.DataFrame,
         historical_table: pd.DataFrame,
     ) -> pd.DataFrame:
-        """Combine current and historical searches into yearly timing counts."""
-        regular = regular_table[["entry_id", "year", "has_xray_homolog"]].rename(
-            columns={"has_xray_homolog": "has_any_xray_homolog"}
+        """Check unfiltered current and historical searches, then count timings."""
+        metadata_columns = [
+            "year",
+            "sequence_identity_percent",
+            "nmr_core_start_seq_id",
+            "nmr_core_end_seq_id",
+            "nmr_query_sequence_length",
+        ]
+        columns = [
+            "entry_id",
+            *metadata_columns,
+            "has_xray_homolog",
+            "xray_homolog_entity_ids",
+        ]
+        for table, name in (
+            (regular_table, "current homolog CSV"),
+            (historical_table, "historical homolog CSV"),
+        ):
+            cls._validate_required_columns(table, set(columns), name)
+            duplicates = table.loc[table["entry_id"].duplicated(), "entry_id"]
+            if not duplicates.empty:
+                raise ValueError(f"Duplicate entry_id in {name}: {duplicates.iloc[0]}")
+
+        regular, historical = (
+            table[columns].assign(
+                **{
+                    column: table[column].map(cls._residue_id_text)
+                    for column in ("nmr_core_start_seq_id", "nmr_core_end_seq_id")
+                }
+            )
+            for table in (regular_table, historical_table)
         )
-        historical = historical_table[["entry_id", "has_xray_homolog"]].rename(
-            columns={"has_xray_homolog": "has_historical_xray_homolog"}
+        merged = regular.merge(
+            historical,
+            on="entry_id",
+            how="outer",
+            suffixes=("", "_historical"),
+            indicator=True,
         )
-        merged = regular.merge(historical, on="entry_id", how="left")
-        merged["has_historical_xray_homolog"] = (
-            merged["has_historical_xray_homolog"].fillna(0).astype(int)
+        regenerate = " Regenerate current and historical homolog CSVs together."
+        historical_only = merged.loc[merged["_merge"] == "right_only", "entry_id"]
+        if not historical_only.empty:
+            raise ValueError(
+                f"Historical homolog record {sorted(historical_only)[0]} is absent "
+                f"from the current homolog CSV.{regenerate}"
+            )
+        # The historical builder drops short queries and records with candidates
+        # whose dates are incomplete; the latter are excluded from the counts.
+        missing = merged["_merge"] == "left_only"
+        missing_without_candidates = merged.loc[
+            missing
+            & ~merged["has_xray_homolog"].astype(bool)
+            & (merged["nmr_query_sequence_length"] > 10),
+            "entry_id",
+        ]
+        if not missing_without_candidates.empty:
+            raise ValueError(
+                f"Current homolog record {sorted(missing_without_candidates)[0]} "
+                f"has no candidates but is absent from the historical homolog "
+                f"CSV.{regenerate}"
+            )
+        for row in merged.loc[~missing].itertuples(index=False):
+            current_metadata = tuple(
+                getattr(row, column) for column in metadata_columns
+            )
+            historical_metadata = tuple(
+                getattr(row, f"{column}_historical") for column in metadata_columns
+            )
+            current_ids = cls._homolog_entity_id_set(row.xray_homolog_entity_ids)
+            historical_ids = cls._homolog_entity_id_set(
+                row.xray_homolog_entity_ids_historical
+            )
+            if (
+                current_metadata != historical_metadata
+                or not historical_ids <= current_ids
+                or (row.has_xray_homolog_historical and not row.has_xray_homolog)
+            ):
+                raise ValueError(
+                    "Historical homolog CSV is stale or inconsistent for "
+                    f"{row.entry_id}.{regenerate}"
+                )
+        merged = cls._filter_monomer_xray_homolog_rows(merged.loc[~missing])
+        merged = merged.rename(
+            columns={
+                "has_xray_homolog": "has_any_xray_homolog",
+                "has_xray_homolog_historical": "has_historical_xray_homolog",
+            }
         )
         merged["status"] = XRAY_HOMOLOG_TIMING_LABELS[2]
         merged.loc[

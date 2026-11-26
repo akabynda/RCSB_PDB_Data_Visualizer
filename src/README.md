@@ -724,8 +724,33 @@ The plotter reads the standard CSVs in `data/`. An output path such as
 `figures/pdb_method_trends/pdb_method_trends.png`. Article figure names and
 title/frame variants are listed in the [output guide](../README.md#outputs).
 
-The homolog-timing plot also exports yearly counts. Membrane exports are
-specified in the [dataset reference](#solution_nmr_membrane_proteins).
+The homolog-timing plot joins the current and historical homolog CSVs at each
+cutoff by `entry_id`. It fails on:
+
+- duplicate `entry_id` values in either CSV;
+- historical records absent from the current CSV;
+- current records without candidates and with a query longer than 10 residues,
+  when the historical CSV lacks them;
+- joined records whose year, cutoff, core range or query length differ, whose
+  historical entity IDs are not a subset of the current ones, or whose
+  historical record has an X-ray homolog while the current one does not.
+
+Regenerate both homolog datasets together after rebuilding the current one.
+After these checks, the plot keeps joined records with queries longer than 10
+residues through the last plot year. A current record with candidates but no
+historical record, because the historical filter removed it, is excluded from
+the counts and the yearly denominator. Each kept record falls into one
+category:
+
+- released prior to deposition: the historical record has an X-ray homolog;
+- released at a later date: only the current record has an X-ray homolog;
+- no X-ray analog: neither record has one.
+
+Yearly category counts are written to
+`data/solution_nmr_monomer_xray_homologs_{95,100}_timing_counts_by_year.csv`.
+
+Membrane exports are specified in the [dataset
+reference](#solution_nmr_membrane_proteins).
 
 For the median precision plot,
 `--nmr-monomer-precision-secondary-structure-input PATH` requires

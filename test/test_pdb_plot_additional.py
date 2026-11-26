@@ -850,19 +850,38 @@ class PlotTableTransformationTests(unittest.TestCase):
         self.assertAlmostEqual(cumulative.loc[2020], 50.0)
         self.assertAlmostEqual(cumulative.loc[2021], 60.0)
 
-    def test_homolog_timing_counts_and_shares_cover_all_statuses(self) -> None:
-        regular = pd.DataFrame(
+    @staticmethod
+    def _timing_frame(rows: list[tuple[str, int, str]]) -> pd.DataFrame:
+        """Build homolog rows from ``(entry_id, year, entity_ids)`` tuples."""
+        return pd.DataFrame(
             {
-                "entry_id": ["prior", "later", "none", "none-2021"],
-                "year": [2020, 2020, 2020, 2021],
-                "has_xray_homolog": [1, 1, 0, 0],
+                "entry_id": [row[0] for row in rows],
+                "year": [row[1] for row in rows],
+                "sequence_identity_percent": [95] * len(rows),
+                "nmr_core_start_seq_id": [1] * len(rows),
+                "nmr_core_end_seq_id": [20] * len(rows),
+                "nmr_query_sequence_length": [20] * len(rows),
+                "has_xray_homolog": [int(bool(row[2])) for row in rows],
+                "xray_homolog_entity_ids": [row[2] or np.nan for row in rows],
             }
         )
-        historical = pd.DataFrame(
-            {
-                "entry_id": ["prior", "later", "none"],
-                "has_xray_homolog": [1, 0, 0],
-            }
+
+    def test_homolog_timing_counts_and_shares_cover_all_statuses(self) -> None:
+        regular = self._timing_frame(
+            [
+                ("prior", 2020, "1ABC_1;2DEF_1"),
+                ("later", 2020, "3GHI_1"),
+                ("none", 2020, ""),
+                ("none-2021", 2021, ""),
+            ]
+        )
+        historical = self._timing_frame(
+            [
+                ("prior", 2020, "1ABC_1"),
+                ("later", 2020, ""),
+                ("none", 2020, ""),
+                ("none-2021", 2021, ""),
+            ]
         )
 
         counts = self.plotter._build_xray_homolog_timing_count_table(
@@ -877,6 +896,124 @@ class PlotTableTransformationTests(unittest.TestCase):
         np.testing.assert_allclose(shares.loc[2020], [100 / 3, 100 / 3, 100 / 3])
         np.testing.assert_allclose(shares.loc[2021], [0.0, 0.0, 100.0])
         np.testing.assert_allclose(shares.loc[2022], [0.0, 0.0, 0.0])
+
+    def test_homolog_timing_counts_drop_records_excluded_from_history(self) -> None:
+        regular = self._timing_frame(
+            [
+                ("prior", 2020, "1ABC_1"),
+                ("date-excluded", 2020, "2DEF_1"),
+                ("none", 2020, ""),
+            ]
+        )
+        historical = self._timing_frame([("prior", 2020, "1ABC_1"), ("none", 2020, "")])
+
+        counts = self.plotter._build_xray_homolog_timing_count_table(
+            regular, historical
+        )
+
+        self.assertEqual(counts.loc[2020].tolist(), [1, 0, 1])
+
+    def test_homolog_timing_counts_apply_plot_filters_after_checks(self) -> None:
+        regular = self._timing_frame(
+            [("kept", 2020, "1ABC_1"), ("short", 2020, ""), ("late", 2025, "")]
+        )
+        regular.loc[1, "nmr_query_sequence_length"] = 8
+        historical = self._timing_frame([("kept", 2020, "1ABC_1"), ("late", 2025, "")])
+
+        counts = self.plotter._build_xray_homolog_timing_count_table(
+            regular, historical
+        )
+
+        self.assertEqual(counts.index.tolist(), [2020])
+        self.assertEqual(counts.loc[2020].tolist(), [1, 0, 0])
+
+    def test_homolog_timing_counts_compare_core_ids_as_text(self) -> None:
+        # An insertion code makes pandas read the current core column as text.
+        regular = self._timing_frame(
+            [("kept", 2020, "1ABC_1"), ("insertion-code", 2020, "2DEF_1")]
+        )
+        regular["nmr_core_end_seq_id"] = ["20", "56E"]
+        historical = self._timing_frame([("kept", 2020, "1ABC_1")])
+
+        counts = self.plotter._build_xray_homolog_timing_count_table(
+            regular, historical
+        )
+
+        self.assertEqual(counts.loc[2020].tolist(), [1, 0, 0])
+
+    def test_homolog_timing_counts_reject_inconsistent_inputs(self) -> None:
+        regular_rows = [("a", 2020, "1ABC_1"), ("b", 2020, "")]
+        cases = {
+            "duplicate current": (
+                regular_rows + [("b", 2020, "")],
+                regular_rows,
+                "Duplicate entry_id",
+            ),
+            "duplicate historical": (
+                regular_rows,
+                regular_rows + [("b", 2020, "")],
+                "Duplicate entry_id",
+            ),
+            "historical only": (
+                regular_rows,
+                regular_rows + [("c", 2020, "")],
+                "absent from the current",
+            ),
+            "missing record without candidates": (
+                regular_rows,
+                regular_rows[:1],
+                "absent from the historical",
+            ),
+            "empty historical": (regular_rows, [], "absent from the historical"),
+            "metadata mismatch": (
+                regular_rows,
+                [("a", 2021, "1ABC_1"), ("b", 2020, "")],
+                "stale or inconsistent",
+            ),
+            "historical homolog not current": (
+                regular_rows,
+                [("a", 2020, "9XYZ_1"), ("b", 2020, "")],
+                "stale or inconsistent",
+            ),
+            "historical homolog without current homolog": (
+                regular_rows,
+                [("a", 2020, "1ABC_1"), ("b", 2020, "1ABC_1")],
+                "stale or inconsistent",
+            ),
+            "historical flag without current flag": (
+                regular_rows,
+                regular_rows,
+                "stale or inconsistent",
+                {"has_xray_homolog": [1, 1]},
+            ),
+            "historical query too short": (
+                regular_rows,
+                regular_rows,
+                "stale or inconsistent",
+                {"nmr_query_sequence_length": [5, 20]},
+            ),
+            "historical year after plot range": (
+                regular_rows,
+                regular_rows,
+                "stale or inconsistent",
+                {"year": [2025, 2020]},
+            ),
+            "core range mismatch": (
+                regular_rows,
+                regular_rows,
+                "stale or inconsistent",
+                {"nmr_core_end_seq_id": [20, 21]},
+            ),
+        }
+        for name, case in cases.items():
+            regular_rows_case, historical_rows, message = case[:3]
+            historical = self._timing_frame(historical_rows)
+            for column, values in (case[3] if len(case) > 3 else {}).items():
+                historical[column] = values
+            with self.subTest(name), self.assertRaisesRegex(ValueError, message):
+                self.plotter._build_xray_homolog_timing_count_table(
+                    self._timing_frame(regular_rows_case), historical
+                )
 
     def test_write_homolog_timing_counts_uses_stable_csv_schema(self) -> None:
         counts = pd.DataFrame(
@@ -1211,8 +1348,14 @@ class PlotOrchestrationTests(unittest.TestCase):
                 "entry_id": [f"entry-{index}" for index in range(len(flags))],
                 "year": [2020 + index // 2 for index in range(len(flags))],
                 "sequence_identity_percent": [95] * len(flags),
+                "nmr_core_start_seq_id": [1] * len(flags),
+                "nmr_core_end_seq_id": [20] * len(flags),
                 "nmr_query_sequence_length": [20] * len(flags),
                 "has_xray_homolog": flags,
+                "xray_homolog_entity_ids": [
+                    f"{index}ABC_1" if flag else np.nan
+                    for index, flag in enumerate(flags)
+                ],
             }
         )
 
@@ -1572,6 +1715,26 @@ class PlotOrchestrationTests(unittest.TestCase):
         first_cumulative = lines.call_args_list[0].kwargs["y_values"]
         self.assertEqual(first_annual.loc[2020], 50.0)
         self.assertAlmostEqual(first_cumulative.loc[2021], 200.0 / 3.0)
+
+    def test_homolog_timing_plot_checks_rows_outside_plot_filters(self) -> None:
+        regular = self._homolog_frame([1, 0])
+        for column, value in (("nmr_query_sequence_length", 5), ("year", 2025)):
+            historical = self._homolog_frame([1, 0])
+            historical.loc[0, column] = value
+            with (
+                self.subTest(column),
+                patch.object(
+                    self.plotter,
+                    "_read_csv",
+                    side_effect=[regular, historical, regular, regular],
+                ),
+                patch.object(self.plotter, "_scientific_style"),
+                self.assertRaisesRegex(ValueError, "stale or inconsistent"),
+            ):
+                self.plotter.plot_solution_nmr_monomer_xray_homolog_timing_share(
+                    *(Path(f"{index}.csv") for index in range(6)),
+                    *(Path(f"{index}.png") for index in range(4)),
+                )
 
     def test_homolog_timing_plot_writes_and_renders_both_thresholds(self) -> None:
         regular_95 = self._homolog_frame([1, 1, 0])
