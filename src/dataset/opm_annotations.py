@@ -28,6 +28,9 @@ OPM_RESIDUE_COLUMNS = (
 )
 # PDB coordinates have three decimals, so paired OPM planes agree within this bound.
 OPM_PLANE_ATOL = 1e-3
+# Sums of three-decimal coordinates are rounded to this many decimals before the
+# comparison: binary floats put some exact 0.001 Å differences slightly above 1e-3.
+OPM_PLANE_SUM_DECIMALS = 6
 
 
 def collect_modeled_residues(model_text, chain_rows, polymer_metadata, chain_id_map):
@@ -104,7 +107,8 @@ def parse_opm_coordinates(text):
         # The first alternate position of an atom represents it.
         atoms[key].setdefault(atom_name, z)
         names.setdefault(key, name)
-    if len(planes) not in {1, 2} or (len(planes) == 2 and abs(sum(planes)) > OPM_PLANE_ATOL):
+    center_offset = round(abs(sum(planes)), OPM_PLANE_SUM_DECIMALS)
+    if len(planes) not in {1, 2} or (len(planes) == 2 and center_offset > OPM_PLANE_ATOL):
         raise ValueError(f"Unexpected OPM membrane planes: {sorted(planes)}")
     half_thickness = max(abs(z) for z in planes)
     if half_thickness <= 0:

@@ -63,6 +63,17 @@ def test_invalid_opm_geometry_fails_instead_of_guessing(text):
         parse_opm_coordinates(text)
 
 
+@pytest.mark.parametrize('lower, upper', [(-15., 15.001), (-15.95, 15.951), (-16.2, 16.201), (-20., 20.001)])
+def test_planes_differing_by_exactly_the_tolerance_are_accepted(lower, upper):
+    # Binary floats make some exact 0.001 Å sums slightly larger than 1e-3.
+    assert parse_opm_coordinates(planes(lower, upper) + atom(1))[0] == upper
+
+
+def test_planes_differing_by_more_than_the_tolerance_are_rejected():
+    with pytest.raises(ValueError):
+        parse_opm_coordinates(planes(-15., 15.002) + atom(1))
+
+
 def test_boundary_is_inclusive_and_symmetric():
     positions = {('A', number, ''): {'name': 'ALA', 'mean_z': z}
                  for number, z in ((1, -15.), (2, 15.), (3, 15.001), (4, -15.001), (5, 0.))}
