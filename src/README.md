@@ -221,7 +221,10 @@ remain. X-ray sequence matching and homolog eligibility still use the full core,
 and all saved candidates are evaluated before choosing the minimum RMSD.
 The span follows coordinate-record order, including insertion codes, rather
 than numeric or lexical sorting. The first model defines its full set of IDs;
-a missing endpoint in another model cannot change that span.
+a missing endpoint in another model cannot change that span. Precision and X-ray
+RMSD exclude an entry, with a reason, when a saved core endpoint is absent from
+the first model; X-ray RMSD also excludes it when the core CA count differs from
+`nmr_query_sequence_length` in the homolog CSV.
 
 ## STRIDE
 

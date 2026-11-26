@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from collections.abc import Iterable
 from pathlib import Path
 
 import numpy as np
@@ -40,6 +41,23 @@ def _residue_keys_in_range(
         for key in keys
         if (start is None or key >= start) and (end is None or key <= end)
     ]
+
+
+def missing_core_endpoint_message(
+    keys: Iterable[ResidueId],
+    start_seq_id: ResidueId | int,
+    end_seq_id: ResidueId | int,
+) -> str | None:
+    """Report a saved core whose endpoints are not both first-model positions."""
+    # Keys may already be sliced, which can drop a present endpoint as well.
+    start, end = parse_residue_id(start_seq_id), parse_residue_id(end_seq_id)
+    present = set(keys)
+    if start in present and end in present:
+        return None
+    return (
+        f"core range {start} to {end} has an endpoint missing from the first "
+        "coordinate model"
+    )
 
 
 def extract_model_pdb_texts(pdb_path: Path) -> list[str]:

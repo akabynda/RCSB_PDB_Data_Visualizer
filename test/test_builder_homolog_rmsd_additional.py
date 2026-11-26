@@ -12,6 +12,7 @@ from unittest.mock import Mock, patch
 import numpy as np
 import pytest
 
+from src.dataset.records import CAResidueRecord
 from src.pdb_dataset_builder import (
     DatasetBuildConfig,
     NMRHomologyQueryIneligibleError,
@@ -55,6 +56,13 @@ def _homolog(
         xray_homolog_entity_ids=entity_ids,
         has_xray_homolog=bool(entity_ids),
     )
+
+
+# Matches _homolog(): core 1-20 with a 20-residue query.
+_PREPARED_CORE_1_TO_20 = (
+    tuple(CAResidueRecord(resid, "A", True) for resid in range(1, 21)),
+    {},
+)
 
 
 def _candidate(
@@ -571,7 +579,7 @@ def test_compute_candidate_records_reports_guard_and_failure_reasons(
             patch.object(
                 rmsd_builder,
                 "_prepare_nmr_core_data",
-                return_value=(tuple(), {}),
+                return_value=_PREPARED_CORE_1_TO_20,
             ),
             patch.object(rmsd_builder, "_compute_candidate_record", return_value=None),
         ):
@@ -597,7 +605,7 @@ def test_compute_candidate_records_reports_guard_and_failure_reasons(
             patch.object(
                 rmsd_builder,
                 "_prepare_nmr_core_data",
-                return_value=(tuple(), {}),
+                return_value=_PREPARED_CORE_1_TO_20,
             ),
             patch.object(
                 rmsd_builder,
@@ -1021,3 +1029,92 @@ def test_csv_wrappers_require_homolog_records(
             )
 
     builder_class.assert_not_called()
+
+
+def _write_nmr_core_pdb(path: Path, residues: list[int]) -> None:
+    """Write two identical standard-CA models for NMR core checks."""
+    lines = []
+    for model in (1, 2):
+        lines.append(f"MODEL     {model:>4}\n")
+        for serial, resid in enumerate(residues, 1):
+            lines.append(
+                f"ATOM  {serial:>5}  CA  ALA N{resid:>4}    "
+                f"{3.8 * serial:8.3f}{0.0:8.3f}{0.0:8.3f}  1.00  0.00           C  \n"
+            )
+        lines.append("ENDMDL\n")
+    path.write_text("".join(lines) + "END\n", encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    ("residues", "core_end", "reason"),
+    [
+        (
+            list(range(1, 27)),
+            30,
+            "NMR core range 1 to 30 has an endpoint missing from the first coordinate model",
+        ),
+        (
+            [resid for resid in range(1, 27) if resid != 10],
+            26,
+            "NMR core has 25 CA residues, but the homolog query had 26",
+        ),
+    ],
+)
+def test_compute_candidate_records_rejects_a_core_that_no_longer_matches(
+    tmp_path: Path,
+    residues: list[int],
+    core_end: int,
+    reason: str,
+) -> None:
+    """Exclude entries whose saved core no longer matches the coordinate file."""
+    _write_nmr_core_pdb(tmp_path / "nmr.pdb", residues)
+    rmsd_builder = _rmsd_builder(tmp_path)
+    homolog = replace(
+        _homolog("STALE", core_end=core_end), nmr_query_sequence_length=26
+    )
+    with (
+        patch.object(
+            rmsd_builder, "_download_pdb_if_needed", return_value=tmp_path / "nmr.pdb"
+        ),
+        patch.object(
+            dataset_builders_xray_rmsd, "load_cached_chain_id_map", return_value={}
+        ),
+        patch.object(rmsd_builder, "_compute_candidate_record") as compute_candidate,
+        patch.object(
+            dataset_builders_xray_rmsd, "_record_filtered_structure"
+        ) as record_filtered,
+    ):
+        assert (
+            rmsd_builder._compute_candidate_records(
+                homolog=homolog,
+                nmr_chain_id="N",
+                candidates=(_candidate("1AAA_1"),),
+            )
+            == ()
+        )
+    compute_candidate.assert_not_called()
+    record_filtered.assert_called_once_with("STALE", reason, year=2000)
+
+
+def test_compute_candidate_records_keeps_a_core_that_matches(tmp_path: Path) -> None:
+    """Compute candidates when the saved core endpoints and length still match."""
+    _write_nmr_core_pdb(tmp_path / "nmr.pdb", list(range(1, 27)))
+    rmsd_builder = _rmsd_builder(tmp_path)
+    homolog = replace(_homolog("MATCH", core_end=26), nmr_query_sequence_length=26)
+    successful = _rmsd("MATCH", "1AAA_1")
+    with (
+        patch.object(
+            rmsd_builder, "_download_pdb_if_needed", return_value=tmp_path / "nmr.pdb"
+        ),
+        patch.object(
+            dataset_builders_xray_rmsd, "load_cached_chain_id_map", return_value={}
+        ),
+        patch.object(
+            rmsd_builder, "_compute_candidate_record", return_value=successful
+        ),
+    ):
+        assert rmsd_builder._compute_candidate_records(
+            homolog=homolog,
+            nmr_chain_id="N",
+            candidates=(_candidate("1AAA_1"),),
+        ) == (successful,)

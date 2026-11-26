@@ -322,3 +322,12 @@ def test_precision_input_keeps_entries_that_pass_the_coordinate_filter(tmp_path)
         result = builder._recompute_record(record)
     assert result is not None
     assert result.n_ca_core_used == 6
+
+
+def test_precision_rejects_a_core_endpoint_missing_from_the_first_model(tmp_path):
+    _precision_input_pdb(tmp_path / "TEST.pdb", [range(1, 27)] * 2)
+    result, reason = SolutionNMRMonomerPrecisionBuilder._compute_mean_rmsd_to_average(
+        tmp_path / "TEST.pdb", "A", 5, 30
+    )
+    assert result is None
+    assert reason == "core range 5 to 30 has an endpoint missing from the first coordinate model"

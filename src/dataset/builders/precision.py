@@ -16,6 +16,7 @@ from src.dataset.config import (
     LOGGER,
 )
 from src.dataset.coordinates import (
+    missing_core_endpoint_message,
     parse_first_model_ca_residues,
     parse_first_model_modeled_ca_auth_seq_ids,
     parse_models_ca_coords_with_stats,
@@ -106,6 +107,12 @@ class SolutionNMRMonomerPrecisionBuilder:
                 None,
                 f"fewer than 2 coordinate models in core range (found {len(model_maps)})",
             )
+        # A missing endpoint would silently shorten the core to a numeric range.
+        endpoint_issue = missing_core_endpoint_message(
+            model_maps[0], start_seq_id, end_seq_id
+        )
+        if endpoint_issue is not None:
+            return None, endpoint_issue
 
         common_resids = set(model_maps[0].keys())
         for model_map in model_maps[1:]:

@@ -537,7 +537,7 @@ def test_precision_computation_rejects_small_intersection_and_counts_raw_fallbac
         )
         result, reason = (
             module.SolutionNMRMonomerPrecisionBuilder._compute_mean_rmsd_to_average(
-                tmp_path / "unused.pdb", "A", 1, 4
+                tmp_path / "unused.pdb", "A", 1, 3
             )
         )
         complete_result, complete_reason = (

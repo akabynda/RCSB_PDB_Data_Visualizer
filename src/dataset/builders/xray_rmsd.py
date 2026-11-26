@@ -18,6 +18,7 @@ from src.dataset.config import (
     LOGGER,
 )
 from src.dataset.coordinates import (
+    missing_core_endpoint_message,
     parse_first_model_ca_residues,
     parse_models_ca_coords,
 )
@@ -61,6 +62,26 @@ if TYPE_CHECKING:
         SolutionNMRMonomerXrayHomologRecord,
         XrayPolymerEntityCandidateRecord,
     )
+
+
+def _nmr_core_mismatch_reason(
+    homolog: SolutionNMRMonomerXrayHomologRecord,
+    core_keys: list[ResidueId],
+) -> str | None:
+    """Check that the saved NMR core still matches the coordinate file."""
+    endpoint_issue = missing_core_endpoint_message(
+        core_keys, homolog.nmr_core_start_seq_id, homolog.nmr_core_end_seq_id
+    )
+    if endpoint_issue is not None:
+        return f"NMR {endpoint_issue}"
+    # The homolog query sequence had one letter per first-model core CA.
+    expected = homolog.nmr_query_sequence_length
+    if expected and len(core_keys) != expected:
+        return (
+            f"NMR core has {len(core_keys)} CA residues, but the homolog query "
+            f"had {expected}"
+        )
+    return None
 
 
 def _xray_rmsd_records_for_homolog_view(
@@ -478,6 +499,14 @@ class SolutionNMRMonomerXrayRmsdBuilder:
                     homolog.entry_id,
                     "NMR core cannot be prepared for X-ray RMSD",
                     year=homolog.year,
+                )
+                return tuple()
+            core_issue = _nmr_core_mismatch_reason(
+                homolog, [record.key for record in prepared_nmr_core[0]]
+            )
+            if core_issue is not None:
+                _record_filtered_structure(
+                    homolog.entry_id, core_issue, year=homolog.year
                 )
                 return tuple()
 
